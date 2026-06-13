@@ -1,0 +1,62 @@
+{
+  "theme": "Light",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "rationale": "Enterprise tax and finance tools require maximum clarity, authority, and objective data presentation. A light theme with high contrast ensures readability for dense data tables and complex forms.",
+  "typography": {
+    "heading_font": "Satoshi",
+    "body_font": "IBM Plex Sans",
+    "heading_classes": "font-bold tracking-tight text-slate-900",
+    "body_classes": "text-slate-700 leading-relaxed",
+    "guidelines": "Use tight letter spacing (tracking-tight) for headings above 24px. Do NOT use Inter or Roboto for headings. Keep hierarchy strict."
+  },
+  "colors": {
+    "background": "#ffffff",
+    "surface": "#f8fafc",
+    "primary": "#0f172a",
+    "primary_hover": "#1e293b",
+    "accent": "#2563eb",
+    "success": "#059669",
+    "error": "#dc2626",
+    "warning": "#d97706",
+    "border": "#e2e8f0"
+  },
+  "layout_strategy": {
+    "spacing": "Dense 'Control Room' grid layout for the dashboard. Use p-4 to p-6 for widget cards. Maintain tight gap (gap-4 or gap-6) to keep data correlated.",
+    "alignment": "Left-align forms, lists, and tabular data. Optical alignment over strict geometric alignment for icons.",
+    "surfaces": "Use 'Grid Borders' or flat surfaces. Avoid heavy soft shadows. Use 1px subtle borders (border-slate-200) to define containers."
+  },
+  "components": {
+    "navigation": "Top Header or left Sidebar. Must include a clear Environment Selector (Pre-Producción vs Producción) and the application logo.",
+    "cards": "Flat, cardless feel or strict rectangular boxes with 1px border. No rounding greater than 8px (rounded-md).",
+    "tables": "Shadcn UI Table. Essential for 'Histórico de consultas'. Needs to handle dense data, pagination, and sticky headers.",
+    "forms": "Shadcn UI Form, Input, Select. For 'Consulta Unitaria', use a 2-column CSS grid on desktop to save vertical space. Left-aligned labels.",
+    "modals": "Shadcn UI Dialog or Sheet for viewing 'Detalle de respuesta' (raw XML/JSON data)."
+  },
+  "image_urls": [
+    {
+      "url": "https://images.unsplash.com/photo-1633419461186-7d40a38105ec?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTF8MHwxfHNlYXJjaHwxfHxtaW5pbWFsJTIwYWJzdHJhY3QlMjBsb2dvJTIwaWNvbnxlbnwwfHx8fDE3ODEzMzEyMjB8MA&ixlib=rb-4.1.0&q=85",
+      "category": "logo",
+      "description": "Minimal abstract square logo for the application branding"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1758073519996-6d3c63b4922c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MjJ8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGdlb21ldHJpYyUyMGRhdGElMjBibHVlfGVufDB8fHx8MTc4MTMzMTIyMHww&ixlib=rb-4.1.0&q=85",
+      "category": "background",
+      "description": "Abstract blue geometric data wave, suitable for a login screen or a subtle header texture"
+    }
+  ],
+  "accessibility_and_testing": {
+    "data_testid_convention": "All interactive elements MUST include data-testid. Format: kebab-case, role-based (e.g., unit-query-submit-button, env-selector-dropdown).",
+    "contrast": "Ensure minimum 4.5:1 ratio for normal text. Use APCA guidelines."
+  },
+  "instructions_to_main_agent": [
+    "Language: Implement all UI text in Spanish.",
+    "Mocking: Implement a mocked service for the SOAP SII API, generating random accepted/rejected/error responses.",
+    "Dashboard: Build a summary view with key stats (total, accepted, rejected ratios) using Shadcn Charts or Recharts.",
+    "Consulta Unitaria: Build a comprehensive form (NIF titular, ejercicio, periodo, NIF emisor, num factura, fecha).",
+    "Consulta Batch: Implement a CSV file upload interface.",
+    "Histórico: Implement a paginated list/table of past queries with a 'View Details' action.",
+    "Detalle: Show the simulated parsed SOAP response and raw XML in a structured format.",
+    "Icons: Use lucide-react.",
+    "Do NOT use generic Inter for headings. Setup 'Satoshi' via Google Fonts or Fontshare, and 'IBM Plex Sans' for body text."
+  ]
+}
