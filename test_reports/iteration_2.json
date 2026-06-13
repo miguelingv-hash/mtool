@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 2: regression of 16 previous tests + 9 new backend tests for real/mock switch & cert upload. 24/25 backend tests pass (1 real backend bug). Frontend toggle UI verified across UnitQuery, BatchQuery and detail sheet; 1 real frontend bug found in UnitQuery submit logic.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/sii/consulta-batch (with invalid certificate)",
+        "issue": "Returns 200 with sii_mode='real', total=0, errores_validacion=N instead of HTTP 400 'No se pudo leer el PKCS#12'. Root cause: ZeepSIIClient does not validate the PKCS#12 in __init__; PEM extraction is lazy in consultar(). When build_client() returns it, the per-row try/except (Exception) in consulta_batch() swallows the ValueError row-by-row. Spec requires immediate 400 and no row processing.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "UnitQuery.jsx onSubmit",
+        "issue": "When cert toggle is ON and no PFX file is selected, the form silently posts to the JSON endpoint /sii/consulta-unitaria (success toast 'Consulta enviada...') instead of showing the required toast 'Aporta el certificado .pfx o desactiva el modo real' and aborting. Also: it never sends a multipart request with certificate, so the cert.enabled state has no functional effect besides changing button text. BatchQuery.jsx already implements the required check (handleUpload). UnitQuery must (1) early-return with that toast when cert.enabled && !cert.file, and (2) call POST /api/sii/consulta-unitaria-cert as multipart/form-data when cert.enabled && cert.file.",
+        "selector": "[data-testid='submit-unit-query']",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_sii_api.py",
+    "/app/backend/tests/test_sii_cert.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "BACKEND: In server.py consulta_batch, validate the PKCS#12 once upfront when cert_bytes are present (e.g. instantiate ZeepSIIClient and force _extract_pem() inside the try/except ValueError) so a bad PFX yields HTTP 400 immediately and no rows are processed. Alternative: make ZeepSIIClient.__init__ eagerly call _extract_pem() and raise ValueError, then catch in consulta_batch's build_client try block.",
+    "FRONTEND: In /app/frontend/src/pages/UnitQuery.jsx onSubmit, add the same guard as BatchQuery: if (cert.enabled && !cert.file) { toast.error('Aporta el certificado .pfx o desactiva el modo real'); return; } and switch to POST /sii/consulta-unitaria-cert as multipart/form-data when cert.enabled && cert.file (forwarding cert.file, cert.password and mode='real')."
+  ],
+  "critical_code_review_comments": [
+    "UnitQuery does not actually use the cert.file/password it collects; the multipart endpoint /sii/consulta-unitaria-cert is exposed by the backend but never invoked by the UI. The cert.enabled flag only changes the submit button label. Spec breach.",
+    "ZeepSIIClient.__init__ accepts pfx_bytes but defers cryptography parsing to consultar(); this defeats the build_client try/except in consulta_batch and yields misleading 200 responses on bad certs. Move PEM extraction (or at least pkcs12.load_key_and_certificates) into __init__.",
+    "Per-row except Exception in consulta_batch silently swallows certificate failures; consider differentiating ValueError from per-row validation errors so the surrounding endpoint can fail fast on systemic issues.",
+    "The hidden file input <input className='hidden'> in CertUploader is reachable via label click; Playwright .is_visible() returns false. Not a bug — using DOM-presence checks for the file input is fine.",
+    "server.py still uses deprecated @app.on_event('shutdown') — consider FastAPI lifespan."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_sii_cert.py (new, 9 tests)"
+  ],
+  "success_rate": {"backend": "96% (24/25)", "frontend": "92% (12/13 spec checks)"},
+  "seed_data_creation": "Several extra mock consultas (unit and batch) created during testing; persisted in MongoDB consultas collection.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend: 25 pytest tests in /app/backend/tests/test_sii_api.py + /app/backend/tests/test_sii_cert.py. The failing case is test_batch_invalid_pkcs12_returns_400 — once fixed (eager PFX validation in ZeepSIIClient.__init__ or in consulta_batch before the row loop) all should pass. Frontend: UnitQuery does NOT yet call /sii/consulta-unitaria-cert; after fix, retest by uploading any bytes as a fake PFX with toggle ON, expecting a toast with 'No se pudo leer el PKCS#12' from the backend 400 response. The 'Modo invocación' row IS present in the detail sheet (it just renders uppercase due to CSS — use case-insensitive assertions). The hidden file input has class='hidden'; use DOM-attached checks instead of is_visible.",
+  "rca of the issue": "Backend: ZeepSIIClient does lazy PFX parsing. consulta_batch's broad per-row except Exception then masks ValueError as a row-level error → endpoint returns 200 with sii_mode=real and total=0. Fix: parse PKCS#12 in ZeepSIIClient.__init__ so build_client() raises immediately → caught by the existing try/except ValueError → HTTPException 400. Frontend: UnitQuery.jsx only changes the button label based on cert.enabled but always posts JSON; missing the equivalent of BatchQuery.handleUpload's `if (cert.enabled && !cert.file)` guard and the conditional FormData branch with /sii/consulta-unitaria-cert."
+}

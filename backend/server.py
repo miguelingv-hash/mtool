@@ -1,24 +1,36 @@
 """
 SII Consulta API
 ================
-Servicio FastAPI que simula la consulta del estado de facturas emitidas
-contra el servicio SOAP del SII (Suministro Inmediato de Información) de la
-Agencia Tributaria Española.
+Servicio FastAPI que consulta el estado de facturas emitidas en el SII de la
+Agencia Tributaria Española (servicio SOAP ConsultaLRFactEmitidas, WSDL v1.1).
 
-WSDL referencia:
+Soporta dos modos:
+  - ``mock``  → respuestas simuladas deterministas (desarrollo).
+  - ``real``  → invocación SOAP real con autenticación mTLS por certificado
+                PKCS#12 (.pfx/.p12), implementada con `zeep`.
+
+El modo activo se decide en este orden de prioridad:
+  1. Certificado aportado en la petición (campo ``certificate``) ⇒ ``real``.
+  2. Cabecera/parámetro ``mode`` explícito en la petición.
+  3. Variable de entorno ``SII_MODE`` (por defecto ``mock``).
+
+WSDL:
 https://sede.agenciatributaria.gob.es/static_files/Sede/Procedimiento_ayuda/G417/FicherosSuministros/V_1_1/WSDL/SuministroFactEmitidas.wsdl
-
-En esta versión el servicio SOAP está MOCKEADO: las respuestas se generan de
-forma determinista a partir de los datos de entrada para facilitar el
-desarrollo y la integración futura con el servicio real.
 """
 
-from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Form
+from fastapi import (
+    FastAPI,
+    APIRouter,
+    UploadFile,
+    File,
+    HTTPException,
+    Form,
+)
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, ValidationError
 from typing import List, Optional, Literal
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,9 +38,7 @@ import os
 import uuid
 import csv
 import io
-import hashlib
 import logging
-import random
 
 
 ROOT_DIR = Path(__file__).parent
@@ -38,7 +48,7 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
-app = FastAPI(title="SII Consulta API", version="1.0.0")
+app = FastAPI(title="SII Consulta API", version="1.1.0")
 api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(
@@ -49,50 +59,7 @@ logger = logging.getLogger("sii")
 
 
 # ---------------------------------------------------------------------------
-# Constantes SII
-# ---------------------------------------------------------------------------
-
-WSDL_URL = (
-    "https://sede.agenciatributaria.gob.es/static_files/Sede/"
-    "Procedimiento_ayuda/G417/FicherosSuministros/V_1_1/WSDL/"
-    "SuministroFactEmitidas.wsdl"
-)
-
-ENDPOINTS = {
-    "preproduccion": (
-        "https://prewww1.aeat.es/wlpl/SSII-FACT/ws/fe/"
-        "ConsultaLRFactEmitidas"
-    ),
-    "produccion": (
-        "https://www1.agenciatributaria.gob.es/wlpl/SSII-FACT/ws/fe/"
-        "ConsultaLRFactEmitidas"
-    ),
-}
-
-# Estados posibles de una factura según el SII
-ESTADOS_FACTURA = [
-    "Correcta",
-    "AceptadaConErrores",
-    "Anulada",
-    "NoRegistrada",
-]
-
-CODIGOS_ERROR = {
-    "Correcta": (None, None),
-    "AceptadaConErrores": (
-        "3000",
-        "El NIF del destinatario no está identificado en la base de datos de la AEAT",
-    ),
-    "Anulada": ("1108", "Factura anulada por el suministrador"),
-    "NoRegistrada": (
-        "4102",
-        "La factura no ha sido registrada en el SII",
-    ),
-}
-
-
-# ---------------------------------------------------------------------------
-# Modelos
+# Modelos (referenciados por sii_client.py - imports diferidos allí)
 # ---------------------------------------------------------------------------
 
 
@@ -108,13 +75,11 @@ class ConsultaInput(BaseModel):
     nif_emisor: str = Field(..., min_length=8, max_length=15)
     nombre_emisor: Optional[str] = Field(default=None, max_length=120)
     num_serie_factura: str = Field(..., min_length=1, max_length=60)
-    fecha_expedicion: str = Field(..., pattern=r"^\d{2}-\d{2}-\d{4}$")  # dd-mm-yyyy
+    fecha_expedicion: str = Field(..., pattern=r"^\d{2}-\d{2}-\d{4}$")
     entorno: Literal["preproduccion", "produccion"] = "preproduccion"
 
 
 class RespuestaSII(BaseModel):
-    """Respuesta parseada del servicio SOAP del SII."""
-
     estado_envio: str
     estado_factura: str
     codigo_error_registro: Optional[str] = None
@@ -127,8 +92,6 @@ class RespuestaSII(BaseModel):
 
 
 class ConsultaRecord(BaseModel):
-    """Registro persistido de una consulta (entrada + respuesta + xml)."""
-
     model_config = ConfigDict(extra="ignore")
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -136,6 +99,7 @@ class ConsultaRecord(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     modo: Literal["unitaria", "batch"] = "unitaria"
+    sii_mode: Literal["mock", "real"] = "mock"
     batch_id: Optional[str] = None
     entrada: ConsultaInput
     respuesta: RespuestaSII
@@ -145,6 +109,7 @@ class ConsultaRecord(BaseModel):
 
 class BatchResumen(BaseModel):
     batch_id: str
+    sii_mode: str
     total: int
     correctas: int
     aceptadas_con_errores: int
@@ -163,144 +128,67 @@ class StatsResponse(BaseModel):
     ultimas: List[ConsultaRecord]
 
 
+class SIIConfigResponse(BaseModel):
+    default_mode: Literal["mock", "real"]
+    server_cert_configured: bool
+    real_mode_available: bool
+    wsdl: str
+    endpoints: dict
+
+
+# Importar tras definir modelos (sii_client hace `from server import ...`)
+from sii_client import (  # noqa: E402
+    ENDPOINTS,
+    WSDL_URL,
+    build_client,
+    get_default_mode,
+    server_cert_configured,
+)
+
+
 # ---------------------------------------------------------------------------
-# Mock del servicio SOAP
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-def _deterministic_estado(entrada: ConsultaInput) -> str:
-    """Genera un estado de factura determinista a partir de la entrada.
-
-    Esto permite que la misma factura consultada dos veces devuelva siempre el
-    mismo estado, simulando el comportamiento real del SII.
-    """
-    seed = f"{entrada.nif_emisor}|{entrada.num_serie_factura}|{entrada.fecha_expedicion}"
-    digest = hashlib.sha256(seed.encode()).hexdigest()
-    bucket = int(digest[:4], 16) % 100
-    # Distribución: 65% Correcta, 20% AceptadaConErrores, 8% Anulada, 7% NoRegistrada
-    if bucket < 65:
-        return "Correcta"
-    if bucket < 85:
-        return "AceptadaConErrores"
-    if bucket < 93:
-        return "Anulada"
-    return "NoRegistrada"
+async def _read_cert(certificate: Optional[UploadFile]) -> Optional[bytes]:
+    if certificate is None:
+        return None
+    data = await certificate.read()
+    if not data:
+        return None
+    return data
 
 
-def _build_soap_request_xml(entrada: ConsultaInput) -> str:
-    return f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                  xmlns:sii="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroLR.xsd"
-                  xmlns:sii1="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/ConsultaLR.xsd"
-                  xmlns:sii2="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroInformacion.xsd">
-  <soapenv:Header/>
-  <soapenv:Body>
-    <sii1:ConsultaLRFactEmitidas>
-      <sii:Cabecera>
-        <sii:IDVersionSii>1.1</sii:IDVersionSii>
-        <sii:Titular>
-          <sii2:NombreRazon>{entrada.nombre_titular}</sii2:NombreRazon>
-          <sii2:NIF>{entrada.nif_titular}</sii2:NIF>
-        </sii:Titular>
-      </sii:Cabecera>
-      <sii1:FiltroConsulta>
-        <sii1:PeriodoLiquidacion>
-          <sii:Ejercicio>{entrada.ejercicio}</sii:Ejercicio>
-          <sii:Periodo>{entrada.periodo}</sii:Periodo>
-        </sii1:PeriodoLiquidacion>
-        <sii1:IDFactura>
-          <sii1:IDEmisorFactura>
-            <sii2:NIF>{entrada.nif_emisor}</sii2:NIF>
-          </sii1:IDEmisorFactura>
-          <sii1:NumSerieFacturaEmisor>{entrada.num_serie_factura}</sii1:NumSerieFacturaEmisor>
-          <sii1:FechaExpedicionFacturaEmisor>{entrada.fecha_expedicion}</sii1:FechaExpedicionFacturaEmisor>
-        </sii1:IDFactura>
-      </sii1:FiltroConsulta>
-    </sii1:ConsultaLRFactEmitidas>
-  </soapenv:Body>
-</soapenv:Envelope>"""
+def _resolve_mode(mode: Optional[str], has_cert: bool) -> str:
+    if has_cert:
+        return "real"
+    return (mode or get_default_mode()).lower()
 
 
-def _build_soap_response_xml(entrada: ConsultaInput, respuesta: RespuestaSII) -> str:
-    err_block = ""
-    if respuesta.codigo_error_registro:
-        err_block = (
-            f"          <sii1:CodigoErrorRegistro>{respuesta.codigo_error_registro}"
-            f"</sii1:CodigoErrorRegistro>\n"
-            f"          <sii1:DescripcionErrorRegistro>"
-            f"{respuesta.descripcion_error_registro}</sii1:DescripcionErrorRegistro>\n"
+async def _invoke_sii(
+    entrada: ConsultaInput,
+    cert_bytes: Optional[bytes],
+    cert_password: Optional[str],
+    mode_override: Optional[str],
+):
+    effective_mode = _resolve_mode(mode_override, bool(cert_bytes))
+    try:
+        client_impl = build_client(
+            effective_mode, cert_bytes=cert_bytes, cert_password=cert_password
         )
-    return f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                  xmlns:sii1="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/ConsultaLR.xsd">
-  <soapenv:Body>
-    <sii1:RespuestaConsultaLRFactEmitidas>
-      <sii1:Cabecera>
-        <sii1:IDVersionSii>1.1</sii1:IDVersionSii>
-        <sii1:Titular>
-          <sii1:NombreRazon>{entrada.nombre_titular}</sii1:NombreRazon>
-          <sii1:NIF>{entrada.nif_titular}</sii1:NIF>
-        </sii1:Titular>
-      </sii1:Cabecera>
-      <sii1:IndicadorPaginacion>NoHayMasRegistros</sii1:IndicadorPaginacion>
-      <sii1:ResultadoConsulta>{respuesta.estado_envio}</sii1:ResultadoConsulta>
-      <sii1:RegistroRespuestaConsultaLRFactEmitidas>
-        <sii1:IDFactura>
-          <sii1:IDEmisorFactura>
-            <sii1:NIF>{entrada.nif_emisor}</sii1:NIF>
-          </sii1:IDEmisorFactura>
-          <sii1:NumSerieFacturaEmisor>{entrada.num_serie_factura}</sii1:NumSerieFacturaEmisor>
-          <sii1:FechaExpedicionFacturaEmisor>{entrada.fecha_expedicion}</sii1:FechaExpedicionFacturaEmisor>
-        </sii1:IDFactura>
-        <sii1:DatosPresentacion>
-          <sii1:NIFPresentador>{entrada.nif_titular}</sii1:NIFPresentador>
-          <sii1:TimestampPresentacion>{respuesta.timestamp_presentacion}</sii1:TimestampPresentacion>
-          <sii1:CSV>{respuesta.csv}</sii1:CSV>
-          <sii1:NumRegistroPresentacion>{respuesta.num_registro_presentacion}</sii1:NumRegistroPresentacion>
-        </sii1:DatosPresentacion>
-        <sii1:EstadoFactura>
-          <sii1:EstadoRegistro>{respuesta.estado_factura}</sii1:EstadoRegistro>
-{err_block}        </sii1:EstadoFactura>
-      </sii1:RegistroRespuestaConsultaLRFactEmitidas>
-    </sii1:RespuestaConsultaLRFactEmitidas>
-  </soapenv:Body>
-</soapenv:Envelope>"""
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
+    try:
+        respuesta, req_xml, resp_xml = client_impl.consultar(entrada)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Error invocando SII (%s)", effective_mode)
+        raise HTTPException(502, f"Error en servicio SII: {exc}")
 
-def mock_invoke_sii(entrada: ConsultaInput) -> tuple[RespuestaSII, str, str]:
-    """Simula la invocación SOAP al SII y devuelve (respuesta, req_xml, resp_xml)."""
-    estado_factura = _deterministic_estado(entrada)
-    cod, desc = CODIGOS_ERROR[estado_factura]
-
-    presentado = estado_factura != "NoRegistrada"
-    seed = f"{entrada.nif_emisor}{entrada.num_serie_factura}"
-    rnd = random.Random(seed)
-
-    timestamp_presentacion = (
-        datetime.now(timezone.utc).isoformat() if presentado else None
-    )
-    num_registro = (
-        f"16{rnd.randint(10**13, 10**14 - 1)}" if presentado else None
-    )
-    csv_aeat = (
-        "".join(rnd.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=16))
-        if presentado
-        else None
-    )
-
-    respuesta = RespuestaSII(
-        estado_envio="Correcto" if estado_factura != "NoRegistrada" else "ParcialmenteCorrecto",
-        estado_factura=estado_factura,
-        codigo_error_registro=cod,
-        descripcion_error_registro=desc,
-        timestamp_presentacion=timestamp_presentacion,
-        num_registro_presentacion=num_registro,
-        csv=csv_aeat,
-        endpoint=ENDPOINTS[entrada.entorno],
-        wsdl=WSDL_URL,
-    )
-
-    req_xml = _build_soap_request_xml(entrada)
-    resp_xml = _build_soap_response_xml(entrada, respuesta)
-    return respuesta, req_xml, resp_xml
+    return respuesta, req_xml, resp_xml, effective_mode
 
 
 # ---------------------------------------------------------------------------
@@ -313,16 +201,39 @@ async def root():
     return {
         "service": "SII Consulta API",
         "wsdl": WSDL_URL,
-        "modo": "MOCK",
+        "modo": get_default_mode(),
         "endpoints": ENDPOINTS,
     }
 
 
+@api_router.get("/sii/config", response_model=SIIConfigResponse)
+async def sii_config():
+    default = get_default_mode()
+    cert_ok = server_cert_configured()
+    return SIIConfigResponse(
+        default_mode=default if default in ("mock", "real") else "mock",
+        server_cert_configured=cert_ok,
+        # En real-mode siempre es posible: la UI puede subir el certificado
+        real_mode_available=True,
+        wsdl=WSDL_URL,
+        endpoints=ENDPOINTS,
+    )
+
+
+# --------- Consulta unitaria (JSON ó multipart con certificado) ------------
+
+
 @api_router.post("/sii/consulta-unitaria", response_model=ConsultaRecord)
 async def consulta_unitaria(entrada: ConsultaInput):
-    respuesta, req_xml, resp_xml = mock_invoke_sii(entrada)
+    """Consulta unitaria por JSON. Usa el modo configurado en el servidor
+    (`SII_MODE`). Para invocación real con certificado aportado en cliente,
+    usar ``POST /api/sii/consulta-unitaria-cert``."""
+    respuesta, req_xml, resp_xml, effective_mode = await _invoke_sii(
+        entrada, cert_bytes=None, cert_password=None, mode_override=None
+    )
     record = ConsultaRecord(
         modo="unitaria",
+        sii_mode=effective_mode,
         entrada=entrada,
         respuesta=respuesta,
         soap_request_xml=req_xml,
@@ -332,20 +243,80 @@ async def consulta_unitaria(entrada: ConsultaInput):
     return record
 
 
+@api_router.post("/sii/consulta-unitaria-cert", response_model=ConsultaRecord)
+async def consulta_unitaria_cert(
+    nif_titular: str = Form(...),
+    nombre_titular: str = Form(...),
+    ejercicio: str = Form(...),
+    periodo: str = Form(...),
+    nif_emisor: str = Form(...),
+    num_serie_factura: str = Form(...),
+    fecha_expedicion: str = Form(...),
+    entorno: Literal["preproduccion", "produccion"] = Form("preproduccion"),
+    nombre_emisor: Optional[str] = Form(None),
+    mode: Optional[Literal["mock", "real"]] = Form(None),
+    cert_password: Optional[str] = Form(None),
+    certificate: Optional[UploadFile] = File(None),
+):
+    """Consulta unitaria multipart con certificado opcional.
+
+    - Si ``certificate`` (PKCS#12) está presente, se fuerza modo ``real``.
+    - En otro caso se usa ``mode`` o el modo por defecto del servidor.
+    """
+    try:
+        entrada = ConsultaInput(
+            nif_titular=nif_titular,
+            nombre_titular=nombre_titular,
+            ejercicio=ejercicio,
+            periodo=periodo,
+            nif_emisor=nif_emisor,
+            nombre_emisor=nombre_emisor,
+            num_serie_factura=num_serie_factura,
+            fecha_expedicion=fecha_expedicion,
+            entorno=entorno,
+        )
+    except ValidationError as exc:
+        raise HTTPException(422, exc.errors())
+
+    cert_bytes = await _read_cert(certificate)
+    respuesta, req_xml, resp_xml, effective_mode = await _invoke_sii(
+        entrada,
+        cert_bytes=cert_bytes,
+        cert_password=cert_password,
+        mode_override=mode,
+    )
+    record = ConsultaRecord(
+        modo="unitaria",
+        sii_mode=effective_mode,
+        entrada=entrada,
+        respuesta=respuesta,
+        soap_request_xml=req_xml,
+        soap_response_xml=resp_xml,
+    )
+    await db.consultas.insert_one(record.model_dump())
+    return record
+
+
+# --------- Consulta batch (CSV + certificado opcional) ---------------------
+
+
 @api_router.post("/sii/consulta-batch", response_model=BatchResumen)
 async def consulta_batch(
     file: UploadFile = File(...),
     entorno: Literal["preproduccion", "produccion"] = Form("preproduccion"),
+    mode: Optional[Literal["mock", "real"]] = Form(None),
+    cert_password: Optional[str] = Form(None),
+    certificate: Optional[UploadFile] = File(None),
 ):
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(400, "El archivo debe ser un CSV")
+
     contents = await file.read()
     try:
         text = contents.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = contents.decode("latin-1")
 
-    # Detectar separador
     sample = text[:1024]
     delimiter = ";" if sample.count(";") > sample.count(",") else ","
 
@@ -359,16 +330,36 @@ async def consulta_batch(
         "num_serie_factura",
         "fecha_expedicion",
     }
-    if not reader.fieldnames or not expected.issubset({f.strip() for f in reader.fieldnames}):
+    if not reader.fieldnames or not expected.issubset(
+        {f.strip() for f in reader.fieldnames}
+    ):
         raise HTTPException(
-            400,
-            f"Cabeceras CSV inválidas. Se esperan: {sorted(expected)}",
+            400, f"Cabeceras CSV inválidas. Se esperan: {sorted(expected)}"
         )
+
+    cert_bytes = await _read_cert(certificate)
+    effective_mode = _resolve_mode(mode, bool(cert_bytes))
+
+    # Construir cliente una vez para todo el lote (importante en real:
+    # reutilizamos la sesión TLS si zeep lo permite)
+    try:
+        client_impl = build_client(
+            effective_mode,
+            cert_bytes=cert_bytes,
+            cert_password=cert_password,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
     batch_id = str(uuid.uuid4())
     registros: List[ConsultaRecord] = []
     errores_validacion = 0
-    contadores = {e: 0 for e in ESTADOS_FACTURA}
+    contadores = {
+        "Correcta": 0,
+        "AceptadaConErrores": 0,
+        "Anulada": 0,
+        "NoRegistrada": 0,
+    }
 
     for idx, row in enumerate(reader, start=1):
         try:
@@ -383,14 +374,21 @@ async def consulta_batch(
                 fecha_expedicion=row.get("fecha_expedicion", "").strip(),
                 entorno=entorno,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             errores_validacion += 1
             logger.warning("Fila %s inválida: %s", idx, exc)
             continue
 
-        respuesta, req_xml, resp_xml = mock_invoke_sii(entrada)
+        try:
+            respuesta, req_xml, resp_xml = client_impl.consultar(entrada)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Fila %s falló contra el SII", idx)
+            errores_validacion += 1
+            continue
+
         record = ConsultaRecord(
             modo="batch",
+            sii_mode=effective_mode,
             batch_id=batch_id,
             entrada=entrada,
             respuesta=respuesta,
@@ -398,13 +396,16 @@ async def consulta_batch(
             soap_response_xml=resp_xml,
         )
         registros.append(record)
-        contadores[respuesta.estado_factura] += 1
+        contadores[respuesta.estado_factura] = (
+            contadores.get(respuesta.estado_factura, 0) + 1
+        )
 
     if registros:
         await db.consultas.insert_many([r.model_dump() for r in registros])
 
     return BatchResumen(
         batch_id=batch_id,
+        sii_mode=effective_mode,
         total=len(registros),
         correctas=contadores["Correcta"],
         aceptadas_con_errores=contadores["AceptadaConErrores"],
@@ -413,6 +414,9 @@ async def consulta_batch(
         errores_validacion=errores_validacion,
         registros=registros,
     )
+
+
+# --------- Consultas: listado / detalle / estadísticas ---------------------
 
 
 @api_router.get("/sii/consultas", response_model=List[ConsultaRecord])
@@ -468,7 +472,6 @@ async def estadisticas():
         .limit(5)
         .to_list(length=5)
     )
-
     return StatsResponse(
         total=total,
         correctas=counts.get("Correcta", 0),
@@ -481,7 +484,6 @@ async def estadisticas():
 
 @api_router.get("/sii/csv-template")
 async def csv_template():
-    """Descarga una plantilla CSV con la cabecera requerida y un ejemplo."""
     csv_text = (
         "nif_titular;nombre_titular;ejercicio;periodo;nif_emisor;nombre_emisor;num_serie_factura;fecha_expedicion\n"
         "B12345678;Mi Empresa S.L.;2025;01;A87654321;Proveedor Ejemplo SA;F2025-001;15-01-2025\n"
@@ -496,9 +498,9 @@ async def csv_template():
 
 @api_router.get("/sii/batch/{batch_id}/export")
 async def exportar_batch(batch_id: str):
-    registros = (
-        await db.consultas.find({"batch_id": batch_id}, {"_id": 0}).to_list(10000)
-    )
+    registros = await db.consultas.find(
+        {"batch_id": batch_id}, {"_id": 0}
+    ).to_list(10000)
     if not registros:
         raise HTTPException(404, "Batch no encontrado")
     output = io.StringIO()
@@ -519,6 +521,7 @@ async def exportar_batch(batch_id: str):
             "num_registro_presentacion",
             "csv_aeat",
             "timestamp_presentacion",
+            "sii_mode",
         ]
     )
     for r in registros:
@@ -540,6 +543,7 @@ async def exportar_batch(batch_id: str):
                 rs.get("num_registro_presentacion") or "",
                 rs.get("csv") or "",
                 rs.get("timestamp_presentacion") or "",
+                r.get("sii_mode", "mock"),
             ]
         )
     output.seek(0)

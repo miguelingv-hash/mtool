@@ -6,8 +6,10 @@ import {
   History as HistoryIcon,
   ServerCog,
   ShieldCheck,
+  Radio,
 } from "lucide-react";
 import { useEnv } from "@/contexts/EnvContext";
+import { useSiiConfig } from "@/hooks/useSiiConfig";
 import {
   Select,
   SelectContent,
@@ -26,6 +28,9 @@ const NAV_ITEMS = [
 
 export default function Layout() {
   const { entorno, setEntorno } = useEnv();
+  const config = useSiiConfig();
+  const mode = config?.default_mode || "mock";
+  const isMock = mode === "mock";
   return (
     <div className="min-h-screen flex flex-col bg-white text-slate-900">
       <header className="border-b border-slate-200 bg-white">
@@ -46,12 +51,21 @@ export default function Layout() {
 
           <div className="flex items-center gap-3">
             <div
-              className="hidden md:flex items-center gap-2 text-xs text-slate-500"
-              data-testid="mock-mode-indicator"
+              className={`hidden md:inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider px-2 py-1 border ${
+                isMock
+                  ? "border-slate-300 text-slate-600 bg-slate-50"
+                  : "border-emerald-300 text-emerald-700 bg-emerald-50"
+              }`}
+              data-testid="sii-mode-badge"
+              title={`WSDL: ${config?.wsdl || ""}`}
             >
-              <ServerCog className="h-3.5 w-3.5" />
-              <span className="font-mono uppercase tracking-wider">
-                Modo Mock · WSDL v1.1
+              {isMock ? (
+                <ServerCog className="h-3.5 w-3.5" />
+              ) : (
+                <Radio className="h-3.5 w-3.5" />
+              )}
+              <span>
+                {isMock ? "Modo Mock" : "Modo Real"} · WSDL v1.1
               </span>
             </div>
             <div className="h-6 w-px bg-slate-200 hidden md:block" />

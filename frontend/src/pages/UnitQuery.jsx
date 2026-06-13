@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { Loader2, Send, RotateCcw, FileSearch } from "lucide-react";
 import EstadoBadge from "@/components/EstadoBadge";
 import QueryDetailSheet from "@/components/QueryDetailSheet";
+import CertUploader from "@/components/CertUploader";
 
 const INITIAL = {
   nif_titular: "",
@@ -46,6 +47,7 @@ const Field = ({ label, hint, children, required, span = 1, testId }) => (
 export default function UnitQuery() {
   const { entorno } = useEnv();
   const [form, setForm] = useState(INITIAL);
+  const [cert, setCert] = useState({ enabled: false, file: null, password: "" });
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -228,6 +230,10 @@ export default function UnitQuery() {
             </Field>
           </div>
 
+          <div className="mt-6">
+            <CertUploader value={cert} onChange={setCert} testIdPrefix="unit-cert" />
+          </div>
+
           <div className="flex items-center gap-3 mt-7 pt-5 border-t border-slate-200">
             <Button
               type="submit"
@@ -240,7 +246,7 @@ export default function UnitQuery() {
               ) : (
                 <Send className="h-4 w-4 mr-2" />
               )}
-              Consultar SII
+              {cert.enabled ? "Consultar SII (real)" : "Consultar SII (mock)"}
             </Button>
             <Button
               type="button"

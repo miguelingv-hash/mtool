@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import EstadoBadge from "@/components/EstadoBadge";
 import QueryDetailSheet from "@/components/QueryDetailSheet";
+import CertUploader from "@/components/CertUploader";
 import {
   Upload,
   Download,
@@ -26,6 +27,7 @@ export default function BatchQuery() {
   const { entorno } = useEnv();
   const inputRef = useRef(null);
   const [file, setFile] = useState(null);
+  const [cert, setCert] = useState({ enabled: false, file: null, password: "" });
   const [loading, setLoading] = useState(false);
   const [resumen, setResumen] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -35,10 +37,19 @@ export default function BatchQuery() {
       toast.error("Selecciona un archivo CSV");
       return;
     }
+    if (cert.enabled && !cert.file) {
+      toast.error("Aporta el certificado .pfx o desactiva el modo real");
+      return;
+    }
     setLoading(true);
     const fd = new FormData();
     fd.append("file", file);
     fd.append("entorno", entorno);
+    if (cert.enabled && cert.file) {
+      fd.append("mode", "real");
+      fd.append("certificate", cert.file);
+      if (cert.password) fd.append("cert_password", cert.password);
+    }
     try {
       const { data } = await api.post("/sii/consulta-batch", fd, {
         headers: { "Content-Type": "multipart/form-data" },
@@ -46,12 +57,9 @@ export default function BatchQuery() {
       setResumen(data);
       toast.success(`Procesadas ${data.total} facturas`);
     } catch (e) {
+      const detail = e.response?.data?.detail;
       toast.error(
-        e.response?.data?.detail
-          ? typeof e.response.data.detail === "string"
-            ? e.response.data.detail
-            : "CSV inválido"
-          : "Error procesando el archivo",
+        typeof detail === "string" ? detail : "Error procesando el archivo",
       );
     } finally {
       setLoading(false);
@@ -146,6 +154,10 @@ export default function BatchQuery() {
             />
           </label>
 
+          <div className="mt-5">
+            <CertUploader value={cert} onChange={setCert} testIdPrefix="batch-cert" />
+          </div>
+
           <div className="flex items-center gap-3 mt-5">
             <Button
               onClick={handleUpload}
@@ -158,7 +170,7 @@ export default function BatchQuery() {
               ) : (
                 <Upload className="h-4 w-4 mr-2" />
               )}
-              Procesar batch ({entorno})
+              Procesar batch ({entorno} · {cert.enabled ? "real" : "mock"})
             </Button>
             {file && (
               <Button
