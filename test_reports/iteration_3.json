@@ -1,0 +1,24 @@
+{
+  "summary": "Iteration 3 retest: both bugs from iteration_2 are FIXED. All 25 pytest backend tests pass (was 24/25). Frontend UnitQuery now (1) blocks submit and shows the required toast when toggle ON & no file, and (2) posts multipart/form-data to /api/sii/consulta-unitaria-cert with the fake PFX and surfaces the backend 400 'No se pudo leer el PKCS#12...' as a toast.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_sii_api.py",
+    "/app/backend/tests/test_sii_cert.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "ZeepSIIClient.__init__ now eagerly validates the PKCS#12 via pkcs12.load_key_and_certificates → build_client raises ValueError → consulta_batch try/except returns HTTPException 400 immediately. Clean fix; no side effects observed.",
+    "UnitQuery.jsx onSubmit branches correctly on cert.enabled && cert.file (multipart to /sii/consulta-unitaria-cert) vs JSON path; the early-return guard for cert.enabled && !cert.file matches BatchQuery.handleUpload. Toast wording matches spec verbatim.",
+    "Minor (carried over from it.2, non-blocking): server.py still uses deprecated @app.on_event('shutdown'); consider FastAPI lifespan API."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (25/25)", "frontend": "100% (2/2 retest cases)"},
+  "test_credentials": "n/a (no auth)",
+  "seed_data_creation": "Submitted 1 mock consultaUnitaria during sidebar nav (auto from stats refresh) and the failed real-mode multipart call did not persist anything (rejected with 400 before any DB write).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend: pytest /app/backend/tests/ -v → 25 passed. Frontend retest covered: (a) UnitQuery toggle ON + no file → toast 'Aporta el certificado .pfx o desactiva el modo real', zero network calls. (b) UnitQuery toggle ON + bytes-as-pfx → exactly one POST multipart/form-data to /api/sii/consulta-unitaria-cert, backend returns 400, UI shows toast containing 'No se pudo leer el PKCS#12. Verifica el archivo y la contraseña: Could not deserialize PKCS12 data'. Both bugs from iteration_2 are resolved.",
+  "rca of the issue": "Already fixed. Backend: PFX validation moved from lazy to eager in ZeepSIIClient.__init__; build_client try/except now reliably converts a bad PKCS#12 to HTTP 400 before any row is processed in consulta_batch. Frontend: UnitQuery.onSubmit now (i) early-returns with the spec-required toast when cert.enabled && !cert.file, and (ii) switches to multipart POST to /sii/consulta-unitaria-cert with certificate + cert_password + mode=real when a file is provided."
+}

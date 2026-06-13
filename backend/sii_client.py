@@ -251,11 +251,11 @@ class ZeepSIIClient(SIIClient):
             raise ValueError("Se requiere un archivo PKCS#12 (.pfx/.p12).")
         self._pfx_bytes = pfx_bytes
         self._pfx_password = pfx_password or ""
+        # Validar el PKCS#12 cuanto antes para que la app pueda devolver
+        # 400 inmediatamente (sobre todo en batch) sin procesar filas.
+        self._cert_pem, self._key_pem = self._load_pem_bytes()
 
-    # ------------------------------------------------------------------
-    # PFX → PEM (cert + key) en archivos temporales
-    # ------------------------------------------------------------------
-    def _extract_pem(self) -> tuple[str, str]:
+    def _load_pem_bytes(self) -> tuple[bytes, bytes]:
         from cryptography.hazmat.primitives.serialization import (
             Encoding,
             NoEncryption,
@@ -273,22 +273,25 @@ class ZeepSIIClient(SIIClient):
                 "No se pudo leer el PKCS#12. Verifica el archivo y la "
                 f"contraseña: {exc}"
             ) from exc
-
         if private_key is None or cert is None:
             raise ValueError(
                 "El PKCS#12 no contiene clave privada o certificado."
             )
-
         cert_pem = cert.public_bytes(Encoding.PEM)
         key_pem = private_key.private_bytes(
             Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption()
         )
+        return cert_pem, key_pem
 
+    # ------------------------------------------------------------------
+    # PFX → archivos PEM temporales (cert + key) listos para requests
+    # ------------------------------------------------------------------
+    def _extract_pem(self) -> tuple[str, str]:
         cert_f = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-        cert_f.write(cert_pem)
+        cert_f.write(self._cert_pem)
         cert_f.close()
         key_f = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-        key_f.write(key_pem)
+        key_f.write(self._key_pem)
         key_f.close()
         return cert_f.name, key_f.name
 

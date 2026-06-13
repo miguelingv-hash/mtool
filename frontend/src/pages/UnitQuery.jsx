@@ -73,23 +73,41 @@ export default function UnitQuery() {
       toast.error(err);
       return;
     }
+    if (cert.enabled && !cert.file) {
+      toast.error("Aporta el certificado .pfx o desactiva el modo real");
+      return;
+    }
     setLoading(true);
     setResult(null);
     try {
-      const payload = { ...form, entorno };
-      if (!payload.nombre_emisor) delete payload.nombre_emisor;
-      const { data } = await api.post("/sii/consulta-unitaria", payload);
+      let data;
+      if (cert.enabled && cert.file) {
+        const fd = new FormData();
+        Object.entries(form).forEach(([k, v]) => {
+          if (v) fd.append(k, v);
+        });
+        fd.append("entorno", entorno);
+        fd.append("mode", "real");
+        fd.append("certificate", cert.file);
+        if (cert.password) fd.append("cert_password", cert.password);
+        const r = await api.post("/sii/consulta-unitaria-cert", fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        data = r.data;
+      } else {
+        const payload = { ...form, entorno };
+        if (!payload.nombre_emisor) delete payload.nombre_emisor;
+        const r = await api.post("/sii/consulta-unitaria", payload);
+        data = r.data;
+      }
       setResult(data);
       toast.success(
         `Consulta enviada · ${ESTADO_META[data.respuesta.estado_factura]?.label}`,
       );
     } catch (e) {
+      const detail = e.response?.data?.detail;
       toast.error(
-        e.response?.data?.detail
-          ? typeof e.response.data.detail === "string"
-            ? e.response.data.detail
-            : "Datos inválidos"
-          : "Error al consultar SII",
+        typeof detail === "string" ? detail : "Error al consultar SII",
       );
     } finally {
       setLoading(false);
