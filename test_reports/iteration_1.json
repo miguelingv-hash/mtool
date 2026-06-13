@@ -1,0 +1,32 @@
+{
+  "summary": "End-to-end testing of SII Consulta API + UI completed. 16/16 backend pytest tests passed and all critical frontend flows verified (dashboard tiles, unit query with validation toast, SOAP detail sheet, batch CSV upload, history filters, env-selector persistence in localStorage).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_sii_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "MOCK clarified: all SOAP calls are mocked. Real WSDL is not invoked (this is expected per the problem statement).",
+    "Minor: History page filter `Correcta` works but the click `text=Correcta` may also match badges in the table; using exact dropdown role selector would be more robust. Not a bug, just a test-robustness note.",
+    "Minor: server.py uses deprecated @app.on_event('shutdown'); consider FastAPI lifespan handler. Non-blocking.",
+    "Minor: consulta-batch endpoint accepts any UTF-8 BOM/latin-1 and detects delimiter heuristically; works for the supplied separators."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_sii_api.py (new)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% (all flows verified)"},
+  "seed_data_creation": "Created multiple consultas during automated testing (unitarias + 2 batches via API + 1 batch via UI). All persisted in MongoDB collection `consultas`.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend exposes /api/sii/* endpoints. Mock is deterministic via sha256(nif_emisor|num_serie|fecha). Pytest suite at /app/backend/tests/test_sii_api.py covers root, unitary OK/422, determinism, batch (; and ,), batch bad-headers / non-csv, list+filter+pagination, get-by-id 200/404, stats, csv-template, batch export 200/404. Frontend env persists in localStorage('sii_entorno').",
+  "rca of the issue": "No bugs found."
+}
