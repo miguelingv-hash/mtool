@@ -45,6 +45,15 @@ dump.rdb
 # System files
 .DS_Store
 *.pem
+*.pfx
+*.p12
+*.key
+
+# Secretos y entornos locales
+.env
+.env.local
+.env.*.local
+certs/
 
 # Python
 __pycache__/

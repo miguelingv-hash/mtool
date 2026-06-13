@@ -1,0 +1,61 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: sii_mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    # Sin puerto expuesto: sólo accesible desde la red interna `siinet`.
+    # Si quieres conectarte con Compass desde el host, descomenta:
+    # ports:
+    #   - "27017:27017"
+    networks: [siinet]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sii_backend
+    restart: unless-stopped
+    environment:
+      MONGO_URL: "mongodb://mongo:27017"
+      DB_NAME: "${DB_NAME:-sii_local}"
+      CORS_ORIGINS: "http://localhost:${FRONTEND_PORT:-3000}"
+      SII_MODE: "${SII_MODE:-mock}"
+      SII_CERT_PATH: "${SII_CERT_PATH:-}"
+      SII_CERT_PASSWORD: "${SII_CERT_PASSWORD:-}"
+    volumes:
+      # Monta tu carpeta local de certificados (.pfx/.p12) en /certs (sólo lectura).
+      # Para activar modo real con cert del servidor, exporta:
+      #   SII_MODE=real
+      #   SII_CERT_PATH=/certs/mi_certificado.pfx
+      #   SII_CERT_PASSWORD=mi_password
+      - ./certs:/certs:ro
+    depends_on:
+      - mongo
+    # El backend NO se expone en el host: el frontend (nginx) hace de proxy
+    # a /api → backend:8001 dentro de la red interna.
+    networks: [siinet]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Vacío ⇒ la SPA llama a rutas relativas (/api/...) y nginx hace de
+        # proxy al backend. Esto evita problemas de CORS y URLs hardcodeadas.
+        REACT_APP_BACKEND_URL: ""
+    container_name: sii_frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+    networks: [siinet]
+
+volumes:
+  mongo_data:
+
+networks:
+  siinet:
+    driver: bridge
