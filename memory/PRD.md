@@ -44,9 +44,26 @@
 - Tests backend: 16/16 pasados (`/app/backend/tests/test_sii_api.py`)
 - Tests frontend e2e: todos los flujos críticos verificados
 
+## Iteración 2 — Switch real/mock + cert por UI (13 Feb 2026)
+- Nuevo módulo `sii_client.py` con interfaz abstracta `SIIClient` y dos implementaciones:
+  - `MockSIIClient` (determinista) y `ZeepSIIClient` (zeep + mTLS, PKCS#12 → PEM eager).
+- Factory `build_client(mode, cert_bytes, cert_password)` con prioridad: cert en request > `mode` > `SII_MODE` env.
+- Variables `.env`: `SII_MODE`, `SII_CERT_PATH`, `SII_CERT_PASSWORD` (todas opcionales; defaults seguros para desarrollo).
+- Endpoints nuevos:
+  - `GET /api/sii/config` — modo activo + capacidades del servidor.
+  - `POST /api/sii/consulta-unitaria-cert` — multipart con certificado opcional.
+  - `POST /api/sii/consulta-batch` ahora admite `certificate` + `cert_password` + `mode`.
+- Modelo `ConsultaRecord` añade campo `sii_mode` ("mock" | "real") persistido.
+- UI:
+  - Componente `CertUploader` (toggle real + file .pfx/.p12 + password con mostrar/ocultar).
+  - Hook `useSiiConfig` para leer config del backend.
+  - Badge dinámico `sii-mode-badge` en header.
+  - Detalle (`QueryDetailSheet`) muestra fila "Modo invocación".
+- Tests: 25/25 backend pasando (16 originales + 9 nuevos en `test_sii_cert.py`). Frontend 100% verificado.
+
 ## Backlog priorizado
 **P0 — Producción real**
-- Integración del cliente SOAP real con `zeep`/`requests` + autenticación mTLS con certificado digital (PFX/P12) gestionado vía variable de entorno o upload seguro.
+- ~~Integración del cliente SOAP real con `zeep`/`requests` + autenticación mTLS con certificado digital (PFX/P12)~~ ✅ Hecho. Falta probar end-to-end con certificado AEAT real.
 - Validación NIF/CIF con dígito de control oficial.
 
 **P1 — Calidad de servicio**
