@@ -4,7 +4,11 @@ services:
     container_name: sii_mongo
     restart: unless-stopped
     volumes:
-      - mongo_data:/data/db
+      # Bind mount: la base de datos vive en ./data/mongo del propio repo.
+      # Inmune a renombrados de la carpeta y a `docker compose down -v`.
+      # Si quieres usar el volumen Docker clásico, sustituye por:
+      #   - mongo_data:/data/db
+      - ./data/mongo:/data/db
     # Sin puerto expuesto: sólo accesible desde la red interna `siinet`.
     # Si quieres conectarte con Compass desde el host, descomenta:
     # ports:
@@ -54,6 +58,9 @@ services:
     networks: [siinet]
 
 volumes:
+  # Volumen Docker clásico — DEPRECADO en este compose (usamos bind mount).
+  # Se mantiene declarado para no romper instalaciones previas que ya tenían
+  # datos en este volumen; puedes migrar siguiendo el README.
   mongo_data:
 
 networks:

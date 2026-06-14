@@ -103,20 +103,56 @@ sii-consulta/
 
 ## Persistencia y backups
 
-El histórico de consultas vive en el volumen Docker `mongo_data`. Para
-hacer un backup:
+El histórico de consultas se almacena en **`./data/mongo`** dentro del propio
+repo (bind mount). Esto significa:
+
+- La base de datos sobrevive a `docker compose down`, `up --build`, `git pull`
+  y reinicios del sistema.
+- **Sólo se borra si tú borras la carpeta `./data/mongo` o ejecutas
+  `docker compose down -v` _y_ además tenías datos en el volumen Docker
+  antiguo `mongo_data`.**
+- Está en `.gitignore`, así que no se sube a git.
+
+### Backup en caliente
 
 ```bash
 docker compose exec mongo mongodump --db=sii_local --archive=/tmp/sii.dump
 docker cp sii_mongo:/tmp/sii.dump ./sii-$(date +%F).dump
 ```
 
-Restaurar:
+### Restaurar
 
 ```bash
 docker cp ./sii-2026-02-13.dump sii_mongo:/tmp/sii.dump
 docker compose exec mongo mongorestore --drop --archive=/tmp/sii.dump
 ```
+
+### Backup en frío (sólo copiar la carpeta)
+
+Como los datos están en `./data/mongo`, basta con copiar esa carpeta cuando
+el contenedor esté parado:
+
+```bash
+docker compose stop mongo
+cp -r ./data/mongo ./backups/mongo-$(date +%F)
+docker compose start mongo
+```
+
+### Migrar desde el volumen Docker antiguo
+
+Si arrancaste con una versión previa del compose que usaba el volumen
+nombrado `mongo_data`, tus datos viejos siguen allí. Para moverlos a la
+nueva ubicación `./data/mongo` (una sola vez):
+
+```bash
+docker compose down
+docker run --rm \
+  -v sii-consulta_mongo_data:/from \
+  -v "$(pwd)/data/mongo":/to \
+  alpine sh -c "cp -av /from/. /to/"
+docker compose up -d
+```
+(Ajusta el nombre `sii-consulta_mongo_data` al que veas en `docker volume ls`.)
 
 ## Solución de problemas
 
