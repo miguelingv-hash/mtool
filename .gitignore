@@ -96,3 +96,4 @@ frontend/node_modules/.cache/default-development/10.pack
 *.env
 credentials.json
 .credentials
+frontend/node_modules/.cache/default-development/2.pack
