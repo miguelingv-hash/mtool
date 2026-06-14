@@ -5,7 +5,7 @@ import {
   FileSpreadsheet,
   History as HistoryIcon,
   ServerCog,
-  ShieldCheck,
+  Stamp,
   Radio,
 } from "lucide-react";
 import { useEnv } from "@/contexts/EnvContext";
@@ -37,7 +37,7 @@ export default function Layout() {
         <div className="flex items-center justify-between px-6 py-3">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center bg-slate-900 text-white">
-              <ShieldCheck className="h-5 w-5" strokeWidth={1.75} />
+              <Stamp className="h-5 w-5" strokeWidth={1.75} />
             </div>
             <div className="leading-tight">
               <div className="font-display text-base font-bold tracking-tight text-slate-900">
