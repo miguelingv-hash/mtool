@@ -41,7 +41,7 @@ export default function Layout() {
             </div>
             <div className="leading-tight">
               <div className="font-display text-base font-bold tracking-tight text-slate-900">
-                SII Consulta
+                Monitor SII
               </div>
               <div className="text-[11px] uppercase tracking-wider text-slate-500">
                 Facturas Emitidas · AEAT
