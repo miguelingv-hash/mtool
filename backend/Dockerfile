@@ -18,8 +18,8 @@ RUN apt-get update \
         curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
+COPY requirements-docker.txt ./
+RUN pip install -r requirements-docker.txt
 
 COPY . .
 
