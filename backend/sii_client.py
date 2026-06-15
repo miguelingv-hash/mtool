@@ -382,9 +382,30 @@ class ZeepSIIClient(SIIClient):
                 },
             }
 
-            response = service.ConsultaLRFacturasEmitidas(
-                Cabecera=cabecera, FiltroConsulta=filtro
-            )
+            try:
+                response = service.ConsultaLRFacturasEmitidas(
+                    Cabecera=cabecera, FiltroConsulta=filtro
+                )
+            except Exception as exc:  # noqa: BLE001
+                # La AEAT devuelve HTML cuando el certificado no es válido, no
+                # está autorizado para ese NIF, o el endpoint no acepta la
+                # petición. Capturamos el cuerpo crudo para dar un mensaje útil.
+                raw = ""
+                if history.last_received:
+                    try:
+                        raw = etree.tostring(
+                            history.last_received["envelope"],
+                            pretty_print=True,
+                        ).decode(errors="ignore")
+                    except Exception:
+                        raw = ""
+                hint = _interpretar_html_aeat(raw)
+                detail = f"{exc}"
+                if hint:
+                    detail = f"{hint}\n\n— Detalle técnico: {exc}"
+                if raw:
+                    detail += f"\n\n— Cuerpo devuelto (primeros 600 chars):\n{raw[:600]}"
+                raise RuntimeError(detail) from exc
 
             # ---- Parseo de la respuesta zeep -------------------------------
             estado_envio = getattr(response, "ResultadoConsulta", "Correcto")
@@ -459,6 +480,38 @@ class ZeepSIIClient(SIIClient):
 def get_default_mode() -> str:
     """Modo por defecto del servidor (env `SII_MODE`)."""
     return os.environ.get("SII_MODE", "mock").lower()
+
+
+def _interpretar_html_aeat(body: str) -> str:
+    """Si la AEAT devuelve HTML, intenta extraer un mensaje útil.
+
+    Heurística sobre los textos típicos que aparecen en las páginas de error
+    del portal AEAT (cl_caut, errores de certificado, apoderamiento, etc.).
+    """
+    if not body or "<html" not in body.lower():
+        return ""
+    lower = body.lower()
+    if "cl_caut" in lower or "acceso denegado" in lower or "access denied" in lower:
+        return (
+            "La AEAT ha rechazado el acceso. Causas típicas: el certificado "
+            "no está autorizado para el NIF Titular indicado, no eres "
+            "apoderado/colaborador social de ese NIF, o has elegido el "
+            "entorno equivocado (sello vs. normal)."
+        )
+    if "su certificado" in lower and ("no" in lower or "caducad" in lower):
+        return (
+            "Problema con el certificado: puede estar caducado, no estar "
+            "instalado en el almacén correcto o no ser válido para este "
+            "servicio."
+        )
+    if "mantenimiento" in lower or "fuera de servicio" in lower:
+        return "El servicio del SII está temporalmente fuera de servicio."
+    if "<title>" in lower:
+        import re
+        m = re.search(r"<title>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+        if m:
+            return f"AEAT respondió con la página HTML: «{m.group(1).strip()[:200]}»"
+    return "La AEAT devolvió una página HTML en lugar de una respuesta SOAP."
 
 
 def server_cert_configured() -> bool:
