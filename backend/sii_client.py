@@ -367,13 +367,16 @@ class ZeepSIIClient(SIIClient):
                     "NIF": entrada.nif_titular,
                 },
             }
+            # En ConsultaLRFacturasEmitidas el filtro NO lleva IDEmisorFactura:
+            # el emisor es implícito (= el Titular, porque son facturas tuyas).
+            # El tipo IDFacturaConsulta2Type sólo acepta NumSerieFacturaEmisor
+            # y FechaExpedicionFacturaEmisor.
             filtro = {
                 "PeriodoLiquidacion": {
                     "Ejercicio": entrada.ejercicio,
                     "Periodo": entrada.periodo,
                 },
                 "IDFactura": {
-                    "IDEmisorFactura": {"NIF": entrada.nif_emisor},
                     "NumSerieFacturaEmisor": entrada.num_serie_factura,
                     "FechaExpedicionFacturaEmisor": entrada.fecha_expedicion,
                 },
