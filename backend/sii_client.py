@@ -20,6 +20,7 @@ import random
 import tempfile
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -32,11 +33,19 @@ logger = logging.getLogger("sii.client")
 # Constantes SII
 # ---------------------------------------------------------------------------
 
+# URL pública del WSDL (informativa: se muestra en la UI y en `/api/sii/config`).
 WSDL_URL = (
     "https://sede.agenciatributaria.gob.es/static_files/Sede/"
     "Procedimiento_ayuda/G417/FicherosSuministros/V_1_1/WSDL/"
     "SuministroFactEmitidas.wsdl"
 )
+
+# Ubicación local de la copia oficial del WSDL + XSDs.
+# Esta carpeta se rellena en build-time (Dockerfile) o se incluye en el repo.
+# Evita las 404 que devuelve la AEAT cuando zeep intenta resolver los `xsd:import`
+# relativos: el WSDL vive en /WSDL/ pero los XSDs en otra ubicación distinta.
+WSDL_LOCAL_DIR = Path(__file__).parent / "wsdl"
+WSDL_LOCAL_FILE = WSDL_LOCAL_DIR / "SuministroFactEmitidas.wsdl"
 
 ENDPOINTS = {
     # Pre-producción · certificado normal (persona física/jurídica/apoderado)
@@ -330,8 +339,16 @@ class ZeepSIIClient(SIIClient):
             transport = Transport(session=session, timeout=30, operation_timeout=60)
             settings = Settings(strict=False, xml_huge_tree=True)
 
+            # Cargamos el WSDL desde el bundle local (file://) para evitar las
+            # 404 de la AEAT en los xsd:import relativos.
+            if not WSDL_LOCAL_FILE.exists():
+                raise ValueError(
+                    f"WSDL local no encontrado en {WSDL_LOCAL_FILE}. "
+                    "Asegúrate de que la carpeta backend/wsdl está en la imagen."
+                )
+            wsdl_uri = WSDL_LOCAL_FILE.as_uri()
             client = Client(
-                WSDL_URL,
+                wsdl_uri,
                 transport=transport,
                 settings=settings,
                 plugins=[history],
