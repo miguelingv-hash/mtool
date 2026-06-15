@@ -112,6 +112,12 @@ class ConsultaRecord(BaseModel):
     soap_response_xml: str
 
 
+class ErrorFila(BaseModel):
+    fila: int
+    motivo: str
+    datos: dict
+
+
 class BatchResumen(BaseModel):
     batch_id: str
     sii_mode: str
@@ -121,6 +127,7 @@ class BatchResumen(BaseModel):
     anuladas: int
     no_registradas: int
     errores_validacion: int
+    errores: List[ErrorFila] = []
     registros: List[ConsultaRecord]
 
 
@@ -310,6 +317,59 @@ async def consulta_unitaria_cert(
 # --------- Consulta batch (CSV + certificado opcional) ---------------------
 
 
+def _normalize_row(row: dict) -> dict:
+    """Normaliza una fila del CSV a los formatos esperados por ConsultaInput.
+
+    Tolera variantes habituales en exportaciones de Excel / ERPs:
+      - Fechas: ``YYYY-MM-DD``, ``DD/MM/YYYY``, ``D-M-YYYY`` → ``DD-MM-YYYY``.
+      - Período: ``"1"`` → ``"01"``, ``"1t"`` → ``"1T"``.
+      - Ejercicio: trim, recortado a 4 dígitos.
+      - NIFs: trim + uppercase.
+    """
+    def _g(k: str) -> str:
+        return (row.get(k) or "").strip()
+
+    # Fecha — admite "/" o "-" y orden DMY o YMD
+    raw_fecha = _g("fecha_expedicion")
+    fecha_norm = raw_fecha
+    if raw_fecha:
+        parts = raw_fecha.replace("/", "-").split("-")
+        if len(parts) == 3:
+            a, b, c = parts
+            if len(a) == 4 and a.isdigit():  # YYYY-MM-DD
+                fecha_norm = f"{c.zfill(2)}-{b.zfill(2)}-{a}"
+            else:  # D-M-YYYY o DD-MM-YYYY
+                fecha_norm = f"{a.zfill(2)}-{b.zfill(2)}-{c.zfill(4)}"
+
+    # Período — admite "1" → "01" y minúsculas "1t" → "1T"
+    raw_periodo = _g("periodo").upper()
+    if raw_periodo.isdigit() and len(raw_periodo) == 1:
+        raw_periodo = raw_periodo.zfill(2)
+
+    return {
+        "nif_titular": _g("nif_titular").upper(),
+        "nombre_titular": _g("nombre_titular"),
+        "ejercicio": _g("ejercicio"),
+        "periodo": raw_periodo,
+        "nif_emisor": _g("nif_emisor").upper(),
+        "nombre_emisor": _g("nombre_emisor") or None,
+        "num_serie_factura": _g("num_serie_factura"),
+        "fecha_expedicion": fecha_norm,
+    }
+
+
+def _format_validation_error(exc: Exception) -> str:
+    """Convierte ValidationError en un mensaje legible."""
+    if isinstance(exc, ValidationError):
+        partes = []
+        for err in exc.errors():
+            campo = ".".join(str(p) for p in err["loc"]) or "?"
+            msg = err.get("msg", "valor inválido")
+            partes.append(f"{campo}: {msg}")
+        return " · ".join(partes)
+    return str(exc)
+
+
 @api_router.post("/sii/consulta-batch", response_model=BatchResumen)
 async def consulta_batch(
     file: UploadFile = File(...),
@@ -380,7 +440,7 @@ async def consulta_batch(
 
     batch_id = str(uuid.uuid4())
     registros: List[ConsultaRecord] = []
-    errores_validacion = 0
+    errores: List[ErrorFila] = []
     contadores = {
         "Correcta": 0,
         "AceptadaConErrores": 0,
@@ -389,28 +449,22 @@ async def consulta_batch(
     }
 
     for idx, row in enumerate(reader, start=1):
+        norm = _normalize_row(row)
         try:
-            entrada = ConsultaInput(
-                nif_titular=row.get("nif_titular", "").strip(),
-                nombre_titular=row.get("nombre_titular", "").strip(),
-                ejercicio=row.get("ejercicio", "").strip(),
-                periodo=row.get("periodo", "").strip(),
-                nif_emisor=row.get("nif_emisor", "").strip(),
-                nombre_emisor=(row.get("nombre_emisor") or "").strip() or None,
-                num_serie_factura=row.get("num_serie_factura", "").strip(),
-                fecha_expedicion=row.get("fecha_expedicion", "").strip(),
-                entorno=entorno,
-            )
+            entrada = ConsultaInput(entorno=entorno, **norm)
         except Exception as exc:  # noqa: BLE001
-            errores_validacion += 1
-            logger.warning("Fila %s inválida: %s", idx, exc)
+            motivo = _format_validation_error(exc)
+            errores.append(ErrorFila(fila=idx, motivo=motivo, datos=norm))
+            logger.warning("Fila %s inválida: %s", idx, motivo)
             continue
 
         try:
             respuesta, req_xml, resp_xml = client_impl.consultar(entrada)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fila %s falló contra el SII", idx)
-            errores_validacion += 1
+            errores.append(
+                ErrorFila(fila=idx, motivo=f"SII: {exc}", datos=norm)
+            )
             continue
 
         record = ConsultaRecord(
@@ -438,7 +492,8 @@ async def consulta_batch(
         aceptadas_con_errores=contadores["AceptadaConErrores"],
         anuladas=contadores["Anulada"],
         no_registradas=contadores["NoRegistrada"],
-        errores_validacion=errores_validacion,
+        errores_validacion=len(errores),
+        errores=errores,
         registros=registros,
     )
 

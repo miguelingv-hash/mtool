@@ -55,7 +55,18 @@ export default function BatchQuery() {
         headers: { "Content-Type": "multipart/form-data" },
       });
       setResumen(data);
-      toast.success(`Procesadas ${data.total} facturas`);
+      if (data.total === 0 && data.errores_validacion > 0) {
+        toast.error(
+          `Ninguna fila válida · ${data.errores_validacion} errores`,
+          { description: "Revisa la tabla de errores debajo para más detalle." },
+        );
+      } else if (data.errores_validacion > 0) {
+        toast.warning(
+          `Procesadas ${data.total} · ${data.errores_validacion} con errores`,
+        );
+      } else {
+        toast.success(`Procesadas ${data.total} facturas`);
+      }
     } catch (e) {
       const detail = e.response?.data?.detail;
       toast.error(
@@ -326,6 +337,53 @@ export default function BatchQuery() {
               </TableBody>
             </Table>
           </div>
+
+          {resumen.errores?.length > 0 && (
+            <div className="mt-6 border border-rose-200" data-testid="batch-errors">
+              <div className="px-4 py-3 bg-rose-50 border-b border-rose-200 flex items-center justify-between">
+                <h3 className="font-display text-base font-bold text-rose-900">
+                  Errores de validación ({resumen.errores.length})
+                </h3>
+                <span className="text-xs text-rose-700">
+                  Estas filas no se enviaron al SII
+                </span>
+              </div>
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-rose-50/40 hover:bg-rose-50/40">
+                    <TableHead className="text-xs uppercase tracking-wider w-16">
+                      Fila
+                    </TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">
+                      Motivo
+                    </TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">
+                      Datos detectados
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {resumen.errores.map((err, idx) => (
+                    <TableRow
+                      key={idx}
+                      className="data-row"
+                      data-testid={`error-row-${err.fila}`}
+                    >
+                      <TableCell className="font-mono text-xs font-bold text-rose-700">
+                        #{err.fila}
+                      </TableCell>
+                      <TableCell className="text-xs text-rose-700">
+                        {err.motivo}
+                      </TableCell>
+                      <TableCell className="font-mono text-[11px] text-slate-600">
+                        {err.datos.nif_emisor || "—"} · {err.datos.num_serie_factura || "—"} · {err.datos.fecha_expedicion || "—"} · ej.{err.datos.ejercicio || "?"}/p.{err.datos.periodo || "?"}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
         </div>
       )}
 
