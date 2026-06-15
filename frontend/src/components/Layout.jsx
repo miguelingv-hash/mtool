@@ -75,17 +75,29 @@ export default function Layout() {
               </span>
               <Select value={entorno} onValueChange={setEntorno}>
                 <SelectTrigger
-                  className="h-8 w-[180px] rounded-none border-slate-300 text-sm"
+                  className="h-8 w-[260px] rounded-none border-slate-300 text-sm"
                   data-testid="env-selector-trigger"
                 >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="preproduccion" data-testid="env-preprod">
-                    Pre-producción
+                    Pre-producción · cert. normal
+                  </SelectItem>
+                  <SelectItem
+                    value="preproduccion_sello"
+                    data-testid="env-preprod-sello"
+                  >
+                    Pre-producción · cert. de sello
                   </SelectItem>
                   <SelectItem value="produccion" data-testid="env-prod">
-                    Producción
+                    Producción · cert. normal
+                  </SelectItem>
+                  <SelectItem
+                    value="produccion_sello"
+                    data-testid="env-prod-sello"
+                  >
+                    Producción · cert. de sello
                   </SelectItem>
                 </SelectContent>
               </Select>

@@ -39,12 +39,24 @@ WSDL_URL = (
 )
 
 ENDPOINTS = {
+    # Pre-producción · certificado normal (persona física/jurídica/apoderado)
     "preproduccion": (
-        "https://prewww1.aeat.es/wlpl/SSII-FACT/ws/fe/"
+        "https://www7.aeat.es/wlpl/SSII-FACT/ws/fe/"
         "ConsultaLRFactEmitidas"
     ),
+    # Pre-producción · certificado de sello electrónico
+    "preproduccion_sello": (
+        "https://prewww10.aeat.es/wlpl/SSII-FACT/ws/fe/"
+        "ConsultaLRFactEmitidas"
+    ),
+    # Producción · certificado normal
     "produccion": (
         "https://www1.agenciatributaria.gob.es/wlpl/SSII-FACT/ws/fe/"
+        "ConsultaLRFactEmitidas"
+    ),
+    # Producción · certificado de sello electrónico
+    "produccion_sello": (
+        "https://www10.agenciatributaria.gob.es/wlpl/SSII-FACT/ws/fe/"
         "ConsultaLRFactEmitidas"
     ),
 }

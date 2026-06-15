@@ -76,7 +76,12 @@ class ConsultaInput(BaseModel):
     nombre_emisor: Optional[str] = Field(default=None, max_length=120)
     num_serie_factura: str = Field(..., min_length=1, max_length=60)
     fecha_expedicion: str = Field(..., pattern=r"^\d{2}-\d{2}-\d{4}$")
-    entorno: Literal["preproduccion", "produccion"] = "preproduccion"
+    entorno: Literal[
+        "preproduccion",
+        "preproduccion_sello",
+        "produccion",
+        "produccion_sello",
+    ] = "preproduccion"
 
 
 class RespuestaSII(BaseModel):
@@ -252,7 +257,12 @@ async def consulta_unitaria_cert(
     nif_emisor: str = Form(...),
     num_serie_factura: str = Form(...),
     fecha_expedicion: str = Form(...),
-    entorno: Literal["preproduccion", "produccion"] = Form("preproduccion"),
+    entorno: Literal[
+        "preproduccion",
+        "preproduccion_sello",
+        "produccion",
+        "produccion_sello",
+    ] = Form("preproduccion"),
     nombre_emisor: Optional[str] = Form(None),
     mode: Optional[Literal["mock", "real"]] = Form(None),
     cert_password: Optional[str] = Form(None),
@@ -303,7 +313,12 @@ async def consulta_unitaria_cert(
 @api_router.post("/sii/consulta-batch", response_model=BatchResumen)
 async def consulta_batch(
     file: UploadFile = File(...),
-    entorno: Literal["preproduccion", "produccion"] = Form("preproduccion"),
+    entorno: Literal[
+        "preproduccion",
+        "preproduccion_sello",
+        "produccion",
+        "produccion_sello",
+    ] = Form("preproduccion"),
     mode: Optional[Literal["mock", "real"]] = Form(None),
     cert_password: Optional[str] = Form(None),
     certificate: Optional[UploadFile] = File(None),
