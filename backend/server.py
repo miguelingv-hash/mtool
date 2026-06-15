@@ -332,8 +332,20 @@ async def consulta_batch(
     except UnicodeDecodeError:
         text = contents.decode("latin-1")
 
-    sample = text[:1024]
-    delimiter = ";" if sample.count(";") > sample.count(",") else ","
+    # Detectar separador automáticamente entre `;`, `,`, TAB y `|`.
+    # Se prueba con la primera línea no vacía y se elige el carácter con más
+    # apariciones (suficiente para CSVs bien formados; Sniffer falla con
+    # comillas en castellano).
+    first_line = next(
+        (ln for ln in text.splitlines() if ln.strip()), ""
+    )
+    candidates = {sep: first_line.count(sep) for sep in (";", ",", "\t", "|")}
+    delimiter = max(candidates, key=candidates.get) if any(candidates.values()) else ","
+    logger.info(
+        "CSV separador detectado: %r (apariciones=%s)",
+        delimiter,
+        candidates,
+    )
 
     reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     expected = {
