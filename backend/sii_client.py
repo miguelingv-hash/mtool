@@ -379,7 +379,7 @@ class ZeepSIIClient(SIIClient):
                 },
             }
 
-            response = service.ConsultaLRFactEmitidas(
+            response = service.ConsultaLRFacturasEmitidas(
                 Cabecera=cabecera, FiltroConsulta=filtro
             )
 
