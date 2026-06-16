@@ -34,6 +34,10 @@ import {
   Eye,
   CalendarRange,
   Loader2,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
 import { toast } from "sonner";
 import CertUploader from "@/components/CertUploader";
@@ -73,6 +77,14 @@ export default function Comparativa() {
   const [total, setTotal] = useState(0);
   const [onlyDiffs, setOnlyDiffs] = useState(true);
   const [onlyIvaErr, setOnlyIvaErr] = useState(false);
+  const [filtroEjercicio, setFiltroEjercicio] = useState("__all__");
+  const [filtroPeriodo, setFiltroPeriodo] = useState("__all__");
+  const [periodosDisponibles, setPeriodosDisponibles] = useState({
+    ejercicios: [],
+    periodos: [],
+  });
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
   const [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState(null);
 
@@ -91,9 +103,14 @@ export default function Comparativa() {
   const load = async () => {
     setLoading(true);
     try {
-      const { data } = await api.get("/comparativa", {
-        params: { only_diffs: onlyDiffs, limit: 500 },
-      });
+      const params = {
+        only_diffs: onlyDiffs,
+        skip: (page - 1) * pageSize,
+        limit: pageSize,
+      };
+      if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
+      if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
+      const { data } = await api.get("/comparativa", { params });
       setItems(data.items);
       setTotal(data.total);
     } finally {
@@ -102,9 +119,29 @@ export default function Comparativa() {
   };
 
   useEffect(() => {
+    api
+      .get("/comparativa/periodos")
+      .then((r) => setPeriodosDisponibles(r.data))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
     load();
     // eslint-disable-next-line
-  }, [onlyDiffs]);
+  }, [onlyDiffs, page, pageSize, filtroEjercicio, filtroPeriodo]);
+
+  // Reset paginación al cambiar filtros
+  useEffect(() => {
+    setPage(1);
+  }, [onlyDiffs, filtroEjercicio, filtroPeriodo, pageSize]);
+
+  const exportar = () => {
+    const params = new URLSearchParams();
+    params.set("only_diffs", onlyDiffs);
+    if (filtroEjercicio !== "__all__") params.set("ejercicio", filtroEjercicio);
+    if (filtroPeriodo !== "__all__") params.set("periodo", filtroPeriodo);
+    window.location.href = `${API}/comparativa/export?${params.toString()}`;
+  };
 
   const lanzarMensual = async () => {
     if (!mes.nif_titular || !mes.nombre_titular) {
@@ -316,8 +353,8 @@ export default function Comparativa() {
       </div>
 
       {/* Tabla de comparativa */}
-      <div className="border border-slate-200 bg-slate-50/40 p-4 mb-4 flex items-center justify-between">
-        <div className="flex items-center gap-3 text-sm">
+      <div className="border border-slate-200 bg-slate-50/40 p-4 mb-4 flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3 text-sm flex-wrap">
           <Label className="text-xs uppercase tracking-wider text-slate-600">
             Mostrar:
           </Label>
@@ -325,7 +362,7 @@ export default function Comparativa() {
             value={onlyDiffs ? "diffs" : "all"}
             onValueChange={(v) => setOnlyDiffs(v === "diffs")}
           >
-            <SelectTrigger className="rounded-none h-8 w-[220px] text-xs" data-testid="filter-diffs">
+            <SelectTrigger className="rounded-none h-8 w-[200px] text-xs" data-testid="filter-diffs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -333,8 +370,37 @@ export default function Comparativa() {
               <SelectItem value="all">Todas las facturas</SelectItem>
             </SelectContent>
           </Select>
+
+          <Select value={filtroEjercicio} onValueChange={setFiltroEjercicio}>
+            <SelectTrigger className="rounded-none h-8 w-[140px] text-xs" data-testid="filter-ejercicio">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">Todos los ejercicios</SelectItem>
+              {periodosDisponibles.ejercicios.map((e) => (
+                <SelectItem key={e} value={e}>
+                  Ejercicio {e}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select value={filtroPeriodo} onValueChange={setFiltroPeriodo}>
+            <SelectTrigger className="rounded-none h-8 w-[140px] text-xs" data-testid="filter-periodo">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">Todos los periodos</SelectItem>
+              {periodosDisponibles.periodos.map((p) => (
+                <SelectItem key={p} value={p}>
+                  Periodo {p}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <label
-            className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none ml-1 px-2 py-1 border border-slate-200 hover:bg-white"
+            className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none px-2 py-1 border border-slate-200 hover:bg-white"
             data-testid="filter-iva-mismatch-label"
           >
             <input
@@ -347,24 +413,33 @@ export default function Comparativa() {
             <span className="text-rose-600">●</span>
             Sólo redondeo IVA incorrecto
           </label>
-          <span className="text-xs text-slate-500">
-            · {visibleItems.length} resultado
-            {visibleItems.length === 1 ? "" : "s"}
-            {onlyIvaErr && total !== visibleItems.length && (
-              <span className="text-slate-400"> (de {total})</span>
-            )}
+          <span className="text-xs text-slate-500" data-testid="comp-total-count">
+            · {total.toLocaleString("es-ES")} resultado{total === 1 ? "" : "s"}
           </span>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="rounded-none"
-          onClick={load}
-          data-testid="refresh-comparativa"
-        >
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Recargar
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-none"
+            onClick={exportar}
+            data-testid="export-comparativa"
+            disabled={total === 0}
+          >
+            <Download className="h-4 w-4 mr-2" />
+            Exportar
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-none"
+            onClick={load}
+            data-testid="refresh-comparativa"
+          >
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Recargar
+          </Button>
+        </div>
       </div>
 
       <div className="border border-slate-200">
@@ -450,6 +525,89 @@ export default function Comparativa() {
             )}
           </TableBody>
         </Table>
+      </div>
+
+      {/* Paginación */}
+      <div
+        className="border border-t-0 border-slate-200 bg-slate-50/40 px-4 py-2 flex items-center justify-between text-xs"
+        data-testid="comp-pagination"
+      >
+        <div className="flex items-center gap-2 text-slate-600">
+          <span>Por página:</span>
+          <Select
+            value={String(pageSize)}
+            onValueChange={(v) => setPageSize(Number(v))}
+          >
+            <SelectTrigger className="rounded-none h-7 w-[80px] text-xs" data-testid="page-size">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {[25, 50, 100, 200, 500].map((n) => (
+                <SelectItem key={n} value={String(n)}>
+                  {n}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <span className="text-slate-500 ml-2">
+            {total === 0
+              ? "0"
+              : `${((page - 1) * pageSize + 1).toLocaleString("es-ES")}–${Math.min(
+                  page * pageSize,
+                  total,
+                ).toLocaleString("es-ES")}`}{" "}
+            de {total.toLocaleString("es-ES")}
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="rounded-none h-7 w-7 p-0"
+            onClick={() => setPage(1)}
+            disabled={page === 1}
+            data-testid="page-first"
+          >
+            <ChevronsLeft className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="rounded-none h-7 w-7 p-0"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page === 1}
+            data-testid="page-prev"
+          >
+            <ChevronLeft className="h-4 w-4" />
+          </Button>
+          <span className="px-2 font-mono">
+            {page} / {Math.max(1, Math.ceil(total / pageSize))}
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="rounded-none h-7 w-7 p-0"
+            onClick={() =>
+              setPage((p) =>
+                Math.min(Math.ceil(total / pageSize) || 1, p + 1),
+              )
+            }
+            disabled={page >= Math.ceil(total / pageSize)}
+            data-testid="page-next"
+          >
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="rounded-none h-7 w-7 p-0"
+            onClick={() => setPage(Math.max(1, Math.ceil(total / pageSize)))}
+            disabled={page >= Math.ceil(total / pageSize)}
+            data-testid="page-last"
+          >
+            <ChevronsRight className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
       <Sheet open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>

@@ -597,24 +597,27 @@ async def detalle_factura(fuente: str, num_serie: str):
     return doc
 
 
-@router.get("/comparativa")
-async def comparativa(
-    skip: int = 0,
-    limit: int = 200,
-    only_diffs: bool = True,
-):
-    """Compara facturas SII vs Comercial por `num_serie_factura`.
-
-    Devuelve para cada nº de factura:
-      - presente en SII / en Comercial / en ambas
-      - lista de campos con diferencias (si están en ambas)
+async def _comparativa_data(
+    ejercicio: Optional[str],
+    periodo: Optional[str],
+    only_diffs: bool,
+) -> list[dict]:
+    """Construye la lista completa de comparaciones SII vs Comercial.
+    Aplica filtros Mongo de `ejercicio`/`periodo` antes de cargar para no
+    traer documentos de más a memoria.
     """
+    filtro: dict = {}
+    if ejercicio:
+        filtro["ejercicio"] = str(ejercicio)
+    if periodo:
+        filtro["periodo"] = str(periodo)
+
     sii_docs = await _db.facturas_sii.find(
-        {}, {"_id": 0, "versiones": 0}
-    ).to_list(length=10000)
+        filtro, {"_id": 0, "versiones": 0}
+    ).to_list(length=None)
     com_docs = await _db.facturas_comercial.find(
-        {}, {"_id": 0, "versiones": 0}
-    ).to_list(length=10000)
+        filtro, {"_id": 0, "versiones": 0}
+    ).to_list(length=None)
 
     sii_map = {d["num_serie_factura"]: d for d in sii_docs}
     com_map = {d["num_serie_factura"]: d for d in com_docs}
@@ -627,50 +630,114 @@ async def comparativa(
         if sii and com:
             d = diff_facturas(sii, com)
             estado = "coincide" if not d else "discrepancia"
-            resultados.append(
-                {
-                    "num_serie_factura": ns,
-                    "estado": estado,
-                    "en_sii": True,
-                    "en_comercial": True,
-                    "diferencias": d,
-                    "sii": sii,
-                    "comercial": com,
-                }
-            )
+            resultados.append({
+                "num_serie_factura": ns,
+                "estado": estado,
+                "en_sii": True, "en_comercial": True,
+                "diferencias": d, "sii": sii, "comercial": com,
+            })
         elif sii:
-            resultados.append(
-                {
-                    "num_serie_factura": ns,
-                    "estado": "solo_sii",
-                    "en_sii": True,
-                    "en_comercial": False,
-                    "diferencias": {},
-                    "sii": sii,
-                    "comercial": None,
-                }
-            )
+            resultados.append({
+                "num_serie_factura": ns,
+                "estado": "solo_sii",
+                "en_sii": True, "en_comercial": False,
+                "diferencias": {}, "sii": sii, "comercial": None,
+            })
         else:
-            resultados.append(
-                {
-                    "num_serie_factura": ns,
-                    "estado": "solo_comercial",
-                    "en_sii": False,
-                    "en_comercial": True,
-                    "diferencias": {},
-                    "sii": None,
-                    "comercial": com,
-                }
-            )
+            resultados.append({
+                "num_serie_factura": ns,
+                "estado": "solo_comercial",
+                "en_sii": False, "en_comercial": True,
+                "diferencias": {}, "sii": None, "comercial": com,
+            })
 
     if only_diffs:
-        resultados = [
-            r for r in resultados if r["estado"] != "coincide"
-        ]
+        resultados = [r for r in resultados if r["estado"] != "coincide"]
+    return resultados
 
+
+@router.get("/comparativa")
+async def comparativa(
+    skip: int = 0,
+    limit: int = 50,
+    only_diffs: bool = True,
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+):
+    """Compara facturas SII vs Comercial por `num_serie_factura`.
+
+    Filtros: `ejercicio` y `periodo` (opcionales).
+    Paginación: `skip` / `limit` (default 50).
+    """
+    resultados = await _comparativa_data(ejercicio, periodo, only_diffs)
     return {
         "total": len(resultados),
+        "skip": skip,
+        "limit": limit,
         "campos_canonicos": CAMPOS_CANONICOS,
         "campos_numericos": CAMPOS_NUMERICOS,
         "items": resultados[skip : skip + limit],
     }
+
+
+@router.get("/comparativa/periodos")
+async def comparativa_periodos():
+    """Devuelve los ejercicios/periodos distintos disponibles en `facturas_sii`
+    (combinados con los de `facturas_comercial`) para poblar los filtros."""
+    sii_keys = await _db.facturas_sii.distinct("ejercicio")
+    com_keys = await _db.facturas_comercial.distinct("ejercicio")
+    ejercicios = sorted({str(e) for e in (sii_keys + com_keys) if e})
+    sii_p = await _db.facturas_sii.distinct("periodo")
+    com_p = await _db.facturas_comercial.distinct("periodo")
+    periodos = sorted({str(p) for p in (sii_p + com_p) if p})
+    return {"ejercicios": ejercicios, "periodos": periodos}
+
+
+@router.get("/comparativa/export")
+async def comparativa_export(
+    only_diffs: bool = True,
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+):
+    """Exporta la comparativa completa (sin paginar) a CSV (UTF-8 BOM) abrible
+    directamente en Excel/LibreOffice."""
+    resultados = await _comparativa_data(ejercicio, periodo, only_diffs)
+
+    headers = ["num_serie_factura", "estado", "campos_con_diferencias"]
+    for c in CAMPOS_CANONICOS:
+        if c == "num_serie_factura":
+            continue
+        headers.append(f"sii_{c}")
+        headers.append(f"com_{c}")
+
+    buf = io.StringIO()
+    buf.write("\ufeff")  # BOM para Excel
+    writer = csv.writer(buf, delimiter=";", quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(headers)
+    for r in resultados:
+        row = [
+            r["num_serie_factura"],
+            r["estado"],
+            ",".join(r["diferencias"].keys()),
+        ]
+        sii = r.get("sii") or {}
+        com = r.get("comercial") or {}
+        for c in CAMPOS_CANONICOS:
+            if c == "num_serie_factura":
+                continue
+            row.append(sii.get(c, "") if sii.get(c) is not None else "")
+            row.append(com.get(c, "") if com.get(c) is not None else "")
+        writer.writerow(row)
+
+    filename = "comparativa"
+    if ejercicio:
+        filename += f"_{ejercicio}"
+    if periodo:
+        filename += f"_{periodo}"
+    filename += ".csv"
+
+    return StreamingResponse(
+        io.BytesIO(buf.getvalue().encode("utf-8")),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
