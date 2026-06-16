@@ -33,6 +33,7 @@ from factura_model import (
     diff_facturas,
     normalize_factura_row,
 )
+from sii_client import ENDPOINTS, WSDL_URL, build_client, get_default_mode
 
 
 router = APIRouter(prefix="/api")
@@ -124,29 +125,192 @@ async def consulta_mensual(
     ejercicio: str = Form(...),
     periodo: str = Form(...),
     entorno: str = Form("preproduccion"),
+    mode: Optional[str] = Form(None),
+    cert_password: Optional[str] = Form(None),
+    certificate: Optional[UploadFile] = File(None),
 ):
-    """Consulta mensual al SII (mock): devuelve todas las facturas del periodo
-    y las inserta/actualiza en `facturas_sii`.
+    """Consulta mensual al SII. Si se aporta certificado se invoca el SOAP
+    real; si no, se usa mock determinista.
 
-    En modo real esta función deberá invocar `service.ConsultaLRFacturasEmitidas`
-    SIN `IDFactura` y seguir la paginación con `ClavePaginacion` hasta
-    `IndicadorPaginacion == 'NoHayMasRegistros'`. Para esta iteración solo
-    se entrega el mock funcional.
+    El certificado NO se guarda en el servidor.
     """
-    seed = f"{nif_titular}|{ejercicio}|{periodo}"
-    n_facts = int(hashlib.md5(seed.encode()).hexdigest()[:2], 16) % 8 + 3
-    facturas = [
-        _mock_factura_mensual(nif_titular, nombre_titular, ejercicio, periodo, i)
-        for i in range(1, n_facts + 1)
-    ]
+    cert_bytes = None
+    if certificate is not None:
+        cert_bytes = await certificate.read()
+        if not cert_bytes:
+            cert_bytes = None
+    effective_mode = "real" if cert_bytes else (mode or get_default_mode())
+
+    facturas: list[dict] = []
+    if effective_mode == "real":
+        try:
+            client = build_client(
+                "real", cert_bytes=cert_bytes, cert_password=cert_password
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        try:
+            facturas = _consultar_mensual_real(
+                client, nif_titular, nombre_titular, ejercicio, periodo, entorno
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception("Fallo SOAP en consulta mensual real")
+            raise HTTPException(502, f"Error SII: {exc}")
+    else:
+        seed = f"{nif_titular}|{ejercicio}|{periodo}"
+        n_facts = int(hashlib.md5(seed.encode()).hexdigest()[:2], 16) % 8 + 3
+        facturas = [
+            _mock_factura_mensual(
+                nif_titular, nombre_titular, ejercicio, periodo, i
+            )
+            for i in range(1, n_facts + 1)
+        ]
+
     for f in facturas:
         await upsert_factura("facturas_sii", f, "consulta_mensual")
+
     return {
         "total": len(facturas),
         "ejercicio": ejercicio,
         "periodo": periodo,
+        "sii_mode": effective_mode,
         "facturas": facturas,
     }
+
+
+def _consultar_mensual_real(
+    client, nif_titular, nombre_titular, ejercicio, periodo, entorno
+) -> list[dict]:
+    """Invoca ConsultaLRFacturasEmitidas SIN IDFactura y mapea los registros
+    devueltos al modelo canónico de Factura."""
+    # Reutilizamos la infra de zeep del cliente. Adaptamos el filtro: omitimos
+    # IDFactura para que el SII devuelva todas las facturas del periodo.
+    # Inline para no extender la API abstracta del SIIClient.
+    from lxml import etree
+    from requests import Session
+    from zeep import Client, Settings
+    from zeep.plugins import HistoryPlugin
+    from zeep.transports import Transport
+    from sii_client import WSDL_LOCAL_FILE
+
+    cert_path, key_path = client._extract_pem()
+    history = HistoryPlugin()
+    try:
+        session = Session()
+        session.cert = (cert_path, key_path)
+        transport = Transport(session=session, timeout=30, operation_timeout=60)
+        settings = Settings(strict=False, xml_huge_tree=True)
+        z = Client(WSDL_LOCAL_FILE.as_uri(), transport=transport,
+                   settings=settings, plugins=[history])
+        binding = next(iter(z.wsdl.bindings.keys()))
+        service = z.create_service(binding, ENDPOINTS[entorno])
+
+        cabecera = {
+            "IDVersionSii": "1.1",
+            "Titular": {"NombreRazon": nombre_titular, "NIF": nif_titular},
+        }
+        filtro = {
+            "PeriodoLiquidacion": {"Ejercicio": ejercicio, "Periodo": periodo},
+        }
+        out: list[dict] = []
+        clave_pag = None
+        while True:
+            if clave_pag:
+                filtro["ClavePaginacion"] = clave_pag
+            resp = service.ConsultaLRFacturasEmitidas(
+                Cabecera=cabecera, FiltroConsulta=filtro
+            )
+            registros = (
+                getattr(resp, "RegistroRespuestaConsultaLRFactEmitidas", []) or []
+            )
+            for r in registros:
+                idf = getattr(r, "IDFactura", None)
+                df = getattr(r, "DatosFactura", None)
+                contra = getattr(df, "Contraparte", None) if df else None
+                desglose = getattr(df, "DesgloseFactura", None) if df else None
+                base = cuota = tipo = total = None
+                if desglose is not None:
+                    suj = getattr(desglose, "Sujeta", None)
+                    no_exenta = getattr(suj, "NoExenta", None) if suj else None
+                    desgI = (
+                        getattr(no_exenta, "DesgloseIVA", None)
+                        if no_exenta
+                        else None
+                    )
+                    detalle = (
+                        (getattr(desgI, "DetalleIVA", []) or [None])[0]
+                        if desgI
+                        else None
+                    )
+                    if detalle is not None:
+                        base = getattr(detalle, "BaseImponible", None)
+                        tipo = getattr(detalle, "TipoImpositivo", None)
+                        cuota = getattr(detalle, "CuotaRepercutida", None)
+                if df is not None:
+                    total = getattr(df, "ImporteTotal", None)
+                out.append(
+                    {
+                        "num_serie_factura": getattr(
+                            idf, "NumSerieFacturaEmisor", None
+                        ),
+                        "fecha_expedicion": str(
+                            getattr(idf, "FechaExpedicionFacturaEmisor", "")
+                        )
+                        or None,
+                        "nif_emisor": nif_titular,
+                        "nombre_emisor": nombre_titular,
+                        "ejercicio": ejercicio,
+                        "periodo": periodo,
+                        "nif_titular": nif_titular,
+                        "contraparte_nif": getattr(contra, "NIF", None)
+                        if contra
+                        else None,
+                        "contraparte_nombre": getattr(contra, "NombreRazon", None)
+                        if contra
+                        else None,
+                        "tipo_factura": getattr(df, "TipoFactura", None)
+                        if df
+                        else None,
+                        "clave_regimen_especial": getattr(
+                            df, "ClaveRegimenEspecialOTrascendencia", None
+                        )
+                        if df
+                        else None,
+                        "descripcion_operacion": getattr(
+                            df, "DescripcionOperacion", None
+                        )
+                        if df
+                        else None,
+                        "fecha_operacion": str(
+                            getattr(df, "FechaOperacion", "")
+                        )
+                        or None
+                        if df
+                        else None,
+                        "base_imponible": float(base) if base is not None else None,
+                        "tipo_impositivo": float(tipo) if tipo is not None else None,
+                        "cuota_repercutida": float(cuota)
+                        if cuota is not None
+                        else None,
+                        "importe_total": float(total)
+                        if total is not None
+                        else None,
+                    }
+                )
+            indic = getattr(resp, "IndicadorPaginacion", "NoHayMasRegistros")
+            if str(indic) != "ConMasRegistros":
+                break
+            clave_pag = getattr(resp, "ClavePaginacion", None)
+            if not clave_pag:
+                break
+        return out
+    finally:
+        import os as _os
+        for p in (cert_path, key_path):
+            try:
+                _os.unlink(p)
+            except OSError:
+                pass
 
 
 @router.get("/comercial/csv-template")

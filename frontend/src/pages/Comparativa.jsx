@@ -36,6 +36,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
+import CertUploader from "@/components/CertUploader";
 
 const ESTADO_PILL = {
   coincide: { label: "Coincide", cls: "pill-success", Icon: CheckCircle2 },
@@ -71,6 +72,7 @@ export default function Comparativa() {
   const [loadingMes, setLoadingMes] = useState(false);
   const [csvFile, setCsvFile] = useState(null);
   const [loadingCsv, setLoadingCsv] = useState(false);
+  const [cert, setCert] = useState({ enabled: false, file: null, password: "" });
 
   const load = async () => {
     setLoading(true);
@@ -95,15 +97,26 @@ export default function Comparativa() {
       toast.error("Completa NIF y nombre titular");
       return;
     }
+    if (cert.enabled && !cert.file) {
+      toast.error("Aporta el .pfx o desactiva el modo real");
+      return;
+    }
     setLoadingMes(true);
     try {
       const fd = new FormData();
       Object.entries(mes).forEach(([k, v]) => fd.append(k, v));
       fd.append("entorno", "preproduccion");
+      if (cert.enabled && cert.file) {
+        fd.append("mode", "real");
+        fd.append("certificate", cert.file);
+        if (cert.password) fd.append("cert_password", cert.password);
+      }
       const { data } = await api.post("/sii/consulta-mensual", fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      toast.success(`Consulta mensual · ${data.total} facturas actualizadas`);
+      toast.success(
+        `Consulta mensual (${data.sii_mode}) · ${data.total} facturas actualizadas`,
+      );
       load();
     } catch (e) {
       const d = e.response?.data?.detail;
@@ -212,6 +225,9 @@ export default function Comparativa() {
               </SelectContent>
             </Select>
           </div>
+          <div className="mt-4">
+            <CertUploader value={cert} onChange={setCert} testIdPrefix="mes-cert" />
+          </div>
           <Button
             onClick={lanzarMensual}
             disabled={loadingMes}
@@ -223,7 +239,7 @@ export default function Comparativa() {
             ) : (
               <CalendarRange className="h-4 w-4 mr-2" />
             )}
-            Consultar mes
+            Consultar mes ({cert.enabled ? "real" : "mock"})
           </Button>
         </div>
 
