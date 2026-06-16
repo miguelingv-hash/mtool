@@ -1,0 +1,194 @@
+{
+  "info": {
+    "_postman_id": "a4b1c8f2-9e21-4d3e-9c1a-2f8b6a3e7c10",
+    "name": "AEAT SII · Facturas Emitidas",
+    "description": "Colección oficial de pruebas para el servicio SOAP\n**ConsultaLRFacturasEmitidas** (y operaciones relacionadas) del\nSuministro Inmediato de Información (SII) de la AEAT.\n\nEsta colección se basa en el WSDL v1.1:\n`SuministroFactEmitidas.wsdl`\n\n## Uso\n\n1. Importa esta colección y los **4 entornos** del directorio `postman/` (uno por host de la AEAT).\n2. Selecciona el entorno que corresponda a tu certificado (Producción · sello, Pre-producción · normal, etc.).\n3. Configura el certificado mTLS en Postman → Settings → Certificates (ver `postman/README.md`).\n4. Edita las variables de colección (`nif_titular`, `ejercicio`, `periodo`, `num_serie_factura`, `fecha_expedicion`).\n5. Lanza la petición `ConsultaLRFacturasEmitidas`.\n\nLas pestañas **Tests** de cada petición analizan la respuesta y muestran un\nveredicto claro: SOAP válido, HTML de error AEAT, error de certificado, etc.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1 · Consulta",
+      "description": "Operaciones de consulta del Libro Registro de Facturas Emitidas.",
+      "item": [
+        {
+          "name": "ConsultaLRFacturasEmitidas",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "text/xml; charset=utf-8", "type": "text" },
+              { "key": "SOAPAction", "value": "\"\"", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"\n                  xmlns:sii=\"https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroInformacion.xsd\"\n                  xmlns:siiLR=\"https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroLR.xsd\"\n                  xmlns:siiLRC=\"https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/ConsultaLR.xsd\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <siiLRC:ConsultaLRFacturasEmitidas>\n      <siiLR:Cabecera>\n        <sii:IDVersionSii>1.1</sii:IDVersionSii>\n        <siiLR:Titular>\n          <sii:NombreRazon>{{nombre_titular}}</sii:NombreRazon>\n          <sii:NIF>{{nif_titular}}</sii:NIF>\n        </siiLR:Titular>\n      </siiLR:Cabecera>\n      <siiLRC:FiltroConsulta>\n        <siiLRC:PeriodoLiquidacion>\n          <sii:Ejercicio>{{ejercicio}}</sii:Ejercicio>\n          <sii:Periodo>{{periodo}}</sii:Periodo>\n        </siiLRC:PeriodoLiquidacion>\n        <siiLRC:IDFactura>\n          <siiLRC:NumSerieFacturaEmisor>{{num_serie_factura}}</siiLRC:NumSerieFacturaEmisor>\n          <siiLRC:FechaExpedicionFacturaEmisor>{{fecha_expedicion}}</siiLRC:FechaExpedicionFacturaEmisor>\n        </siiLRC:IDFactura>\n      </siiLRC:FiltroConsulta>\n    </siiLRC:ConsultaLRFacturasEmitidas>\n  </soapenv:Body>\n</soapenv:Envelope>",
+              "options": { "raw": { "language": "xml" } }
+            },
+            "url": {
+              "raw": "https://{{host}}/wlpl/SSII-FACT/ws/fe/ConsultaLRFactEmitidas",
+              "protocol": "https",
+              "host": ["{{host}}"],
+              "path": ["wlpl", "SSII-FACT", "ws", "fe", "ConsultaLRFactEmitidas"]
+            },
+            "description": "Consulta del estado de una factura emitida ya enviada al SII.\n\n**Filtro mínimo**: ejercicio + periodo. Si quieres filtrar por una\nfactura concreta, indica `num_serie_factura` y `fecha_expedicion`.\n\nEl emisor es implícito (= el `NIF Titular` de la cabecera), porque\nestás consultando facturas que tú mismo has emitido."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Diagnóstico automático de la respuesta de la AEAT.",
+                  "const body = pm.response.text();",
+                  "const ct = pm.response.headers.get('Content-Type') || '';",
+                  "",
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "// --- 1) ¿XML SOAP válido? ---",
+                  "if (ct.toLowerCase().includes('xml') && body.includes('Envelope')) {",
+                  "    pm.test('Respuesta SOAP recibida', () => pm.expect(body).to.include('Envelope'));",
+                  "",
+                  "    const m = body.match(/<\\w*:?ResultadoConsulta>([^<]+)</);",
+                  "    if (m) {",
+                  "        const resultado = m[1];",
+                  "        pm.test('ResultadoConsulta = ' + resultado, () => pm.expect(resultado).to.match(/Correcto|ParcialmenteCorrecto|Incorrecto/));",
+                  "    }",
+                  "",
+                  "    const e = body.match(/<\\w*:?EstadoRegistro>([^<]+)</);",
+                  "    if (e) {",
+                  "        console.log('EstadoRegistro:', e[1]);",
+                  "        pm.test('EstadoRegistro detectado: ' + e[1], () => pm.expect(e[1]).to.be.a('string'));",
+                  "    } else {",
+                  "        console.log('No se encontró EstadoRegistro (probablemente la factura no figura).');",
+                  "    }",
+                  "",
+                  "    const cod = body.match(/<\\w*:?CodigoErrorRegistro>([^<]+)</);",
+                  "    if (cod) {",
+                  "        const desc = body.match(/<\\w*:?DescripcionErrorRegistro>([^<]+)</);",
+                  "        console.log('Error de la AEAT', cod[1], desc ? desc[1] : '');",
+                  "    }",
+                  "    return;",
+                  "}",
+                  "",
+                  "// --- 2) ¿Fault SOAP? ---",
+                  "if (body.includes('faultstring') || body.includes('Fault')) {",
+                  "    pm.test('SOAP Fault recibido', () => pm.expect(body).to.include('Fault'));",
+                  "    const fs = body.match(/<faultstring>([\\s\\S]*?)<\\/faultstring>/);",
+                  "    if (fs) console.log('faultstring:', fs[1]);",
+                  "    return;",
+                  "}",
+                  "",
+                  "// --- 3) ¿HTML de error de la AEAT? (caso más típico al fallar el certificado) ---",
+                  "if (body.toLowerCase().includes('<html')) {",
+                  "    pm.test('AEAT respondió HTML (no SOAP) — diagnóstico', () => {",
+                  "        const titleM = body.match(/<title>([\\s\\S]*?)<\\/title>/i);",
+                  "        const title = titleM ? titleM[1].trim() : '(sin <title>)';",
+                  "        console.log('Title del HTML:', title);",
+                  "",
+                  "        let pista = 'Causas habituales: certificado no autorizado para ese NIF, ' +",
+                  "            'apoderamiento no dado de alta, certificado caducado, o entorno equivocado ' +",
+                  "            '(sello vs. normal).';",
+                  "        const low = body.toLowerCase();",
+                  "        if (low.includes('cl_caut') || low.includes('acceso denegado')) {",
+                  "            pista = 'ACCESO DENEGADO por la AEAT. Tu certificado no está autorizado para ' +",
+                  "                'consultar el libro registro del NIF Titular indicado.';",
+                  "        } else if (low.includes('su certificado') && (low.includes('no es valido') || low.includes('no es válido') || low.includes('caducado'))) {",
+                  "            pista = 'CERTIFICADO INVÁLIDO O CADUCADO. Revisa el .pfx.';",
+                  "        } else if (low.includes('mantenimiento') || low.includes('fuera de servicio')) {",
+                  "            pista = 'El SII está temporalmente fuera de servicio.';",
+                  "        }",
+                  "        console.log('Diagnóstico:', pista);",
+                  "        pm.expect(false, pista).to.be.true;",
+                  "    });",
+                  "    return;",
+                  "}",
+                  "",
+                  "pm.test('Respuesta no reconocida — revisa el body', () => pm.expect(body).to.not.be.empty);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "ConsultaLRFacturasEmitidas · ejemplo período completo",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "text/xml; charset=utf-8", "type": "text" },
+              { "key": "SOAPAction", "value": "\"\"", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"\n                  xmlns:sii=\"https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroInformacion.xsd\"\n                  xmlns:siiLR=\"https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroLR.xsd\"\n                  xmlns:siiLRC=\"https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/ConsultaLR.xsd\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <siiLRC:ConsultaLRFacturasEmitidas>\n      <siiLR:Cabecera>\n        <sii:IDVersionSii>1.1</sii:IDVersionSii>\n        <siiLR:Titular>\n          <sii:NombreRazon>{{nombre_titular}}</sii:NombreRazon>\n          <sii:NIF>{{nif_titular}}</sii:NIF>\n        </siiLR:Titular>\n      </siiLR:Cabecera>\n      <siiLRC:FiltroConsulta>\n        <siiLRC:PeriodoLiquidacion>\n          <sii:Ejercicio>{{ejercicio}}</sii:Ejercicio>\n          <sii:Periodo>{{periodo}}</sii:Periodo>\n        </siiLRC:PeriodoLiquidacion>\n      </siiLRC:FiltroConsulta>\n    </siiLRC:ConsultaLRFacturasEmitidas>\n  </soapenv:Body>\n</soapenv:Envelope>",
+              "options": { "raw": { "language": "xml" } }
+            },
+            "url": {
+              "raw": "https://{{host}}/wlpl/SSII-FACT/ws/fe/ConsultaLRFactEmitidas",
+              "protocol": "https",
+              "host": ["{{host}}"],
+              "path": ["wlpl", "SSII-FACT", "ws", "fe", "ConsultaLRFactEmitidas"]
+            },
+            "description": "Variante sin `IDFactura`: devuelve todas las facturas emitidas del\nperiodo indicado (con paginación)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 · Diagnóstico",
+      "description": "Peticiones de bajo nivel para verificar la conectividad y la mTLS.",
+      "item": [
+        {
+          "name": "GET endpoint (verificación TLS)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "https://{{host}}/wlpl/SSII-FACT/ws/fe/ConsultaLRFactEmitidas",
+              "protocol": "https",
+              "host": ["{{host}}"],
+              "path": ["wlpl", "SSII-FACT", "ws", "fe", "ConsultaLRFactEmitidas"]
+            },
+            "description": "GET al endpoint. La AEAT NO soporta GET en este servicio (espera POST con SOAP), pero permite verificar dos cosas:\n\n1. Que la conexión TLS se establece (handshake correcto con tu certificado).\n2. Que el endpoint existe (HTTP 405 / 500 / 400 = conexión OK; HTTP 0 = problema de red o certificado).\n\nSi te aparece un diálogo pidiendo certificado, o el navegador rechaza la conexión, todavía no tienes el cert configurado en Postman."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "nif_titular",
+      "value": "B00000000",
+      "type": "string",
+      "description": "NIF/CIF del titular del libro registro (= persona o empresa cuyas facturas se consultan)."
+    },
+    {
+      "key": "nombre_titular",
+      "value": "MI EMPRESA SL",
+      "type": "string",
+      "description": "Razón social del titular."
+    },
+    {
+      "key": "ejercicio",
+      "value": "2025",
+      "type": "string",
+      "description": "Ejercicio fiscal (YYYY)."
+    },
+    {
+      "key": "periodo",
+      "value": "01",
+      "type": "string",
+      "description": "Período: 01-12 (mensual) o 1T-4T (trimestral)."
+    },
+    {
+      "key": "num_serie_factura",
+      "value": "F2025-001",
+      "type": "string",
+      "description": "Número de serie + nº factura tal cual se envió en el suministro."
+    },
+    {
+      "key": "fecha_expedicion",
+      "value": "15-01-2025",
+      "type": "string",
+      "description": "Fecha de expedición de la factura (DD-MM-YYYY)."
+    }
+  ]
+}
