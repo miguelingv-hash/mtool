@@ -122,9 +122,12 @@ export default function Comparativa() {
       load();
     } catch (e) {
       const d = e.response?.data?.detail;
-      toast.error(
-        typeof d === "string" ? d : "Error en consulta mensual",
-      );
+      const msg = typeof d === "string" ? d : "Error en consulta mensual";
+      toast.error("Consulta mensual fallida", {
+        description: msg,
+        duration: 12000,
+        className: "whitespace-pre-line",
+      });
     } finally {
       setLoadingMes(false);
     }

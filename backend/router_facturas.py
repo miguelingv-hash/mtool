@@ -186,8 +186,11 @@ async def consulta_mensual(
             except Exception as exc:  # noqa: BLE001
                 log_entry["status"] = "error"
                 log_entry["error_message"] = str(exc)[:2000]
+                log_entry["request_xml"] = getattr(exc, "request_xml", "") or ""
+                log_entry["response_xml"] = getattr(exc, "response_xml", "") or ""
+                log_entry["http_status"] = 502
                 _logger.exception("Fallo SOAP en consulta mensual real")
-                raise HTTPException(502, f"Error SII: {exc}")
+                raise HTTPException(502, str(exc)[:1500])
         else:
             seed = f"{nif_titular}|{ejercicio}|{periodo}"
             n_facts = (
@@ -241,9 +244,10 @@ def _consultar_mensual_real(
     from lxml import etree
     from requests import Session
     from zeep import Client, Settings
+    from zeep.exceptions import XMLSyntaxError as ZeepXMLSyntaxError
     from zeep.plugins import HistoryPlugin
     from zeep.transports import Transport
-    from sii_client import WSDL_LOCAL_FILE
+    from sii_client import WSDL_LOCAL_FILE, _interpretar_html_aeat
 
     cert_path, key_path = client._extract_pem()
     history = HistoryPlugin()
@@ -269,9 +273,39 @@ def _consultar_mensual_real(
         while True:
             if clave_pag:
                 filtro["ClavePaginacion"] = clave_pag
-            resp = service.ConsultaLRFacturasEmitidas(
-                Cabecera=cabecera, FiltroConsulta=filtro
-            )
+            try:
+                resp = service.ConsultaLRFacturasEmitidas(
+                    Cabecera=cabecera, FiltroConsulta=filtro
+                )
+            except (ZeepXMLSyntaxError, Exception) as exc:  # noqa: BLE001
+                raw = ""
+                req_dump = ""
+                if history.last_sent:
+                    try:
+                        req_dump = etree.tostring(
+                            history.last_sent["envelope"], pretty_print=True
+                        ).decode(errors="ignore")
+                    except Exception:  # noqa: BLE001
+                        req_dump = ""
+                if history.last_received:
+                    try:
+                        raw = etree.tostring(
+                            history.last_received["envelope"],
+                            pretty_print=True,
+                        ).decode(errors="ignore")
+                    except Exception:  # noqa: BLE001
+                        raw = ""
+                hint = _interpretar_html_aeat(raw) if raw else ""
+                detail = hint or f"{exc}"
+                if raw:
+                    detail += (
+                        f"\n\n— Cuerpo devuelto (primeros 600 chars):\n"
+                        f"{raw[:600]}"
+                    )
+                err = RuntimeError(detail)
+                err.request_xml = req_dump  # type: ignore[attr-defined]
+                err.response_xml = raw  # type: ignore[attr-defined]
+                raise err from exc
             registros = (
                 getattr(resp, "RegistroRespuestaConsultaLRFacturasEmitidas", None)
                 or getattr(resp, "RegistroRespuestaConsultaLRFactEmitidas", None)
