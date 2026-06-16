@@ -100,11 +100,16 @@ export default function Comparativa() {
       const fd = new FormData();
       Object.entries(mes).forEach(([k, v]) => fd.append(k, v));
       fd.append("entorno", "preproduccion");
-      const { data } = await api.post("/sii/consulta-mensual", fd);
+      const { data } = await api.post("/sii/consulta-mensual", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
       toast.success(`Consulta mensual · ${data.total} facturas actualizadas`);
       load();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Error en consulta mensual");
+      const d = e.response?.data?.detail;
+      toast.error(
+        typeof d === "string" ? d : "Error en consulta mensual",
+      );
     } finally {
       setLoadingMes(false);
     }
@@ -119,7 +124,9 @@ export default function Comparativa() {
     try {
       const fd = new FormData();
       fd.append("file", csvFile);
-      const { data } = await api.post("/comercial/csv", fd);
+      const { data } = await api.post("/comercial/csv", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
       toast.success(
         `CSV comercial · ${data.total} facturas importadas${
           data.errores.length ? ` · ${data.errores.length} errores` : ""
@@ -128,7 +135,8 @@ export default function Comparativa() {
       setCsvFile(null);
       load();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Error al subir CSV");
+      const d = e.response?.data?.detail;
+      toast.error(typeof d === "string" ? d : "Error al subir CSV");
     } finally {
       setLoadingCsv(false);
     }
