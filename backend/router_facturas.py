@@ -252,25 +252,26 @@ async def consulta_mensual(
     }
 
 
-def _sumar_detalle_iva(sin_desglose) -> tuple[float, float, float | None]:
+def _sumar_detalle_iva(sin_desglose) -> tuple[float, float, float | None, list[dict]]:
     """Suma BaseImponible / CuotaRepercutida de los DetalleIVA dentro de un
     `TipoSinDesgloseType` / `TipoSinDesglosePrestacionType`.
-    Devuelve (base, cuota, tipo) — `tipo` se toma del primer DetalleIVA si
-    existe, o None si todo es Exenta.
+    Devuelve (base, cuota, tipo, detalles) — `tipo` se toma del primer DetalleIVA;
+    `detalles` es la lista cruda de líneas {tipo_impositivo, base_imponible, cuota_repercutida}.
     """
     if sin_desglose is None:
-        return 0.0, 0.0, None
+        return 0.0, 0.0, None, []
     sujeta = getattr(sin_desglose, "Sujeta", None)
     if sujeta is None:
-        return 0.0, 0.0, None
+        return 0.0, 0.0, None, []
     no_exenta = getattr(sujeta, "NoExenta", None)
     desg = getattr(no_exenta, "DesgloseIVA", None) if no_exenta else None
     detalles = getattr(desg, "DetalleIVA", None) if desg else None
     if not detalles:
-        return 0.0, 0.0, None
+        return 0.0, 0.0, None, []
     base_tot = 0.0
     cuota_tot = 0.0
     tipo = None
+    lineas: list[dict] = []
     for d in detalles:
         b = getattr(d, "BaseImponible", None)
         c = getattr(d, "CuotaRepercutida", None)
@@ -281,44 +282,59 @@ def _sumar_detalle_iva(sin_desglose) -> tuple[float, float, float | None]:
             cuota_tot += float(c)
         if tipo is None and t is not None:
             tipo = float(t)
-    return base_tot, cuota_tot, tipo
+        lineas.append(
+            {
+                "tipo_impositivo": float(t) if t is not None else None,
+                "base_imponible": float(b) if b is not None else None,
+                "cuota_repercutida": float(c) if c is not None else None,
+            }
+        )
+    return base_tot, cuota_tot, tipo, lineas
 
 
-def _extraer_iva_emitida(df) -> tuple[float | None, float | None, float | None]:
+def _extraer_iva_emitida(
+    df,
+) -> tuple[float | None, float | None, float | None, list[dict]]:
     """Recorre `DatosFacturaEmitida.TipoDesglose` (choice DesgloseFactura |
     DesgloseTipoOperacion.{PrestacionServicios,Entrega}) y devuelve
-    (base_imponible, cuota_repercutida, tipo_impositivo) agregados.
+    (base_imponible, cuota_repercutida, tipo_impositivo, detalle_iva) agregados.
+    `detalle_iva` etiqueta cada línea con su origen.
     """
     if df is None:
-        return None, None, None
+        return None, None, None, []
     td = getattr(df, "TipoDesglose", None)
     if td is None:
-        return None, None, None
+        return None, None, None, []
     base = cuota = 0.0
     tipo: float | None = None
     encontrado = False
+    detalle_iva: list[dict] = []
     sin = getattr(td, "DesgloseFactura", None)
     if sin is not None:
-        b, c, t = _sumar_detalle_iva(sin)
+        b, c, t, lineas = _sumar_detalle_iva(sin)
         base += b
         cuota += c
         if tipo is None:
             tipo = t
+        for l in lineas:
+            detalle_iva.append({**l, "origen": "DesgloseFactura"})
         encontrado = True
     con = getattr(td, "DesgloseTipoOperacion", None)
     if con is not None:
         for nombre in ("PrestacionServicios", "Entrega"):
             sub = getattr(con, nombre, None)
             if sub is not None:
-                b, c, t = _sumar_detalle_iva(sub)
+                b, c, t, lineas = _sumar_detalle_iva(sub)
                 base += b
                 cuota += c
                 if tipo is None:
                     tipo = t
+                for l in lineas:
+                    detalle_iva.append({**l, "origen": nombre})
                 encontrado = True
     if not encontrado:
-        return None, None, None
-    return base, cuota, tipo
+        return None, None, None, []
+    return base, cuota, tipo, detalle_iva
 
 
 def _consultar_mensual_real(
@@ -411,7 +427,7 @@ def _consultar_mensual_real(
                 or getattr(r, "DatosFactura", None)
             )
             contra = getattr(df, "Contraparte", None) if df else None
-            base, cuota, tipo = _extraer_iva_emitida(df)
+            base, cuota, tipo, detalle_iva = _extraer_iva_emitida(df)
             total = getattr(df, "ImporteTotal", None) if df is not None else None
             out.append(
                 {
@@ -460,6 +476,7 @@ def _consultar_mensual_real(
                     "importe_total": float(total)
                     if total is not None
                     else None,
+                    "detalle_iva": detalle_iva,
                 }
             )
         # XML crudos (sólo primera página, sin paginación).

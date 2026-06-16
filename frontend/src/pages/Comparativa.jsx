@@ -451,6 +451,7 @@ export default function Comparativa() {
                           "versiones",
                           "ultima_actualizacion",
                           "fuente_ultima",
+                          "detalle_iva",
                           "_id",
                         ].includes(k),
                       )
@@ -481,6 +482,97 @@ export default function Comparativa() {
                   </TableBody>
                 </Table>
               </div>
+
+              {Array.isArray(detail.sii?.detalle_iva) &&
+                detail.sii.detalle_iva.length > 0 && (
+                  <div
+                    className="mt-6 border border-slate-200"
+                    data-testid="detalle-iva-block"
+                  >
+                    <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                      <div className="text-xs uppercase tracking-wider text-slate-600 font-semibold">
+                        Detalle IVA · SII
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {detail.sii.detalle_iva.length} línea
+                        {detail.sii.detalle_iva.length === 1 ? "" : "s"}
+                      </div>
+                    </div>
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="bg-white hover:bg-white">
+                          <TableHead className="text-xs uppercase tracking-wider">
+                            Origen
+                          </TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-right">
+                            Tipo (%)
+                          </TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-right">
+                            Base imponible
+                          </TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-right">
+                            Cuota repercutida
+                          </TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {detail.sii.detalle_iva.map((li, idx) => (
+                          <TableRow
+                            key={idx}
+                            data-testid={`detalle-iva-row-${idx}`}
+                          >
+                            <TableCell className="text-xs text-slate-600">
+                              {li.origen || "—"}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs tabular-nums text-right">
+                              {li.tipo_impositivo != null
+                                ? li.tipo_impositivo.toFixed(2)
+                                : "—"}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs tabular-nums text-right">
+                              {li.base_imponible != null
+                                ? li.base_imponible.toFixed(2)
+                                : "—"}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs tabular-nums text-right">
+                              {li.cuota_repercutida != null
+                                ? li.cuota_repercutida.toFixed(2)
+                                : "—"}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                        {detail.sii.detalle_iva.length > 1 && (
+                          <TableRow className="bg-slate-50 font-semibold">
+                            <TableCell className="text-xs uppercase tracking-wider text-slate-700">
+                              Totales
+                            </TableCell>
+                            <TableCell className="font-mono text-xs text-right">
+                              —
+                            </TableCell>
+                            <TableCell className="font-mono text-xs tabular-nums text-right">
+                              {detail.sii.detalle_iva
+                                .reduce(
+                                  (acc, li) =>
+                                    acc + (li.base_imponible || 0),
+                                  0,
+                                )
+                                .toFixed(2)}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs tabular-nums text-right">
+                              {detail.sii.detalle_iva
+                                .reduce(
+                                  (acc, li) =>
+                                    acc + (li.cuota_repercutida || 0),
+                                  0,
+                                )
+                                .toFixed(2)}
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
             </>
           )}
         </SheetContent>
