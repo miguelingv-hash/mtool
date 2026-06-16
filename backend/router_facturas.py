@@ -343,10 +343,12 @@ def _consultar_mensual_real(
     """Invoca ConsultaLRFacturasEmitidas SIN IDFactura y mapea los registros
     devueltos al modelo canónico de Factura.
 
-    Sólo se trae la **primera página** del SII (hasta 10000 registros según
-    spec AEAT). Si hay paginación pendiente (`IndicadorPaginacion=ConMasRegistros`)
-    NO se sigue: se devuelve lo recibido en esa primera llamada.
-    Devuelve (facturas, request_xml, response_xml).
+    **Paginación completa**: la AEAT devuelve hasta 10.000 registros por página
+    y marca `IndicadorPaginacion=ConMasRegistros` cuando hay más. En ese caso
+    re-invocamos con `ClavePaginacion` = último registro devuelto, hasta
+    obtener todas las facturas del periodo.
+    Devuelve (facturas, request_xml, response_xml) — los XML son los de la
+    **última** página (los anteriores también quedan auditables en /logs).
     """
     # Reutilizamos la infra de zeep del cliente. Adaptamos el filtro: omitimos
     # IDFactura para que el SII devuelva todas las facturas del periodo.
@@ -364,7 +366,7 @@ def _consultar_mensual_real(
     try:
         session = Session()
         session.cert = (cert_path, key_path)
-        transport = Transport(session=session, timeout=30, operation_timeout=60)
+        transport = Transport(session=session, timeout=30, operation_timeout=180)
         settings = Settings(strict=False, xml_huge_tree=True)
         z = Client(WSDL_LOCAL_FILE.as_uri(), transport=transport,
                    settings=settings, plugins=[history])
@@ -379,107 +381,138 @@ def _consultar_mensual_real(
             "PeriodoLiquidacion": {"Ejercicio": ejercicio, "Periodo": periodo},
         }
         out: list[dict] = []
-        try:
-            resp = service.ConsultaLRFacturasEmitidas(
-                Cabecera=cabecera, FiltroConsulta=filtro
-            )
-        except (ZeepXMLSyntaxError, Exception) as exc:  # noqa: BLE001
-            raw = ""
-            req_dump = ""
-            if history.last_sent:
-                try:
-                    req_dump = etree.tostring(
-                        history.last_sent["envelope"], pretty_print=True
-                    ).decode(errors="ignore")
-                except Exception:  # noqa: BLE001
-                    req_dump = ""
-            if history.last_received:
-                try:
-                    raw = etree.tostring(
-                        history.last_received["envelope"],
-                        pretty_print=True,
-                    ).decode(errors="ignore")
-                except Exception:  # noqa: BLE001
-                    raw = ""
-            hint = _interpretar_html_aeat(raw) if raw else ""
-            detail = hint or f"{exc}"
-            if raw:
-                detail += (
-                    f"\n\n— Cuerpo devuelto (primeros 600 chars):\n"
-                    f"{raw[:600]}"
+        clave_pag = None
+        pagina = 0
+        while True:
+            pagina += 1
+            if clave_pag is not None:
+                filtro["ClavePaginacion"] = clave_pag
+            try:
+                resp = service.ConsultaLRFacturasEmitidas(
+                    Cabecera=cabecera, FiltroConsulta=filtro
                 )
-            err = RuntimeError(detail)
-            err.request_xml = req_dump  # type: ignore[attr-defined]
-            err.response_xml = raw  # type: ignore[attr-defined]
-            raise err from exc
-        registros = (
-            getattr(resp, "RegistroRespuestaConsultaLRFacturasEmitidas", None)
-            or getattr(resp, "RegistroRespuestaConsultaLRFactEmitidas", None)
-            or []
-        )
-        for r in registros:
-            idf = getattr(r, "IDFactura", None)
-            # En la respuesta de la AEAT el elemento se llama DatosFacturaEmitida
-            # (no DatosFactura). Mantenemos el fallback por si en algún WSDL viejo
-            # vinieran con el nombre antiguo.
-            df = (
-                getattr(r, "DatosFacturaEmitida", None)
-                or getattr(r, "DatosFactura", None)
+            except (ZeepXMLSyntaxError, Exception) as exc:  # noqa: BLE001
+                raw = ""
+                req_dump = ""
+                if history.last_sent:
+                    try:
+                        req_dump = etree.tostring(
+                            history.last_sent["envelope"], pretty_print=True
+                        ).decode(errors="ignore")
+                    except Exception:  # noqa: BLE001
+                        req_dump = ""
+                if history.last_received:
+                    try:
+                        raw = etree.tostring(
+                            history.last_received["envelope"],
+                            pretty_print=True,
+                        ).decode(errors="ignore")
+                    except Exception:  # noqa: BLE001
+                        raw = ""
+                hint = _interpretar_html_aeat(raw) if raw else ""
+                detail = hint or f"{exc}"
+                if raw:
+                    detail += (
+                        f"\n\n— Cuerpo devuelto (primeros 600 chars):\n"
+                        f"{raw[:600]}"
+                    )
+                err = RuntimeError(detail)
+                err.request_xml = req_dump  # type: ignore[attr-defined]
+                err.response_xml = raw  # type: ignore[attr-defined]
+                raise err from exc
+            registros = (
+                getattr(resp, "RegistroRespuestaConsultaLRFacturasEmitidas", None)
+                or getattr(resp, "RegistroRespuestaConsultaLRFactEmitidas", None)
+                or []
             )
-            contra = getattr(df, "Contraparte", None) if df else None
-            base, cuota, tipo, detalle_iva = _extraer_iva_emitida(df)
-            total = getattr(df, "ImporteTotal", None) if df is not None else None
-            out.append(
-                {
-                    "num_serie_factura": getattr(
-                        idf, "NumSerieFacturaEmisor", None
-                    ),
-                    "fecha_expedicion": str(
-                        getattr(idf, "FechaExpedicionFacturaEmisor", "")
-                    )
-                    or None,
-                    "nif_emisor": nif_titular,
-                    "nombre_emisor": nombre_titular,
-                    "ejercicio": ejercicio,
-                    "periodo": periodo,
-                    "nif_titular": nif_titular,
-                    "contraparte_nif": getattr(contra, "NIF", None)
-                    if contra
-                    else None,
-                    "contraparte_nombre": getattr(contra, "NombreRazon", None)
-                    if contra
-                    else None,
-                    "tipo_factura": getattr(df, "TipoFactura", None)
-                    if df
-                    else None,
-                    "clave_regimen_especial": getattr(
-                        df, "ClaveRegimenEspecialOTrascendencia", None
-                    )
-                    if df
-                    else None,
-                    "descripcion_operacion": getattr(
-                        df, "DescripcionOperacion", None
-                    )
-                    if df
-                    else None,
-                    "fecha_operacion": str(
-                        getattr(df, "FechaOperacion", "")
-                    )
-                    or None
-                    if df
-                    else None,
-                    "base_imponible": float(base) if base is not None else None,
-                    "tipo_impositivo": float(tipo) if tipo is not None else None,
-                    "cuota_repercutida": float(cuota)
-                    if cuota is not None
-                    else None,
-                    "importe_total": float(total)
-                    if total is not None
-                    else None,
-                    "detalle_iva": detalle_iva,
-                }
+            for r in registros:
+                idf = getattr(r, "IDFactura", None)
+                # En la respuesta de la AEAT el elemento se llama DatosFacturaEmitida
+                # (no DatosFactura). Mantenemos el fallback por si en algún WSDL viejo
+                # vinieran con el nombre antiguo.
+                df = (
+                    getattr(r, "DatosFacturaEmitida", None)
+                    or getattr(r, "DatosFactura", None)
+                )
+                contra = getattr(df, "Contraparte", None) if df else None
+                base, cuota, tipo, detalle_iva = _extraer_iva_emitida(df)
+                total = getattr(df, "ImporteTotal", None) if df is not None else None
+                out.append(
+                    {
+                        "num_serie_factura": getattr(
+                            idf, "NumSerieFacturaEmisor", None
+                        ),
+                        "fecha_expedicion": str(
+                            getattr(idf, "FechaExpedicionFacturaEmisor", "")
+                        )
+                        or None,
+                        "nif_emisor": nif_titular,
+                        "nombre_emisor": nombre_titular,
+                        "ejercicio": ejercicio,
+                        "periodo": periodo,
+                        "nif_titular": nif_titular,
+                        "contraparte_nif": getattr(contra, "NIF", None)
+                        if contra
+                        else None,
+                        "contraparte_nombre": getattr(contra, "NombreRazon", None)
+                        if contra
+                        else None,
+                        "tipo_factura": getattr(df, "TipoFactura", None)
+                        if df
+                        else None,
+                        "clave_regimen_especial": getattr(
+                            df, "ClaveRegimenEspecialOTrascendencia", None
+                        )
+                        if df
+                        else None,
+                        "descripcion_operacion": getattr(
+                            df, "DescripcionOperacion", None
+                        )
+                        if df
+                        else None,
+                        "fecha_operacion": str(
+                            getattr(df, "FechaOperacion", "")
+                        )
+                        or None
+                        if df
+                        else None,
+                        "base_imponible": float(base) if base is not None else None,
+                        "tipo_impositivo": float(tipo) if tipo is not None else None,
+                        "cuota_repercutida": float(cuota)
+                        if cuota is not None
+                        else None,
+                        "importe_total": float(total)
+                        if total is not None
+                        else None,
+                        "detalle_iva": detalle_iva,
+                    }
+                )
+            # ---- Paginación AEAT --------------------------------------
+            indic = getattr(resp, "IndicadorPaginacion", "NoHayMasRegistros")
+            if str(indic) != "ConMasRegistros":
+                break
+            if not registros:
+                break
+            ultimo = registros[-1]
+            uidf = getattr(ultimo, "IDFactura", None)
+            if uidf is None:
+                break
+            num_last = getattr(uidf, "NumSerieFacturaEmisor", None)
+            fecha_last = getattr(uidf, "FechaExpedicionFacturaEmisor", None)
+            if not (num_last and fecha_last):
+                break
+            clave_pag = {
+                "IDEmisorFactura": {"NIF": nif_titular},
+                "NumSerieFacturaEmisor": num_last,
+                "FechaExpedicionFacturaEmisor": fecha_last,
+            }
+            _logger.info(
+                "SII consulta mensual: página %d completada, %d facturas "
+                "acumuladas, siguiente desde %s/%s",
+                pagina, len(out), num_last, fecha_last,
             )
-        # XML crudos (sólo primera página, sin paginación).
+        # XML crudos de la **última** página recibida (las anteriores ya
+        # quedaron auditadas en el history.last_* mientras se acumulaban).
         last_req = ""
         last_resp = ""
         if history.last_sent:
