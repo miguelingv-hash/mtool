@@ -39,6 +39,21 @@ from sii_client import ENDPOINTS, WSDL_URL, build_client, get_default_mode
 router = APIRouter(prefix="/api")
 
 
+# Mongo BSON document limit es 16MB. Truncamos los XML grandes para que el
+# log siempre se pueda persistir aunque la AEAT devuelva 10K facturas.
+MAX_XML_LOG = 4 * 1024 * 1024  # 4 MB por campo (cómodo bajo el límite BSON)
+
+
+def _truncar_xml(xml: str) -> str:
+    if not xml or len(xml) <= MAX_XML_LOG:
+        return xml or ""
+    return (
+        xml[:MAX_XML_LOG]
+        + f"\n<!-- TRUNCADO: payload original {len(xml)} bytes "
+        f"truncado a {MAX_XML_LOG} bytes para entrar en BSON -->"
+    )
+
+
 # Referencias globales que se inyectan desde server.py
 _db = None
 _logger = None
@@ -180,14 +195,18 @@ async def consulta_mensual(
                     periodo,
                     entorno,
                 )
-                log_entry["request_xml"] = req_xml
-                log_entry["response_xml"] = resp_xml
+                log_entry["request_xml"] = _truncar_xml(req_xml)
+                log_entry["response_xml"] = _truncar_xml(resp_xml)
                 log_entry["http_status"] = 200
             except Exception as exc:  # noqa: BLE001
                 log_entry["status"] = "error"
                 log_entry["error_message"] = str(exc)[:2000]
-                log_entry["request_xml"] = getattr(exc, "request_xml", "") or ""
-                log_entry["response_xml"] = getattr(exc, "response_xml", "") or ""
+                log_entry["request_xml"] = _truncar_xml(
+                    getattr(exc, "request_xml", "") or ""
+                )
+                log_entry["response_xml"] = _truncar_xml(
+                    getattr(exc, "response_xml", "") or ""
+                )
                 log_entry["http_status"] = 502
                 _logger.exception("Fallo SOAP en consulta mensual real")
                 raise HTTPException(502, str(exc)[:1500])
@@ -215,6 +234,10 @@ async def consulta_mensual(
         log_entry["duration_ms"] = int(
             (datetime.now(timezone.utc) - start_ts).total_seconds() * 1000
         )
+        # Defensive: trunca por última vez (por si algún campo XML siguiera
+        # demasiado grande y rompiera el insert por encima del límite BSON).
+        log_entry["request_xml"] = _truncar_xml(log_entry.get("request_xml", ""))
+        log_entry["response_xml"] = _truncar_xml(log_entry.get("response_xml", ""))
         try:
             await _db.wslogs.insert_one(log_entry)
         except Exception:  # noqa: BLE001

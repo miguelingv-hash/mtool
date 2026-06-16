@@ -213,7 +213,12 @@ def _resolve_mode(mode: Optional[str], has_cert: bool) -> str:
 async def _log_ws_call(log: WsLog) -> WsLog:
     """Persiste un log de invocación al WS del SII."""
     try:
-        await db.wslogs.insert_one(log.model_dump())
+        data = log.model_dump()
+        # Mongo BSON limit 16MB: truncamos XML grandes (ver router_facturas.MAX_XML_LOG).
+        from router_facturas import _truncar_xml
+        data["request_xml"] = _truncar_xml(data.get("request_xml", "") or "")
+        data["response_xml"] = _truncar_xml(data.get("response_xml", "") or "")
+        await db.wslogs.insert_one(data)
     except Exception:  # noqa: BLE001
         logger.exception("No se pudo persistir el log del WS")
     return log
