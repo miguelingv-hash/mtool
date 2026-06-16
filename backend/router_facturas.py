@@ -221,7 +221,9 @@ def _consultar_mensual_real(
                 Cabecera=cabecera, FiltroConsulta=filtro
             )
             registros = (
-                getattr(resp, "RegistroRespuestaConsultaLRFactEmitidas", []) or []
+                getattr(resp, "RegistroRespuestaConsultaLRFacturasEmitidas", None)
+                or getattr(resp, "RegistroRespuestaConsultaLRFactEmitidas", None)
+                or []
             )
             for r in registros:
                 idf = getattr(r, "IDFactura", None)
