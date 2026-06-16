@@ -235,8 +235,10 @@ def _consultar_mensual_real(
     """Invoca ConsultaLRFacturasEmitidas SIN IDFactura y mapea los registros
     devueltos al modelo canónico de Factura.
 
-    Devuelve (facturas, request_xml, response_xml) — los XML son los de la
-    última iteración de paginación, suficientes para auditoría/log.
+    Sólo se trae la **primera página** del SII (hasta 10000 registros según
+    spec AEAT). Si hay paginación pendiente (`IndicadorPaginacion=ConMasRegistros`)
+    NO se sigue: se devuelve lo recibido en esa primera llamada.
+    Devuelve (facturas, request_xml, response_xml).
     """
     # Reutilizamos la infra de zeep del cliente. Adaptamos el filtro: omitimos
     # IDFactura para que el SII devuelva todas las facturas del periodo.
@@ -269,129 +271,119 @@ def _consultar_mensual_real(
             "PeriodoLiquidacion": {"Ejercicio": ejercicio, "Periodo": periodo},
         }
         out: list[dict] = []
-        clave_pag = None
-        while True:
-            if clave_pag:
-                filtro["ClavePaginacion"] = clave_pag
-            try:
-                resp = service.ConsultaLRFacturasEmitidas(
-                    Cabecera=cabecera, FiltroConsulta=filtro
-                )
-            except (ZeepXMLSyntaxError, Exception) as exc:  # noqa: BLE001
-                raw = ""
-                req_dump = ""
-                if history.last_sent:
-                    try:
-                        req_dump = etree.tostring(
-                            history.last_sent["envelope"], pretty_print=True
-                        ).decode(errors="ignore")
-                    except Exception:  # noqa: BLE001
-                        req_dump = ""
-                if history.last_received:
-                    try:
-                        raw = etree.tostring(
-                            history.last_received["envelope"],
-                            pretty_print=True,
-                        ).decode(errors="ignore")
-                    except Exception:  # noqa: BLE001
-                        raw = ""
-                hint = _interpretar_html_aeat(raw) if raw else ""
-                detail = hint or f"{exc}"
-                if raw:
-                    detail += (
-                        f"\n\n— Cuerpo devuelto (primeros 600 chars):\n"
-                        f"{raw[:600]}"
-                    )
-                err = RuntimeError(detail)
-                err.request_xml = req_dump  # type: ignore[attr-defined]
-                err.response_xml = raw  # type: ignore[attr-defined]
-                raise err from exc
-            registros = (
-                getattr(resp, "RegistroRespuestaConsultaLRFacturasEmitidas", None)
-                or getattr(resp, "RegistroRespuestaConsultaLRFactEmitidas", None)
-                or []
+        try:
+            resp = service.ConsultaLRFacturasEmitidas(
+                Cabecera=cabecera, FiltroConsulta=filtro
             )
-            for r in registros:
-                idf = getattr(r, "IDFactura", None)
-                df = getattr(r, "DatosFactura", None)
-                contra = getattr(df, "Contraparte", None) if df else None
-                desglose = getattr(df, "DesgloseFactura", None) if df else None
-                base = cuota = tipo = total = None
-                if desglose is not None:
-                    suj = getattr(desglose, "Sujeta", None)
-                    no_exenta = getattr(suj, "NoExenta", None) if suj else None
-                    desgI = (
-                        getattr(no_exenta, "DesgloseIVA", None)
-                        if no_exenta
-                        else None
-                    )
-                    detalle = (
-                        (getattr(desgI, "DetalleIVA", []) or [None])[0]
-                        if desgI
-                        else None
-                    )
-                    if detalle is not None:
-                        base = getattr(detalle, "BaseImponible", None)
-                        tipo = getattr(detalle, "TipoImpositivo", None)
-                        cuota = getattr(detalle, "CuotaRepercutida", None)
-                if df is not None:
-                    total = getattr(df, "ImporteTotal", None)
-                out.append(
-                    {
-                        "num_serie_factura": getattr(
-                            idf, "NumSerieFacturaEmisor", None
-                        ),
-                        "fecha_expedicion": str(
-                            getattr(idf, "FechaExpedicionFacturaEmisor", "")
-                        )
-                        or None,
-                        "nif_emisor": nif_titular,
-                        "nombre_emisor": nombre_titular,
-                        "ejercicio": ejercicio,
-                        "periodo": periodo,
-                        "nif_titular": nif_titular,
-                        "contraparte_nif": getattr(contra, "NIF", None)
-                        if contra
-                        else None,
-                        "contraparte_nombre": getattr(contra, "NombreRazon", None)
-                        if contra
-                        else None,
-                        "tipo_factura": getattr(df, "TipoFactura", None)
-                        if df
-                        else None,
-                        "clave_regimen_especial": getattr(
-                            df, "ClaveRegimenEspecialOTrascendencia", None
-                        )
-                        if df
-                        else None,
-                        "descripcion_operacion": getattr(
-                            df, "DescripcionOperacion", None
-                        )
-                        if df
-                        else None,
-                        "fecha_operacion": str(
-                            getattr(df, "FechaOperacion", "")
-                        )
-                        or None
-                        if df
-                        else None,
-                        "base_imponible": float(base) if base is not None else None,
-                        "tipo_impositivo": float(tipo) if tipo is not None else None,
-                        "cuota_repercutida": float(cuota)
-                        if cuota is not None
-                        else None,
-                        "importe_total": float(total)
-                        if total is not None
-                        else None,
-                    }
+        except (ZeepXMLSyntaxError, Exception) as exc:  # noqa: BLE001
+            raw = ""
+            req_dump = ""
+            if history.last_sent:
+                try:
+                    req_dump = etree.tostring(
+                        history.last_sent["envelope"], pretty_print=True
+                    ).decode(errors="ignore")
+                except Exception:  # noqa: BLE001
+                    req_dump = ""
+            if history.last_received:
+                try:
+                    raw = etree.tostring(
+                        history.last_received["envelope"],
+                        pretty_print=True,
+                    ).decode(errors="ignore")
+                except Exception:  # noqa: BLE001
+                    raw = ""
+            hint = _interpretar_html_aeat(raw) if raw else ""
+            detail = hint or f"{exc}"
+            if raw:
+                detail += (
+                    f"\n\n— Cuerpo devuelto (primeros 600 chars):\n"
+                    f"{raw[:600]}"
                 )
-            indic = getattr(resp, "IndicadorPaginacion", "NoHayMasRegistros")
-            if str(indic) != "ConMasRegistros":
-                break
-            clave_pag = getattr(resp, "ClavePaginacion", None)
-            if not clave_pag:
-                break
-        # Capturamos los XML de la última iteración (suficiente para auditoría)
+            err = RuntimeError(detail)
+            err.request_xml = req_dump  # type: ignore[attr-defined]
+            err.response_xml = raw  # type: ignore[attr-defined]
+            raise err from exc
+        registros = (
+            getattr(resp, "RegistroRespuestaConsultaLRFacturasEmitidas", None)
+            or getattr(resp, "RegistroRespuestaConsultaLRFactEmitidas", None)
+            or []
+        )
+        for r in registros:
+            idf = getattr(r, "IDFactura", None)
+            df = getattr(r, "DatosFactura", None)
+            contra = getattr(df, "Contraparte", None) if df else None
+            desglose = getattr(df, "DesgloseFactura", None) if df else None
+            base = cuota = tipo = total = None
+            if desglose is not None:
+                suj = getattr(desglose, "Sujeta", None)
+                no_exenta = getattr(suj, "NoExenta", None) if suj else None
+                desgI = (
+                    getattr(no_exenta, "DesgloseIVA", None)
+                    if no_exenta
+                    else None
+                )
+                detalle = (
+                    (getattr(desgI, "DetalleIVA", []) or [None])[0]
+                    if desgI
+                    else None
+                )
+                if detalle is not None:
+                    base = getattr(detalle, "BaseImponible", None)
+                    tipo = getattr(detalle, "TipoImpositivo", None)
+                    cuota = getattr(detalle, "CuotaRepercutida", None)
+            if df is not None:
+                total = getattr(df, "ImporteTotal", None)
+            out.append(
+                {
+                    "num_serie_factura": getattr(
+                        idf, "NumSerieFacturaEmisor", None
+                    ),
+                    "fecha_expedicion": str(
+                        getattr(idf, "FechaExpedicionFacturaEmisor", "")
+                    )
+                    or None,
+                    "nif_emisor": nif_titular,
+                    "nombre_emisor": nombre_titular,
+                    "ejercicio": ejercicio,
+                    "periodo": periodo,
+                    "nif_titular": nif_titular,
+                    "contraparte_nif": getattr(contra, "NIF", None)
+                    if contra
+                    else None,
+                    "contraparte_nombre": getattr(contra, "NombreRazon", None)
+                    if contra
+                    else None,
+                    "tipo_factura": getattr(df, "TipoFactura", None)
+                    if df
+                    else None,
+                    "clave_regimen_especial": getattr(
+                        df, "ClaveRegimenEspecialOTrascendencia", None
+                    )
+                    if df
+                    else None,
+                    "descripcion_operacion": getattr(
+                        df, "DescripcionOperacion", None
+                    )
+                    if df
+                    else None,
+                    "fecha_operacion": str(
+                        getattr(df, "FechaOperacion", "")
+                    )
+                    or None
+                    if df
+                    else None,
+                    "base_imponible": float(base) if base is not None else None,
+                    "tipo_impositivo": float(tipo) if tipo is not None else None,
+                    "cuota_repercutida": float(cuota)
+                    if cuota is not None
+                    else None,
+                    "importe_total": float(total)
+                    if total is not None
+                    else None,
+                }
+            )
+        # XML crudos (sólo primera página, sin paginación).
         last_req = ""
         last_resp = ""
         if history.last_sent:
