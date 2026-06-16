@@ -90,33 +90,29 @@ CODIGOS_ERROR = {
 
 def build_soap_request_xml(entrada: "ConsultaInput") -> str:
     return f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                  xmlns:sii="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroLR.xsd"
-                  xmlns:sii1="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/ConsultaLR.xsd"
-                  xmlns:sii2="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroInformacion.xsd">
+                  xmlns:sii="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroInformacion.xsd"
+                  xmlns:siiLRC="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/ConsultaLR.xsd">
   <soapenv:Header/>
   <soapenv:Body>
-    <sii1:ConsultaLRFactEmitidas>
+    <siiLRC:ConsultaLRFacturasEmitidas>
       <sii:Cabecera>
         <sii:IDVersionSii>1.1</sii:IDVersionSii>
         <sii:Titular>
-          <sii2:NombreRazon>{entrada.nombre_titular}</sii2:NombreRazon>
-          <sii2:NIF>{entrada.nif_titular}</sii2:NIF>
+          <sii:NombreRazon>{entrada.nombre_titular}</sii:NombreRazon>
+          <sii:NIF>{entrada.nif_titular}</sii:NIF>
         </sii:Titular>
       </sii:Cabecera>
-      <sii1:FiltroConsulta>
-        <sii1:PeriodoLiquidacion>
+      <siiLRC:FiltroConsulta>
+        <sii:PeriodoLiquidacion>
           <sii:Ejercicio>{entrada.ejercicio}</sii:Ejercicio>
           <sii:Periodo>{entrada.periodo}</sii:Periodo>
-        </sii1:PeriodoLiquidacion>
-        <sii1:IDFactura>
-          <sii1:IDEmisorFactura>
-            <sii2:NIF>{entrada.nif_emisor}</sii2:NIF>
-          </sii1:IDEmisorFactura>
-          <sii1:NumSerieFacturaEmisor>{entrada.num_serie_factura}</sii1:NumSerieFacturaEmisor>
-          <sii1:FechaExpedicionFacturaEmisor>{entrada.fecha_expedicion}</sii1:FechaExpedicionFacturaEmisor>
-        </sii1:IDFactura>
-      </sii1:FiltroConsulta>
-    </sii1:ConsultaLRFactEmitidas>
+        </sii:PeriodoLiquidacion>
+        <siiLRC:IDFactura>
+          <sii:NumSerieFacturaEmisor>{entrada.num_serie_factura}</sii:NumSerieFacturaEmisor>
+          <sii:FechaExpedicionFacturaEmisor>{entrada.fecha_expedicion}</sii:FechaExpedicionFacturaEmisor>
+        </siiLRC:IDFactura>
+      </siiLRC:FiltroConsulta>
+    </siiLRC:ConsultaLRFacturasEmitidas>
   </soapenv:Body>
 </soapenv:Envelope>"""
 
@@ -125,43 +121,44 @@ def build_soap_response_xml(entrada: "ConsultaInput", respuesta: "RespuestaSII")
     err_block = ""
     if respuesta.codigo_error_registro:
         err_block = (
-            f"          <sii1:CodigoErrorRegistro>{respuesta.codigo_error_registro}"
-            f"</sii1:CodigoErrorRegistro>\n"
-            f"          <sii1:DescripcionErrorRegistro>"
-            f"{respuesta.descripcion_error_registro}</sii1:DescripcionErrorRegistro>\n"
+            f"          <siiR:CodigoErrorRegistro>{respuesta.codigo_error_registro}"
+            f"</siiR:CodigoErrorRegistro>\n"
+            f"          <siiR:DescripcionErrorRegistro>"
+            f"{respuesta.descripcion_error_registro}</siiR:DescripcionErrorRegistro>\n"
         )
     return f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                  xmlns:sii1="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/ConsultaLR.xsd">
+                  xmlns:sii="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/SuministroInformacion.xsd"
+                  xmlns:siiR="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/ssii/fact/ws/RespuestaConsultaLR.xsd">
   <soapenv:Body>
-    <sii1:RespuestaConsultaLRFactEmitidas>
-      <sii1:Cabecera>
-        <sii1:IDVersionSii>1.1</sii1:IDVersionSii>
-        <sii1:Titular>
-          <sii1:NombreRazon>{entrada.nombre_titular}</sii1:NombreRazon>
-          <sii1:NIF>{entrada.nif_titular}</sii1:NIF>
-        </sii1:Titular>
-      </sii1:Cabecera>
-      <sii1:IndicadorPaginacion>NoHayMasRegistros</sii1:IndicadorPaginacion>
-      <sii1:ResultadoConsulta>{respuesta.estado_envio}</sii1:ResultadoConsulta>
-      <sii1:RegistroRespuestaConsultaLRFactEmitidas>
-        <sii1:IDFactura>
-          <sii1:IDEmisorFactura>
-            <sii1:NIF>{entrada.nif_emisor}</sii1:NIF>
-          </sii1:IDEmisorFactura>
-          <sii1:NumSerieFacturaEmisor>{entrada.num_serie_factura}</sii1:NumSerieFacturaEmisor>
-          <sii1:FechaExpedicionFacturaEmisor>{entrada.fecha_expedicion}</sii1:FechaExpedicionFacturaEmisor>
-        </sii1:IDFactura>
-        <sii1:DatosPresentacion>
-          <sii1:NIFPresentador>{entrada.nif_titular}</sii1:NIFPresentador>
-          <sii1:TimestampPresentacion>{respuesta.timestamp_presentacion}</sii1:TimestampPresentacion>
-          <sii1:CSV>{respuesta.csv}</sii1:CSV>
-          <sii1:NumRegistroPresentacion>{respuesta.num_registro_presentacion}</sii1:NumRegistroPresentacion>
-        </sii1:DatosPresentacion>
-        <sii1:EstadoFactura>
-          <sii1:EstadoRegistro>{respuesta.estado_factura}</sii1:EstadoRegistro>
-{err_block}        </sii1:EstadoFactura>
-      </sii1:RegistroRespuestaConsultaLRFactEmitidas>
-    </sii1:RespuestaConsultaLRFactEmitidas>
+    <siiR:RespuestaConsultaLRFacturasEmitidas>
+      <sii:Cabecera>
+        <sii:IDVersionSii>1.1</sii:IDVersionSii>
+        <sii:Titular>
+          <sii:NombreRazon>{entrada.nombre_titular}</sii:NombreRazon>
+          <sii:NIF>{entrada.nif_titular}</sii:NIF>
+        </sii:Titular>
+      </sii:Cabecera>
+      <siiR:IndicadorPaginacion>NoHayMasRegistros</siiR:IndicadorPaginacion>
+      <siiR:ResultadoConsulta>{respuesta.estado_envio}</siiR:ResultadoConsulta>
+      <siiR:RegistroRespuestaConsultaLRFactEmitidas>
+        <siiR:IDFactura>
+          <sii:IDEmisorFactura>
+            <sii:NIF>{entrada.nif_emisor}</sii:NIF>
+          </sii:IDEmisorFactura>
+          <sii:NumSerieFacturaEmisor>{entrada.num_serie_factura}</sii:NumSerieFacturaEmisor>
+          <sii:FechaExpedicionFacturaEmisor>{entrada.fecha_expedicion}</sii:FechaExpedicionFacturaEmisor>
+        </siiR:IDFactura>
+        <siiR:DatosPresentacion>
+          <siiR:NIFPresentador>{entrada.nif_titular}</siiR:NIFPresentador>
+          <siiR:TimestampPresentacion>{respuesta.timestamp_presentacion}</siiR:TimestampPresentacion>
+          <siiR:CSV>{respuesta.csv}</siiR:CSV>
+          <siiR:NumRegistroPresentacion>{respuesta.num_registro_presentacion}</siiR:NumRegistroPresentacion>
+        </siiR:DatosPresentacion>
+        <siiR:EstadoFactura>
+          <siiR:EstadoRegistro>{respuesta.estado_factura}</siiR:EstadoRegistro>
+{err_block}        </siiR:EstadoFactura>
+      </siiR:RegistroRespuestaConsultaLRFactEmitidas>
+    </siiR:RespuestaConsultaLRFacturasEmitidas>
   </soapenv:Body>
 </soapenv:Envelope>"""
 

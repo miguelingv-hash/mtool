@@ -44,7 +44,7 @@ def test_consulta_unitaria_ok():
     assert resp["estado_factura"] in ["Correcta", "AceptadaConErrores", "Anulada", "NoRegistrada"]
     assert resp["wsdl"].endswith(".wsdl")
     assert "endpoint" in resp
-    assert "soap_request_xml" in data and "ConsultaLRFactEmitidas" in data["soap_request_xml"]
+    assert "soap_request_xml" in data and "ConsultaLRFacturasEmitidas" in data["soap_request_xml"]
     assert "soap_response_xml" in data and "RespuestaConsultaLRFactEmitidas" in data["soap_response_xml"]
 
 
