@@ -63,8 +63,8 @@ export default function Comparativa() {
 
   // Form consulta mensual
   const [mes, setMes] = useState({
-    nif_titular: "",
-    nombre_titular: "",
+    nif_titular: "A95000295",
+    nombre_titular: "TotalEnergies Clientes S.A.U.",
     ejercicio: String(new Date().getFullYear()),
     periodo: "01",
   });
