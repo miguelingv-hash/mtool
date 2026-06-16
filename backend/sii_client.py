@@ -282,7 +282,7 @@ class ZeepSIIClient(SIIClient):
         )
 
         try:
-            private_key, cert, _additional = pkcs12.load_key_and_certificates(
+            private_key, cert, additional = pkcs12.load_key_and_certificates(
                 self._pfx_bytes,
                 self._pfx_password.encode() if self._pfx_password else None,
             )
@@ -295,7 +295,13 @@ class ZeepSIIClient(SIIClient):
             raise ValueError(
                 "El PKCS#12 no contiene clave privada o certificado."
             )
+        # IMPORTANTE: la AEAT rechaza con 401 si sólo se envía el certificado
+        # hoja sin la cadena de CAs intermedias. Concatenamos el leaf + todos
+        # los certs adicionales del PKCS#12 (CA intermedias) en el PEM, igual
+        # que hace Postman/navegador.
         cert_pem = cert.public_bytes(Encoding.PEM)
+        for ca in additional or []:
+            cert_pem += ca.public_bytes(Encoding.PEM)
         key_pem = private_key.private_bytes(
             Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption()
         )
