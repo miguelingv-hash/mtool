@@ -252,6 +252,75 @@ async def consulta_mensual(
     }
 
 
+def _sumar_detalle_iva(sin_desglose) -> tuple[float, float, float | None]:
+    """Suma BaseImponible / CuotaRepercutida de los DetalleIVA dentro de un
+    `TipoSinDesgloseType` / `TipoSinDesglosePrestacionType`.
+    Devuelve (base, cuota, tipo) — `tipo` se toma del primer DetalleIVA si
+    existe, o None si todo es Exenta.
+    """
+    if sin_desglose is None:
+        return 0.0, 0.0, None
+    sujeta = getattr(sin_desglose, "Sujeta", None)
+    if sujeta is None:
+        return 0.0, 0.0, None
+    no_exenta = getattr(sujeta, "NoExenta", None)
+    desg = getattr(no_exenta, "DesgloseIVA", None) if no_exenta else None
+    detalles = getattr(desg, "DetalleIVA", None) if desg else None
+    if not detalles:
+        return 0.0, 0.0, None
+    base_tot = 0.0
+    cuota_tot = 0.0
+    tipo = None
+    for d in detalles:
+        b = getattr(d, "BaseImponible", None)
+        c = getattr(d, "CuotaRepercutida", None)
+        t = getattr(d, "TipoImpositivo", None)
+        if b is not None:
+            base_tot += float(b)
+        if c is not None:
+            cuota_tot += float(c)
+        if tipo is None and t is not None:
+            tipo = float(t)
+    return base_tot, cuota_tot, tipo
+
+
+def _extraer_iva_emitida(df) -> tuple[float | None, float | None, float | None]:
+    """Recorre `DatosFacturaEmitida.TipoDesglose` (choice DesgloseFactura |
+    DesgloseTipoOperacion.{PrestacionServicios,Entrega}) y devuelve
+    (base_imponible, cuota_repercutida, tipo_impositivo) agregados.
+    """
+    if df is None:
+        return None, None, None
+    td = getattr(df, "TipoDesglose", None)
+    if td is None:
+        return None, None, None
+    base = cuota = 0.0
+    tipo: float | None = None
+    encontrado = False
+    sin = getattr(td, "DesgloseFactura", None)
+    if sin is not None:
+        b, c, t = _sumar_detalle_iva(sin)
+        base += b
+        cuota += c
+        if tipo is None:
+            tipo = t
+        encontrado = True
+    con = getattr(td, "DesgloseTipoOperacion", None)
+    if con is not None:
+        for nombre in ("PrestacionServicios", "Entrega"):
+            sub = getattr(con, nombre, None)
+            if sub is not None:
+                b, c, t = _sumar_detalle_iva(sub)
+                base += b
+                cuota += c
+                if tipo is None:
+                    tipo = t
+                encontrado = True
+    if not encontrado:
+        return None, None, None
+    return base, cuota, tipo
+
+
 def _consultar_mensual_real(
     client, nif_titular, nombre_titular, ejercicio, periodo, entorno
 ) -> tuple[list[dict], str, str]:
@@ -334,29 +403,16 @@ def _consultar_mensual_real(
         )
         for r in registros:
             idf = getattr(r, "IDFactura", None)
-            df = getattr(r, "DatosFactura", None)
+            # En la respuesta de la AEAT el elemento se llama DatosFacturaEmitida
+            # (no DatosFactura). Mantenemos el fallback por si en algún WSDL viejo
+            # vinieran con el nombre antiguo.
+            df = (
+                getattr(r, "DatosFacturaEmitida", None)
+                or getattr(r, "DatosFactura", None)
+            )
             contra = getattr(df, "Contraparte", None) if df else None
-            desglose = getattr(df, "DesgloseFactura", None) if df else None
-            base = cuota = tipo = total = None
-            if desglose is not None:
-                suj = getattr(desglose, "Sujeta", None)
-                no_exenta = getattr(suj, "NoExenta", None) if suj else None
-                desgI = (
-                    getattr(no_exenta, "DesgloseIVA", None)
-                    if no_exenta
-                    else None
-                )
-                detalle = (
-                    (getattr(desgI, "DetalleIVA", []) or [None])[0]
-                    if desgI
-                    else None
-                )
-                if detalle is not None:
-                    base = getattr(detalle, "BaseImponible", None)
-                    tipo = getattr(detalle, "TipoImpositivo", None)
-                    cuota = getattr(detalle, "CuotaRepercutida", None)
-            if df is not None:
-                total = getattr(df, "ImporteTotal", None)
+            base, cuota, tipo = _extraer_iva_emitida(df)
+            total = getattr(df, "ImporteTotal", None) if df is not None else None
             out.append(
                 {
                     "num_serie_factura": getattr(
