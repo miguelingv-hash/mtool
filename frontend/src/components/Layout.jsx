@@ -35,6 +35,10 @@ export default function Layout() {
   const config = useSiiConfig();
   const mode = config?.default_mode || "mock";
   const isMock = mode === "mock";
+  const isProd = entorno.startsWith("produccion");
+  const envTriggerCls = isProd
+    ? "h-8 w-[260px] rounded-none border-rose-500 bg-rose-50 text-rose-800 font-semibold text-sm focus:ring-rose-400"
+    : "h-8 w-[260px] rounded-none border-amber-400 bg-amber-50 text-amber-900 font-semibold text-sm focus:ring-amber-400";
   return (
     <div className="min-h-screen flex flex-col bg-white text-slate-900">
       <header className="border-b border-slate-200 bg-white">
@@ -79,9 +83,15 @@ export default function Layout() {
               </span>
               <Select value={entorno} onValueChange={setEntorno}>
                 <SelectTrigger
-                  className="h-8 w-[260px] rounded-none border-slate-300 text-sm"
+                  className={envTriggerCls}
                   data-testid="env-selector-trigger"
                 >
+                  <span
+                    className={`inline-block h-2 w-2 rounded-full mr-2 ${
+                      isProd ? "bg-rose-500" : "bg-amber-500"
+                    }`}
+                    aria-hidden
+                  />
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
