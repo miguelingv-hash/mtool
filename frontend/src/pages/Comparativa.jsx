@@ -496,6 +496,10 @@ export default function Comparativa() {
                       <div className="text-[11px] text-slate-500">
                         {detail.sii.detalle_iva.length} línea
                         {detail.sii.detalle_iva.length === 1 ? "" : "s"}
+                        <span className="ml-3 text-rose-600">●</span>{" "}
+                        <span className="text-slate-500">
+                          desvío de redondeo &gt; 0,01&nbsp;€
+                        </span>
                       </div>
                     </div>
                     <Table>
@@ -516,31 +520,62 @@ export default function Comparativa() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {detail.sii.detalle_iva.map((li, idx) => (
-                          <TableRow
-                            key={idx}
-                            data-testid={`detalle-iva-row-${idx}`}
-                          >
-                            <TableCell className="text-xs text-slate-600">
-                              {li.origen || "—"}
-                            </TableCell>
-                            <TableCell className="font-mono text-xs tabular-nums text-right">
-                              {li.tipo_impositivo != null
-                                ? li.tipo_impositivo.toFixed(2)
-                                : "—"}
-                            </TableCell>
-                            <TableCell className="font-mono text-xs tabular-nums text-right">
-                              {li.base_imponible != null
-                                ? li.base_imponible.toFixed(2)
-                                : "—"}
-                            </TableCell>
-                            <TableCell className="font-mono text-xs tabular-nums text-right">
-                              {li.cuota_repercutida != null
-                                ? li.cuota_repercutida.toFixed(2)
-                                : "—"}
-                            </TableCell>
-                          </TableRow>
-                        ))}
+                        {detail.sii.detalle_iva.map((li, idx) => {
+                          const esperada =
+                            li.base_imponible != null &&
+                            li.tipo_impositivo != null
+                              ? (li.base_imponible * li.tipo_impositivo) / 100
+                              : null;
+                          const mismatch =
+                            esperada != null &&
+                            li.cuota_repercutida != null &&
+                            Math.abs(esperada - li.cuota_repercutida) > 0.01;
+                          return (
+                            <TableRow
+                              key={idx}
+                              data-testid={`detalle-iva-row-${idx}`}
+                              className={mismatch ? "bg-rose-50/60" : ""}
+                              title={
+                                mismatch
+                                  ? `Redondeo: cuota esperada ${esperada.toFixed(
+                                      2,
+                                    )} €, recibida ${li.cuota_repercutida.toFixed(
+                                      2,
+                                    )} € (Δ ${(
+                                      li.cuota_repercutida - esperada
+                                    ).toFixed(2)} €)`
+                                  : undefined
+                              }
+                            >
+                              <TableCell className="text-xs text-slate-600">
+                                {li.origen || "—"}
+                              </TableCell>
+                              <TableCell className="font-mono text-xs tabular-nums text-right">
+                                {li.tipo_impositivo != null
+                                  ? li.tipo_impositivo.toFixed(2)
+                                  : "—"}
+                              </TableCell>
+                              <TableCell className="font-mono text-xs tabular-nums text-right">
+                                {li.base_imponible != null
+                                  ? li.base_imponible.toFixed(2)
+                                  : "—"}
+                              </TableCell>
+                              <TableCell className="font-mono text-xs tabular-nums text-right">
+                                {li.cuota_repercutida != null
+                                  ? li.cuota_repercutida.toFixed(2)
+                                  : "—"}
+                                {mismatch && (
+                                  <span
+                                    className="text-rose-600 ml-1"
+                                    data-testid={`iva-mismatch-${idx}`}
+                                  >
+                                    ●
+                                  </span>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
                         {detail.sii.detalle_iva.length > 1 && (
                           <TableRow className="bg-slate-50 font-semibold">
                             <TableCell className="text-xs uppercase tracking-wider text-slate-700">
