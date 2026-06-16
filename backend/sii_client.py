@@ -50,23 +50,23 @@ WSDL_LOCAL_FILE = WSDL_LOCAL_DIR / "SuministroFactEmitidas.wsdl"
 ENDPOINTS = {
     # Pre-producción · certificado normal (persona física/jurídica/apoderado)
     "preproduccion": (
-        "https://www7.aeat.es/wlpl/SSII-FACT/ws/fe/"
-        "ConsultaLRFactEmitidas"
+        "https://prewww1.aeat.es/wlpl/SSII-FACT/ws/fe/"
+        "SiiFactFEV1SOAP"
     ),
     # Pre-producción · certificado de sello electrónico
     "preproduccion_sello": (
         "https://prewww10.aeat.es/wlpl/SSII-FACT/ws/fe/"
-        "ConsultaLRFactEmitidas"
+        "SiiFactFEV1SOAP"
     ),
     # Producción · certificado normal
     "produccion": (
         "https://www1.agenciatributaria.gob.es/wlpl/SSII-FACT/ws/fe/"
-        "ConsultaLRFactEmitidas"
+        "SiiFactFEV1SOAP"
     ),
     # Producción · certificado de sello electrónico
     "produccion_sello": (
         "https://www10.agenciatributaria.gob.es/wlpl/SSII-FACT/ws/fe/"
-        "ConsultaLRFactEmitidas"
+        "SiiFactFEV1SOAP"
     ),
 }
 

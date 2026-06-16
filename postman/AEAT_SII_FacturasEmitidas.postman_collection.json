@@ -24,10 +24,10 @@
               "options": { "raw": { "language": "xml" } }
             },
             "url": {
-              "raw": "https://{{host}}/wlpl/SSII-FACT/ws/fe/ConsultaLRFactEmitidas",
+              "raw": "https://{{host}}/wlpl/SSII-FACT/ws/fe/SiiFactFEV1SOAP",
               "protocol": "https",
               "host": ["{{host}}"],
-              "path": ["wlpl", "SSII-FACT", "ws", "fe", "ConsultaLRFactEmitidas"]
+              "path": ["wlpl", "SSII-FACT", "ws", "fe", "SiiFactFEV1SOAP"]
             },
             "description": "Consulta del estado de una factura emitida ya enviada al SII.\n\n**Filtro mínimo**: ejercicio + periodo. Si quieres filtrar por una\nfactura concreta, indica `num_serie_factura` y `fecha_expedicion`.\n\nEl emisor es implícito (= el `NIF Titular` de la cabecera), porque\nestás consultando facturas que tú mismo has emitido."
           },
@@ -122,10 +122,10 @@
               "options": { "raw": { "language": "xml" } }
             },
             "url": {
-              "raw": "https://{{host}}/wlpl/SSII-FACT/ws/fe/ConsultaLRFactEmitidas",
+              "raw": "https://{{host}}/wlpl/SSII-FACT/ws/fe/SiiFactFEV1SOAP",
               "protocol": "https",
               "host": ["{{host}}"],
-              "path": ["wlpl", "SSII-FACT", "ws", "fe", "ConsultaLRFactEmitidas"]
+              "path": ["wlpl", "SSII-FACT", "ws", "fe", "SiiFactFEV1SOAP"]
             },
             "description": "Variante sin `IDFactura`: devuelve todas las facturas emitidas del\nperiodo indicado (con paginación)."
           }
@@ -142,10 +142,10 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "https://{{host}}/wlpl/SSII-FACT/ws/fe/ConsultaLRFactEmitidas",
+              "raw": "https://{{host}}/wlpl/SSII-FACT/ws/fe/SiiFactFEV1SOAP",
               "protocol": "https",
               "host": ["{{host}}"],
-              "path": ["wlpl", "SSII-FACT", "ws", "fe", "ConsultaLRFactEmitidas"]
+              "path": ["wlpl", "SSII-FACT", "ws", "fe", "SiiFactFEV1SOAP"]
             },
             "description": "GET al endpoint. La AEAT NO soporta GET en este servicio (espera POST con SOAP), pero permite verificar dos cosas:\n\n1. Que la conexión TLS se establece (handshake correcto con tu certificado).\n2. Que el endpoint existe (HTTP 405 / 500 / 400 = conexión OK; HTTP 0 = problema de red o certificado).\n\nSi te aparece un diálogo pidiendo certificado, o el navegador rechaza la conexión, todavía no tienes el cert configurado en Postman."
           }
