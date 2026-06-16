@@ -142,32 +142,80 @@ async def consulta_mensual(
     effective_mode = "real" if cert_bytes else (mode or get_default_mode())
 
     facturas: list[dict] = []
-    if effective_mode == "real":
-        try:
-            client = build_client(
-                "real", cert_bytes=cert_bytes, cert_password=cert_password
-            )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        try:
-            facturas = _consultar_mensual_real(
-                client, nif_titular, nombre_titular, ejercicio, periodo, entorno
-            )
-        except Exception as exc:  # noqa: BLE001
-            _logger.exception("Fallo SOAP en consulta mensual real")
-            raise HTTPException(502, f"Error SII: {exc}")
-    else:
-        seed = f"{nif_titular}|{ejercicio}|{periodo}"
-        n_facts = int(hashlib.md5(seed.encode()).hexdigest()[:2], 16) % 8 + 3
-        facturas = [
-            _mock_factura_mensual(
-                nif_titular, nombre_titular, ejercicio, periodo, i
-            )
-            for i in range(1, n_facts + 1)
-        ]
+    start_ts = datetime.now(timezone.utc)
+    log_entry = {
+        "id": __import__("uuid").uuid4().hex,
+        "timestamp": start_ts.isoformat(),
+        "operation": "ConsultaLRFacturasEmitidas.Mensual",
+        "endpoint": ENDPOINTS.get(entorno, ""),
+        "entorno": entorno,
+        "sii_mode": effective_mode,
+        "status": "ok",
+        "http_status": None,
+        "error_message": None,
+        "duration_ms": 0,
+        "request_xml": "",
+        "response_xml": "",
+        "nif_titular": nif_titular,
+        "nif_emisor": nif_titular,
+        "num_serie_factura": None,
+        "consulta_id": None,
+        "batch_id": None,
+    }
 
-    for f in facturas:
-        await upsert_factura("facturas_sii", f, "consulta_mensual")
+    try:
+        if effective_mode == "real":
+            try:
+                client = build_client(
+                    "real", cert_bytes=cert_bytes, cert_password=cert_password
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            try:
+                facturas, req_xml, resp_xml = _consultar_mensual_real(
+                    client,
+                    nif_titular,
+                    nombre_titular,
+                    ejercicio,
+                    periodo,
+                    entorno,
+                )
+                log_entry["request_xml"] = req_xml
+                log_entry["response_xml"] = resp_xml
+                log_entry["http_status"] = 200
+            except Exception as exc:  # noqa: BLE001
+                log_entry["status"] = "error"
+                log_entry["error_message"] = str(exc)[:2000]
+                _logger.exception("Fallo SOAP en consulta mensual real")
+                raise HTTPException(502, f"Error SII: {exc}")
+        else:
+            seed = f"{nif_titular}|{ejercicio}|{periodo}"
+            n_facts = (
+                int(hashlib.md5(seed.encode()).hexdigest()[:2], 16) % 8 + 3
+            )
+            facturas = [
+                _mock_factura_mensual(
+                    nif_titular, nombre_titular, ejercicio, periodo, i
+                )
+                for i in range(1, n_facts + 1)
+            ]
+            log_entry["request_xml"] = (
+                f"<!-- mock consulta mensual {nif_titular} {ejercicio}/{periodo} -->"
+            )
+            log_entry["response_xml"] = (
+                f"<!-- mock: {n_facts} facturas generadas deterministicamente -->"
+            )
+
+        for f in facturas:
+            await upsert_factura("facturas_sii", f, "consulta_mensual")
+    finally:
+        log_entry["duration_ms"] = int(
+            (datetime.now(timezone.utc) - start_ts).total_seconds() * 1000
+        )
+        try:
+            await _db.wslogs.insert_one(log_entry)
+        except Exception:  # noqa: BLE001
+            _logger.exception("No se pudo guardar log de consulta mensual")
 
     return {
         "total": len(facturas),
@@ -180,9 +228,13 @@ async def consulta_mensual(
 
 def _consultar_mensual_real(
     client, nif_titular, nombre_titular, ejercicio, periodo, entorno
-) -> list[dict]:
+) -> tuple[list[dict], str, str]:
     """Invoca ConsultaLRFacturasEmitidas SIN IDFactura y mapea los registros
-    devueltos al modelo canónico de Factura."""
+    devueltos al modelo canónico de Factura.
+
+    Devuelve (facturas, request_xml, response_xml) — los XML son los de la
+    última iteración de paginación, suficientes para auditoría/log.
+    """
     # Reutilizamos la infra de zeep del cliente. Adaptamos el filtro: omitimos
     # IDFactura para que el SII devuelva todas las facturas del periodo.
     # Inline para no extender la API abstracta del SIIClient.
@@ -305,7 +357,24 @@ def _consultar_mensual_real(
             clave_pag = getattr(resp, "ClavePaginacion", None)
             if not clave_pag:
                 break
-        return out
+        # Capturamos los XML de la última iteración (suficiente para auditoría)
+        last_req = ""
+        last_resp = ""
+        if history.last_sent:
+            try:
+                last_req = etree.tostring(
+                    history.last_sent["envelope"], pretty_print=True
+                ).decode()
+            except Exception:  # noqa: BLE001
+                pass
+        if history.last_received:
+            try:
+                last_resp = etree.tostring(
+                    history.last_received["envelope"], pretty_print=True
+                ).decode()
+            except Exception:  # noqa: BLE001
+                pass
+        return out, last_req, last_resp
     finally:
         import os as _os
         for p in (cert_path, key_path):
