@@ -56,11 +56,23 @@ const ESTADO_PILL = {
 
 const PERIODOS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
 
+const tieneIvaIncorrecto = (row) => {
+  const lineas = row?.sii?.detalle_iva;
+  if (!Array.isArray(lineas) || lineas.length === 0) return false;
+  return lineas.some((li) => {
+    if (li.base_imponible == null || li.tipo_impositivo == null) return false;
+    if (li.cuota_repercutida == null) return false;
+    const esperada = (li.base_imponible * li.tipo_impositivo) / 100;
+    return Math.abs(esperada - li.cuota_repercutida) > 0.01;
+  });
+};
+
 export default function Comparativa() {
   const { entorno } = useEnv();
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [onlyDiffs, setOnlyDiffs] = useState(true);
+  const [onlyIvaErr, setOnlyIvaErr] = useState(false);
   const [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState(null);
 
@@ -159,6 +171,8 @@ export default function Comparativa() {
       setLoadingCsv(false);
     }
   };
+
+  const visibleItems = onlyIvaErr ? items.filter(tieneIvaIncorrecto) : items;
 
   return (
     <div className="px-8 py-8 max-w-[1500px]">
@@ -319,7 +333,27 @@ export default function Comparativa() {
               <SelectItem value="all">Todas las facturas</SelectItem>
             </SelectContent>
           </Select>
-          <span className="text-xs text-slate-500">· {total} resultado{total === 1 ? "" : "s"}</span>
+          <label
+            className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none ml-1 px-2 py-1 border border-slate-200 hover:bg-white"
+            data-testid="filter-iva-mismatch-label"
+          >
+            <input
+              type="checkbox"
+              checked={onlyIvaErr}
+              onChange={(e) => setOnlyIvaErr(e.target.checked)}
+              className="accent-rose-600"
+              data-testid="filter-iva-mismatch"
+            />
+            <span className="text-rose-600">●</span>
+            Sólo redondeo IVA incorrecto
+          </label>
+          <span className="text-xs text-slate-500">
+            · {visibleItems.length} resultado
+            {visibleItems.length === 1 ? "" : "s"}
+            {onlyIvaErr && total !== visibleItems.length && (
+              <span className="text-slate-400"> (de {total})</span>
+            )}
+          </span>
         </div>
         <Button
           variant="outline"
@@ -358,14 +392,18 @@ export default function Comparativa() {
                   Cargando…
                 </TableCell>
               </TableRow>
-            ) : items.length === 0 ? (
+            ) : visibleItems.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="text-center py-10 text-slate-500">
-                  {onlyDiffs ? "Sin diferencias detectadas" : "Sin datos"}
+                  {onlyIvaErr
+                    ? "Ninguna factura con redondeo IVA incorrecto"
+                    : onlyDiffs
+                      ? "Sin diferencias detectadas"
+                      : "Sin datos"}
                 </TableCell>
               </TableRow>
             ) : (
-              items.map((r) => {
+              visibleItems.map((r) => {
                 const meta = ESTADO_PILL[r.estado];
                 const Icon = meta.Icon;
                 return (
