@@ -148,6 +148,38 @@ class SIIConfigResponse(BaseModel):
     endpoints: dict
 
 
+class WsLog(BaseModel):
+    """Log de una invocación al WS del SII (ok o error)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    operation: str = "ConsultaLRFacturasEmitidas"
+    endpoint: str = ""
+    entorno: str = ""
+    sii_mode: str = "mock"
+    status: Literal["ok", "error"] = "ok"
+    http_status: Optional[int] = None
+    error_message: Optional[str] = None
+    duration_ms: int = 0
+    request_xml: str = ""
+    response_xml: str = ""
+    consulta_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    # Contexto rápido para listado/filtrado
+    nif_titular: Optional[str] = None
+    nif_emisor: Optional[str] = None
+    num_serie_factura: Optional[str] = None
+
+
+class WsLogListResponse(BaseModel):
+    total: int
+    items: List[WsLog]
+
+
 # Importar tras definir modelos (sii_client hace `from server import ...`)
 from sii_client import (  # noqa: E402
     ENDPOINTS,
@@ -178,6 +210,58 @@ def _resolve_mode(mode: Optional[str], has_cert: bool) -> str:
     return (mode or get_default_mode()).lower()
 
 
+async def _log_ws_call(log: WsLog) -> WsLog:
+    """Persiste un log de invocación al WS del SII."""
+    try:
+        await db.wslogs.insert_one(log.model_dump())
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo persistir el log del WS")
+    return log
+
+
+async def _execute_and_log(
+    client_impl,
+    entrada: ConsultaInput,
+    effective_mode: str,
+    batch_id: Optional[str] = None,
+) -> tuple["RespuestaSII", str, str, WsLog]:
+    """Ejecuta una consulta SII y guarda un WsLog (success o error).
+
+    Devuelve (respuesta, request_xml, response_xml, log). Si falla, persiste
+    el log con status=error y re-lanza la excepción.
+    """
+    start = datetime.now(timezone.utc)
+    log = WsLog(
+        operation="ConsultaLRFacturasEmitidas",
+        endpoint=ENDPOINTS.get(entrada.entorno, ""),
+        entorno=entrada.entorno,
+        sii_mode=effective_mode,
+        nif_titular=entrada.nif_titular,
+        nif_emisor=entrada.nif_emisor,
+        num_serie_factura=entrada.num_serie_factura,
+        batch_id=batch_id,
+    )
+    try:
+        respuesta, req_xml, resp_xml = client_impl.consultar(entrada)
+    except Exception as exc:  # noqa: BLE001
+        log.status = "error"
+        log.error_message = str(exc)[:2000]
+        log.duration_ms = int(
+            (datetime.now(timezone.utc) - start).total_seconds() * 1000
+        )
+        await _log_ws_call(log)
+        raise
+
+    log.request_xml = req_xml
+    log.response_xml = resp_xml
+    log.http_status = 200
+    log.duration_ms = int(
+        (datetime.now(timezone.utc) - start).total_seconds() * 1000
+    )
+    await _log_ws_call(log)
+    return respuesta, req_xml, resp_xml, log
+
+
 async def _invoke_sii(
     entrada: ConsultaInput,
     cert_bytes: Optional[bytes],
@@ -193,7 +277,9 @@ async def _invoke_sii(
         raise HTTPException(400, str(exc))
 
     try:
-        respuesta, req_xml, resp_xml = client_impl.consultar(entrada)
+        respuesta, req_xml, resp_xml, _ = await _execute_and_log(
+            client_impl, entrada, effective_mode
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -459,7 +545,9 @@ async def consulta_batch(
             continue
 
         try:
-            respuesta, req_xml, resp_xml = client_impl.consultar(entrada)
+            respuesta, req_xml, resp_xml, _ = await _execute_and_log(
+                client_impl, entrada, effective_mode, batch_id=batch_id
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fila %s falló contra el SII", idx)
             errores.append(
@@ -499,6 +587,89 @@ async def consulta_batch(
 
 
 # --------- Consultas: listado / detalle / estadísticas ---------------------
+
+
+@api_router.get("/wslogs", response_model=WsLogListResponse)
+async def listar_wslogs(
+    skip: int = 0,
+    limit: int = 50,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    operation: Optional[str] = None,
+    sii_mode: Optional[Literal["mock", "real"]] = None,
+    entorno: Optional[str] = None,
+    status: Optional[Literal["ok", "error"]] = None,
+    nif_titular: Optional[str] = None,
+    nif_emisor: Optional[str] = None,
+    num_serie_factura: Optional[str] = None,
+):
+    """Listado paginado del log de invocaciones al WS del SII."""
+    filtro: dict = {}
+    rango_ts: dict = {}
+    if date_from:
+        rango_ts["$gte"] = date_from
+    if date_to:
+        # Aceptamos solo YYYY-MM-DD añadiendo final del día
+        if len(date_to) == 10:
+            rango_ts["$lte"] = f"{date_to}T23:59:59.999999+00:00"
+        else:
+            rango_ts["$lte"] = date_to
+    if rango_ts:
+        filtro["timestamp"] = rango_ts
+    if endpoint:
+        filtro["endpoint"] = {"$regex": endpoint, "$options": "i"}
+    if operation:
+        filtro["operation"] = operation
+    if sii_mode:
+        filtro["sii_mode"] = sii_mode
+    if entorno:
+        filtro["entorno"] = entorno
+    if status:
+        filtro["status"] = status
+    if nif_titular:
+        filtro["nif_titular"] = {"$regex": nif_titular, "$options": "i"}
+    if nif_emisor:
+        filtro["nif_emisor"] = {"$regex": nif_emisor, "$options": "i"}
+    if num_serie_factura:
+        filtro["num_serie_factura"] = {
+            "$regex": num_serie_factura,
+            "$options": "i",
+        }
+
+    total = await db.wslogs.count_documents(filtro)
+    cursor = (
+        db.wslogs.find(filtro, {"_id": 0, "request_xml": 0, "response_xml": 0})
+        .sort("timestamp", -1)
+        .skip(skip)
+        .limit(limit)
+    )
+    items = await cursor.to_list(length=limit)
+    # request_xml/response_xml van vacíos en el listado, se piden en /detalle
+    return WsLogListResponse(total=total, items=items)
+
+
+@api_router.get("/wslogs/{log_id}", response_model=WsLog)
+async def obtener_wslog(log_id: str):
+    doc = await db.wslogs.find_one({"id": log_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Log no encontrado")
+    return doc
+
+
+@api_router.get("/wslogs/stats/summary")
+async def wslogs_stats():
+    pipeline = [
+        {
+            "$group": {
+                "_id": {"status": "$status", "endpoint": "$endpoint"},
+                "count": {"$sum": 1},
+                "avg_duration": {"$avg": "$duration_ms"},
+            }
+        }
+    ]
+    agg = await db.wslogs.aggregate(pipeline).to_list(length=200)
+    return {"by_endpoint": agg}
 
 
 @api_router.get("/sii/consultas", response_model=List[ConsultaRecord])

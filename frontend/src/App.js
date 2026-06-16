@@ -7,6 +7,7 @@ import Dashboard from "@/pages/Dashboard";
 import UnitQuery from "@/pages/UnitQuery";
 import BatchQuery from "@/pages/BatchQuery";
 import History from "@/pages/History";
+import Logs from "@/pages/Logs";
 
 function App() {
   return (
@@ -18,6 +19,7 @@ function App() {
             <Route path="/consulta" element={<UnitQuery />} />
             <Route path="/batch" element={<BatchQuery />} />
             <Route path="/historico" element={<History />} />
+            <Route path="/logs" element={<Logs />} />
           </Route>
         </Routes>
       </BrowserRouter>

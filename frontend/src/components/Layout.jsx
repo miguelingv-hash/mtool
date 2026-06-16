@@ -4,6 +4,7 @@ import {
   FileSearch,
   FileSpreadsheet,
   History as HistoryIcon,
+  ScrollText,
   ServerCog,
   Stamp,
   Radio,
@@ -24,6 +25,7 @@ const NAV_ITEMS = [
   { to: "/consulta", label: "Consulta unitaria", icon: FileSearch, testId: "nav-unit" },
   { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch" },
   { to: "/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-history" },
+  { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs" },
 ];
 
 export default function Layout() {
