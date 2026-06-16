@@ -34,6 +34,7 @@ import {
   Eye,
   CalendarRange,
   Loader2,
+  PlayCircle,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
@@ -96,6 +97,7 @@ export default function Comparativa() {
     periodo: "01",
   });
   const [loadingMes, setLoadingMes] = useState(false);
+  const [runningJob, setRunningJob] = useState(null);
   const [csvFile, setCsvFile] = useState(null);
   const [loadingCsv, setLoadingCsv] = useState(false);
   const [cert, setCert] = useState({ enabled: false, file: null, password: "" });
@@ -181,6 +183,74 @@ export default function Comparativa() {
       setLoadingMes(false);
     }
   };
+
+  const lanzarMensualAsync = async () => {
+    if (!mes.nif_titular || !mes.nombre_titular) {
+      toast.error("Completa NIF y nombre titular");
+      return;
+    }
+    if (cert.enabled && !cert.file) {
+      toast.error("Aporta el .pfx o desactiva el modo real");
+      return;
+    }
+    try {
+      const fd = new FormData();
+      Object.entries(mes).forEach(([k, v]) => fd.append(k, v));
+      fd.append("entorno", entorno);
+      if (cert.enabled && cert.file) {
+        fd.append("mode", "real");
+        fd.append("certificate", cert.file);
+        if (cert.password) fd.append("cert_password", cert.password);
+      }
+      const { data } = await api.post("/sii/consulta-mensual-async", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setRunningJob({
+        id: data.job_id,
+        status: "queued",
+        progress: { page: 0, invoices: 0 },
+      });
+      toast.success("Consulta lanzada en background", {
+        description: `Job ${data.job_id.slice(0, 8)}… en cola`,
+      });
+    } catch (e) {
+      const d = e.response?.data?.detail;
+      toast.error("No se pudo lanzar el job", {
+        description: typeof d === "string" ? d : "Error en consulta mensual",
+      });
+    }
+  };
+
+  // Polling del job en background cada 1.5s mientras no esté en estado final.
+  useEffect(() => {
+    if (!runningJob || ["completed", "failed"].includes(runningJob.status)) {
+      return undefined;
+    }
+    const interval = setInterval(async () => {
+      try {
+        const { data } = await api.get(`/jobs/${runningJob.id}`);
+        setRunningJob(data);
+        if (data.status === "completed") {
+          toast.success("Consulta mensual completada", {
+            description: `${data.result?.total ?? 0} facturas actualizadas`,
+          });
+          load();
+        } else if (data.status === "failed") {
+          toast.error("Consulta mensual fallida", {
+            description: data.error_message || "Error desconocido",
+            duration: 12000,
+            className: "whitespace-pre-line",
+          });
+        }
+      } catch (err) {
+        // Si falla el polling, no abortamos — reintentaremos en el siguiente tick.
+      }
+    }, 1500);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line
+  }, [runningJob?.id, runningJob?.status]);
+
+  const limpiarJob = () => setRunningJob(null);
 
   const subirCsv = async () => {
     if (!csvFile) {
@@ -286,7 +356,7 @@ export default function Comparativa() {
           </div>
           <Button
             onClick={lanzarMensual}
-            disabled={loadingMes}
+            disabled={loadingMes || !!runningJob}
             className="rounded-none bg-slate-900 hover:bg-slate-700 text-white mt-4 w-full"
             data-testid="lanzar-mensual"
           >
@@ -295,8 +365,70 @@ export default function Comparativa() {
             ) : (
               <CalendarRange className="h-4 w-4 mr-2" />
             )}
-            Consultar mes ({entorno} · {cert.enabled ? "real" : "mock"})
+            Consultar mes online ({entorno} · {cert.enabled ? "real" : "mock"})
           </Button>
+          <Button
+            onClick={lanzarMensualAsync}
+            disabled={loadingMes || !!runningJob}
+            variant="outline"
+            className="rounded-none mt-2 w-full"
+            data-testid="lanzar-mensual-async"
+          >
+            <PlayCircle className="h-4 w-4 mr-2" />
+            Lanzar en background (con progreso)
+          </Button>
+
+          {/* Progreso del job background */}
+          {runningJob && (
+            <div
+              className="mt-3 border border-slate-200 bg-slate-50 px-3 py-2 text-xs"
+              data-testid="job-progress-card"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  {["queued", "running"].includes(runningJob.status) && (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-500" />
+                  )}
+                  {runningJob.status === "completed" && (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                  )}
+                  {runningJob.status === "failed" && (
+                    <AlertTriangle className="h-3.5 w-3.5 text-rose-600" />
+                  )}
+                  <span className="font-mono text-[11px] uppercase tracking-wider text-slate-600">
+                    Job {runningJob.id?.slice(0, 8)} · {runningJob.status}
+                  </span>
+                </div>
+                {["completed", "failed"].includes(runningJob.status) && (
+                  <button
+                    onClick={limpiarJob}
+                    className="text-slate-400 hover:text-slate-900 text-[11px]"
+                    data-testid="job-clear"
+                  >
+                    cerrar
+                  </button>
+                )}
+              </div>
+              <div className="mt-1.5 font-mono text-[11px] text-slate-700 tabular-nums">
+                Página {runningJob.progress?.page ?? 0} ·{" "}
+                {(runningJob.progress?.invoices ?? 0).toLocaleString("es-ES")}{" "}
+                facturas acumuladas
+                {runningJob.status === "completed" && runningJob.result && (
+                  <span className="text-emerald-700 ml-2">
+                    ✓ total {runningJob.result.total?.toLocaleString("es-ES")}
+                  </span>
+                )}
+              </div>
+              {runningJob.error_message && (
+                <div
+                  className="mt-1.5 text-[11px] text-rose-700 whitespace-pre-line"
+                  data-testid="job-error"
+                >
+                  {runningJob.error_message}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Subir CSV comercial */}

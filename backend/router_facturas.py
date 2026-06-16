@@ -20,10 +20,12 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from fastapi.responses import StreamingResponse
 from typing import Optional
 from datetime import datetime, timezone
+import asyncio
 import csv
 import io
 import random
 import hashlib
+import uuid
 
 from factura_model import (
     CAMPOS_CANONICOS,
@@ -338,7 +340,8 @@ def _extraer_iva_emitida(
 
 
 def _consultar_mensual_real(
-    client, nif_titular, nombre_titular, ejercicio, periodo, entorno
+    client, nif_titular, nombre_titular, ejercicio, periodo, entorno,
+    progress_cb=None,
 ) -> tuple[list[dict], str, str]:
     """Invoca ConsultaLRFacturasEmitidas SIN IDFactura y mapea los registros
     devueltos al modelo canónico de Factura.
@@ -511,6 +514,11 @@ def _consultar_mensual_real(
                 "acumuladas, siguiente desde %s/%s",
                 pagina, len(out), num_last, fecha_last,
             )
+            if progress_cb is not None:
+                try:
+                    progress_cb(pagina, len(out))
+                except Exception:  # noqa: BLE001
+                    _logger.exception("progress_cb falló")
         # XML crudos de la **última** página recibida (las anteriores ya
         # quedaron auditadas en el history.last_* mientras se acumulaban).
         last_req = ""
@@ -774,3 +782,233 @@ async def comparativa_export(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Jobs (consulta mensual asíncrona con progreso)
+# ---------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def _ejecutar_consulta_mensual_job(
+    job_id: str,
+    cert_bytes: Optional[bytes],
+    cert_password: Optional[str],
+    nif_titular: str,
+    nombre_titular: str,
+    ejercicio: str,
+    periodo: str,
+    entorno: str,
+    effective_mode: str,
+):
+    """Worker que ejecuta la consulta mensual en background y va actualizando
+    el documento del job en Mongo."""
+    loop = asyncio.get_running_loop()
+
+    def _update_progress(pagina: int, acumuladas: int):
+        # Schedule el update async desde el thread del worker SOAP.
+        fut = asyncio.run_coroutine_threadsafe(
+            _db.jobs.update_one(
+                {"id": job_id},
+                {"$set": {
+                    "progress.page": pagina,
+                    "progress.invoices": acumuladas,
+                    "updated_at": _now_iso(),
+                }},
+            ),
+            loop,
+        )
+        try:
+            fut.result(timeout=5)
+        except Exception:  # noqa: BLE001
+            _logger.exception("No se pudo actualizar progreso del job")
+
+    start_ts = datetime.now(timezone.utc)
+    await _db.jobs.update_one(
+        {"id": job_id},
+        {"$set": {"status": "running", "started_at": _now_iso()}},
+    )
+    log_entry = {
+        "id": uuid.uuid4().hex,
+        "timestamp": start_ts.isoformat(),
+        "operation": "ConsultaLRFacturasEmitidas.Mensual",
+        "endpoint": ENDPOINTS.get(entorno, ""),
+        "entorno": entorno,
+        "sii_mode": effective_mode,
+        "status": "ok", "http_status": None, "error_message": None,
+        "duration_ms": 0, "request_xml": "", "response_xml": "",
+        "nif_titular": nif_titular, "nif_emisor": nif_titular,
+        "num_serie_factura": None, "consulta_id": None,
+        "batch_id": f"job:{job_id}",
+    }
+
+    try:
+        if effective_mode == "real":
+            try:
+                client = build_client(
+                    "real", cert_bytes=cert_bytes, cert_password=cert_password
+                )
+            except ValueError as exc:
+                raise RuntimeError(f"Certificado inválido: {exc}") from exc
+
+            def _run():
+                return _consultar_mensual_real(
+                    client, nif_titular, nombre_titular, ejercicio, periodo,
+                    entorno, progress_cb=_update_progress,
+                )
+            try:
+                facturas, req_xml, resp_xml = await asyncio.to_thread(_run)
+                log_entry["request_xml"] = _truncar_xml(req_xml)
+                log_entry["response_xml"] = _truncar_xml(resp_xml)
+                log_entry["http_status"] = 200
+            except Exception as exc:  # noqa: BLE001
+                log_entry["status"] = "error"
+                log_entry["error_message"] = str(exc)[:2000]
+                log_entry["request_xml"] = _truncar_xml(
+                    getattr(exc, "request_xml", "") or ""
+                )
+                log_entry["response_xml"] = _truncar_xml(
+                    getattr(exc, "response_xml", "") or ""
+                )
+                log_entry["http_status"] = 502
+                _logger.exception("Fallo SOAP en consulta mensual job")
+                raise
+        else:
+            # Mock: simulamos progreso simple
+            seed = f"{nif_titular}|{ejercicio}|{periodo}"
+            n_facts = int(hashlib.md5(seed.encode()).hexdigest()[:2], 16) % 8 + 3
+            facturas = []
+            for i in range(1, n_facts + 1):
+                facturas.append(
+                    _mock_factura_mensual(
+                        nif_titular, nombre_titular, ejercicio, periodo, i
+                    )
+                )
+                # Reporta progreso por cada factura simulada (con pausa)
+                await _db.jobs.update_one(
+                    {"id": job_id},
+                    {"$set": {
+                        "progress.page": 1,
+                        "progress.invoices": i,
+                        "updated_at": _now_iso(),
+                    }},
+                )
+                await asyncio.sleep(0.05)
+            log_entry["request_xml"] = (
+                f"<!-- mock job consulta mensual {nif_titular} "
+                f"{ejercicio}/{periodo} -->"
+            )
+            log_entry["response_xml"] = (
+                f"<!-- mock: {n_facts} facturas generadas -->"
+            )
+
+        # Persiste facturas en BD
+        for f in facturas:
+            await upsert_factura("facturas_sii", f, "consulta_mensual")
+
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "completed",
+                "finished_at": _now_iso(),
+                "result": {
+                    "total": len(facturas),
+                    "ejercicio": ejercicio,
+                    "periodo": periodo,
+                },
+            }},
+        )
+    except Exception as exc:  # noqa: BLE001
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "failed",
+                "finished_at": _now_iso(),
+                "error_message": str(exc)[:2000],
+            }},
+        )
+    finally:
+        log_entry["duration_ms"] = int(
+            (datetime.now(timezone.utc) - start_ts).total_seconds() * 1000
+        )
+        log_entry["request_xml"] = _truncar_xml(log_entry.get("request_xml", ""))
+        log_entry["response_xml"] = _truncar_xml(log_entry.get("response_xml", ""))
+        try:
+            await _db.wslogs.insert_one(log_entry)
+        except Exception:  # noqa: BLE001
+            _logger.exception("No se pudo guardar log de job mensual")
+
+
+@router.post("/sii/consulta-mensual-async")
+async def consulta_mensual_async(
+    nif_titular: str = Form(...),
+    nombre_titular: str = Form(...),
+    ejercicio: str = Form(...),
+    periodo: str = Form(...),
+    entorno: str = Form("preproduccion"),
+    mode: Optional[str] = Form(None),
+    cert_password: Optional[str] = Form(None),
+    certificate: Optional[UploadFile] = File(None),
+):
+    """Versión asíncrona de la consulta mensual.
+
+    Lanza un job en background y devuelve un `job_id` que el cliente puede
+    consultar con `GET /api/jobs/{job_id}` para ver el progreso (página actual,
+    facturas acumuladas, status, error).
+    """
+    cert_bytes = None
+    if certificate is not None:
+        cert_bytes = await certificate.read()
+        if not cert_bytes:
+            cert_bytes = None
+    effective_mode = "real" if cert_bytes else (mode or get_default_mode())
+
+    job_id = uuid.uuid4().hex
+    job_doc = {
+        "id": job_id,
+        "type": "consulta-mensual",
+        "status": "queued",
+        "progress": {"page": 0, "invoices": 0},
+        "params": {
+            "nif_titular": nif_titular,
+            "nombre_titular": nombre_titular,
+            "ejercicio": ejercicio,
+            "periodo": periodo,
+            "entorno": entorno,
+            "sii_mode": effective_mode,
+        },
+        "result": None,
+        "error_message": None,
+        "created_at": _now_iso(),
+        "started_at": None,
+        "finished_at": None,
+        "updated_at": _now_iso(),
+    }
+    await _db.jobs.insert_one(job_doc)
+
+    # Lanza el worker sin esperar
+    asyncio.create_task(
+        _ejecutar_consulta_mensual_job(
+            job_id, cert_bytes, cert_password, nif_titular, nombre_titular,
+            ejercicio, periodo, entorno, effective_mode,
+        )
+    )
+    return {"job_id": job_id, "status": "queued"}
+
+
+@router.get("/jobs/{job_id}")
+async def obtener_job(job_id: str):
+    doc = await _db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Job no encontrado")
+    return doc
+
+
+@router.get("/jobs")
+async def listar_jobs(limit: int = 20):
+    cur = _db.jobs.find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
+    items = await cur.to_list(length=limit)
+    return {"items": items}
