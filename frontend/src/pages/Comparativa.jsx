@@ -37,6 +37,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import CertUploader from "@/components/CertUploader";
+import { useEnv } from "@/contexts/EnvContext";
 
 const ESTADO_PILL = {
   coincide: { label: "Coincide", cls: "pill-success", Icon: CheckCircle2 },
@@ -56,6 +57,7 @@ const ESTADO_PILL = {
 const PERIODOS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
 
 export default function Comparativa() {
+  const { entorno } = useEnv();
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [onlyDiffs, setOnlyDiffs] = useState(true);
@@ -105,7 +107,7 @@ export default function Comparativa() {
     try {
       const fd = new FormData();
       Object.entries(mes).forEach(([k, v]) => fd.append(k, v));
-      fd.append("entorno", "preproduccion");
+      fd.append("entorno", entorno);
       if (cert.enabled && cert.file) {
         fd.append("mode", "real");
         fd.append("certificate", cert.file);
@@ -239,7 +241,7 @@ export default function Comparativa() {
             ) : (
               <CalendarRange className="h-4 w-4 mr-2" />
             )}
-            Consultar mes ({cert.enabled ? "real" : "mock"})
+            Consultar mes ({entorno} · {cert.enabled ? "real" : "mock"})
           </Button>
         </div>
 

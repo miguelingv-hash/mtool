@@ -61,6 +61,9 @@
   - Detalle (`QueryDetailSheet`) muestra fila "Modo invocación".
 - Tests: 25/25 backend pasando (16 originales + 9 nuevos en `test_sii_cert.py`). Frontend 100% verificado.
 
+## Iteración 3 — Bug fix selector de entorno (Feb 2026)
+- **Fix P0**: `Comparativa.jsx` hardcodeaba `entorno="preproduccion"` en la consulta mensual, ignorando el selector global. Ahora usa `useEnv()` igual que `UnitQuery`/`BatchQuery`. Verificado vía wslogs que los 4 endpoints (`preproduccion`, `preproduccion_sello`, `produccion`, `produccion_sello`) se mapean correctamente al endpoint AEAT esperado.
+
 ## Backlog priorizado
 **P0 — Producción real**
 - ~~Integración del cliente SOAP real con `zeep`/`requests` + autenticación mTLS con certificado digital (PFX/P12)~~ ✅ Hecho. Falta probar end-to-end con certificado AEAT real.
