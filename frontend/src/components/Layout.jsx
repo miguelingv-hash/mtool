@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   FileSearch,
   FileSpreadsheet,
+  GitCompareArrows,
   History as HistoryIcon,
   ScrollText,
   ServerCog,
@@ -22,6 +23,7 @@ import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { to: "/", label: "Resumen", icon: LayoutDashboard, end: true, testId: "nav-dashboard" },
+  { to: "/comparativa", label: "Comparativa SII↔CSV", icon: GitCompareArrows, testId: "nav-comparativa" },
   { to: "/consulta", label: "Consulta unitaria", icon: FileSearch, testId: "nav-unit" },
   { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch" },
   { to: "/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-history" },

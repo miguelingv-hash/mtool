@@ -338,6 +338,21 @@ async def consulta_unitaria(entrada: ConsultaInput):
         soap_response_xml=resp_xml,
     )
     await db.consultas.insert_one(record.model_dump())
+    # Upsert de la factura en `facturas_sii` con histórico de versiones
+    from router_facturas import upsert_factura  # import diferido
+    await upsert_factura(
+        "facturas_sii",
+        {
+            "num_serie_factura": entrada.num_serie_factura,
+            "fecha_expedicion": entrada.fecha_expedicion,
+            "nif_emisor": entrada.nif_emisor,
+            "nombre_emisor": entrada.nombre_emisor,
+            "ejercicio": entrada.ejercicio,
+            "periodo": entrada.periodo,
+            "nif_titular": entrada.nif_titular,
+        },
+        "consulta_unitaria",
+    )
     return record
 
 
@@ -810,6 +825,12 @@ async def exportar_batch(batch_id: str):
 
 
 app.include_router(api_router)
+
+# Router de gestión de facturas, CSV comercial y comparativa
+from router_facturas import router as facturas_router, init as facturas_init  # noqa: E402
+
+facturas_init(db, logger)
+app.include_router(facturas_router)
 
 app.add_middleware(
     CORSMiddleware,

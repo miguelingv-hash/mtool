@@ -8,6 +8,7 @@ import UnitQuery from "@/pages/UnitQuery";
 import BatchQuery from "@/pages/BatchQuery";
 import History from "@/pages/History";
 import Logs from "@/pages/Logs";
+import Comparativa from "@/pages/Comparativa";
 
 function App() {
   return (
@@ -16,6 +17,7 @@ function App() {
         <Routes>
           <Route element={<Layout />}>
             <Route index element={<Dashboard />} />
+            <Route path="/comparativa" element={<Comparativa />} />
             <Route path="/consulta" element={<UnitQuery />} />
             <Route path="/batch" element={<BatchQuery />} />
             <Route path="/historico" element={<History />} />
