@@ -491,8 +491,9 @@ def _consultar_mensual_real(
                     }
                 )
             # ---- Paginación AEAT --------------------------------------
-            indic = getattr(resp, "IndicadorPaginacion", "NoHayMasRegistros")
-            if str(indic) != "ConMasRegistros":
+            # IndicadorPaginacionType ∈ {"S", "N"} (sí hay más / no hay más).
+            indic = getattr(resp, "IndicadorPaginacion", "N")
+            if str(indic) != "S":
                 break
             if not registros:
                 break
@@ -504,6 +505,16 @@ def _consultar_mensual_real(
             fecha_last = getattr(uidf, "FechaExpedicionFacturaEmisor", None)
             if not (num_last and fecha_last):
                 break
+            # Normaliza la fecha a DD-MM-YYYY que es el formato exigido por AEAT
+            # (zeep puede devolver datetime.date o str según mapping XSD).
+            try:
+                from datetime import date as _date
+                if isinstance(fecha_last, _date):
+                    fecha_last = fecha_last.strftime("%d-%m-%Y")
+                else:
+                    fecha_last = str(fecha_last)
+            except Exception:  # noqa: BLE001
+                fecha_last = str(fecha_last)
             clave_pag = {
                 "IDEmisorFactura": {"NIF": nif_titular},
                 "NumSerieFacturaEmisor": num_last,
