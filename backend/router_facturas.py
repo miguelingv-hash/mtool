@@ -382,7 +382,7 @@ def _extraer_iva_emitida(
 
 def _consultar_mensual_real(
     client, nif_titular, nombre_titular, ejercicio, periodo, entorno,
-    progress_cb=None, max_paginas=None,
+    progress_cb=None, max_paginas=None, start_clave=None,
 ) -> tuple[list[dict], str, str]:
     """Invoca ConsultaLRFacturasEmitidas SIN IDFactura y mapea los registros
     devueltos al modelo canónico de Factura.
@@ -425,7 +425,7 @@ def _consultar_mensual_real(
             "PeriodoLiquidacion": {"Ejercicio": ejercicio, "Periodo": periodo},
         }
         out: list[dict] = []
-        clave_pag = None
+        clave_pag = start_clave
         pagina = 0
         while True:
             pagina += 1
@@ -568,7 +568,7 @@ def _consultar_mensual_real(
             )
             if progress_cb is not None:
                 try:
-                    if progress_cb(pagina, len(out)):
+                    if progress_cb(pagina, len(out), clave_pag):
                         _logger.info(
                             "Job cancelado por el usuario tras página %d",
                             pagina,
@@ -1066,29 +1066,32 @@ async def _ejecutar_consulta_mensual_job(
     entorno: str,
     effective_mode: str,
     max_paginas: Optional[int] = None,
+    start_clave: Optional[dict] = None,
 ):
     """Worker que ejecuta la consulta mensual en background y va actualizando
     el documento del job en Mongo."""
     loop = asyncio.get_running_loop()
 
-    async def _update_and_check(pag, acum):
-        await _db.jobs.update_one(
-            {"id": job_id},
-            {"$set": {
-                "progress.page": pag,
-                "progress.invoices": acum,
-                "updated_at": _now_iso(),
-            }},
-        )
+    async def _update_and_check(pag, acum, clave):
+        upd = {
+            "progress.page": pag,
+            "progress.invoices": acum,
+            "updated_at": _now_iso(),
+        }
+        if clave is not None:
+            # Guardamos la ClavePaginacion del último registro recibido para
+            # poder reanudar desde aquí si el job se cancela o el backend cae.
+            upd["progress.clave_paginacion"] = clave
+        await _db.jobs.update_one({"id": job_id}, {"$set": upd})
         doc = await _db.jobs.find_one(
             {"id": job_id}, {"_id": 0, "cancel_requested": 1}
         )
         return bool(doc and doc.get("cancel_requested"))
 
-    def _update_progress(pagina: int, acumuladas: int) -> bool:
+    def _update_progress(pagina: int, acumuladas: int, clave=None) -> bool:
         """Devuelve True si el usuario ha solicitado cancelar el job."""
         fut = asyncio.run_coroutine_threadsafe(
-            _update_and_check(pagina, acumuladas), loop
+            _update_and_check(pagina, acumuladas, clave), loop
         )
         try:
             return bool(fut.result(timeout=5))
@@ -1129,6 +1132,7 @@ async def _ejecutar_consulta_mensual_job(
                     client, nif_titular, nombre_titular, ejercicio, periodo,
                     entorno, progress_cb=_update_progress,
                     max_paginas=max_paginas,
+                    start_clave=start_clave,
                 )
             try:
                 facturas, req_xml, resp_xml = await asyncio.to_thread(_run)
@@ -1281,6 +1285,84 @@ async def obtener_job(job_id: str):
     if not doc:
         raise HTTPException(404, "Job no encontrado")
     return doc
+
+@router.post("/jobs/{job_id}/resume")
+async def reanudar_job(
+    job_id: str,
+    cert_password: Optional[str] = Form(None),
+    certificate: Optional[UploadFile] = File(None),
+):
+    """Reanuda un job en estado `cancelled` o `failed` desde la última
+    `ClavePaginacion` que el worker guardó en BD. Crea un nuevo job que
+    continúa la descarga desde ese punto (no re-descarga las páginas
+    anteriores). Requiere subir el certificado de nuevo si era modo real."""
+    doc = await _db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Job no encontrado")
+    if doc.get("status") not in ("cancelled", "failed"):
+        raise HTTPException(
+            400,
+            f"Sólo se pueden reanudar jobs cancelled/failed (estado actual: "
+            f"{doc.get('status')})",
+        )
+    clave = (doc.get("progress") or {}).get("clave_paginacion")
+    if not clave:
+        raise HTTPException(
+            400,
+            "Este job no tiene punto de continuación guardado "
+            "(probablemente falló antes de completar la primera página).",
+        )
+
+    cert_bytes = None
+    if certificate is not None:
+        cert_bytes = await certificate.read()
+        if not cert_bytes:
+            cert_bytes = None
+    p = doc.get("params") or {}
+    if p.get("sii_mode") == "real" and not cert_bytes:
+        raise HTTPException(
+            400,
+            "El job original era en modo real: vuelve a aportar el "
+            "certificado (.pfx) para reanudar.",
+        )
+    effective_mode = "real" if cert_bytes else p.get("sii_mode", "mock")
+
+    new_id = uuid.uuid4().hex
+    job_doc = {
+        "id": new_id,
+        "type": "consulta-mensual",
+        "status": "queued",
+        "progress": {
+            "page": doc.get("progress", {}).get("page", 0),
+            "invoices": doc.get("progress", {}).get("invoices", 0),
+            "clave_paginacion": clave,
+        },
+        "params": {**p, "sii_mode": effective_mode},
+        "result": None,
+        "error_message": None,
+        "created_at": _now_iso(),
+        "started_at": None,
+        "finished_at": None,
+        "updated_at": _now_iso(),
+        "resumed_from": job_id,
+    }
+    await _db.jobs.insert_one(job_doc)
+    asyncio.create_task(
+        _ejecutar_consulta_mensual_job(
+            new_id, cert_bytes, cert_password,
+            p["nif_titular"], p["nombre_titular"],
+            p["ejercicio"], p["periodo"], p["entorno"],
+            effective_mode, p.get("max_paginas"), start_clave=clave,
+        )
+    )
+    return {
+        "job_id": new_id,
+        "status": "queued",
+        "resumed_from": job_id,
+        "start_from_page": doc.get("progress", {}).get("page", 0),
+    }
+
+
 
 
 @router.post("/jobs/{job_id}/cancel")

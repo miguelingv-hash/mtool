@@ -404,6 +404,40 @@ export default function Comparativa() {
     }
   };
 
+  const reanudarJob = async (id, jobSiiMode) => {
+    // Si el job original era real, exigimos certificado activo en la UI.
+    if (jobSiiMode === "real" && (!cert.enabled || !cert.file)) {
+      toast.error("Aporta el .pfx para reanudar", {
+        description: "Activa el modo real arriba y sube el certificado antes de reanudar este job.",
+        duration: 8000,
+      });
+      return;
+    }
+    try {
+      const fd = new FormData();
+      if (cert.enabled && cert.file) {
+        fd.append("certificate", cert.file);
+        if (cert.password) fd.append("cert_password", cert.password);
+      }
+      const { data } = await api.post(`/jobs/${id}/resume`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      toast.success("Job reanudado", {
+        description: `Continúa desde la página ${data.start_from_page + 1} (nuevo job ${data.job_id.slice(0, 8)}…)`,
+        duration: 8000,
+      });
+      // Refrescamos lista y enganchamos el polling al nuevo job
+      cargarJobs();
+      const { data: jdoc } = await api.get(`/jobs/${data.job_id}`);
+      setRunningJob(jdoc);
+    } catch (e) {
+      toast.error("No se pudo reanudar el job", {
+        description: e.response?.data?.detail || "Error",
+        duration: 10000,
+      });
+    }
+  };
+
   const [jobsOpen, setJobsOpen] = useState(false);
   const [jobsList, setJobsList] = useState([]);
   const [jobsLoading, setJobsLoading] = useState(false);
@@ -1172,6 +1206,19 @@ export default function Comparativa() {
                         Cancelar
                       </button>
                     )}
+                    {["cancelled", "failed"].includes(j.status) &&
+                      j.progress?.clave_paginacion && (
+                        <button
+                          onClick={() =>
+                            reanudarJob(j.id, j.params?.sii_mode)
+                          }
+                          className="text-emerald-700 hover:text-emerald-900 text-[11px] font-semibold"
+                          data-testid={`jobs-resume-${j.id}`}
+                          title={`Reanudar desde la página ${(j.progress?.page ?? 0) + 1}`}
+                        >
+                          Reanudar
+                        </button>
+                      )}
                   </div>
                   <div className="mt-1 text-slate-600 font-mono text-[11px] tabular-nums">
                     {j.params?.ejercicio}/{j.params?.periodo} ·{" "}
