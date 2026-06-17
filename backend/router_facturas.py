@@ -469,6 +469,9 @@ def _consultar_mensual_real(
                 or getattr(resp, "RegistroRespuestaConsultaLRFactEmitidas", None)
                 or []
             )
+            # Datos de las facturas añadidas en ESTA página (para commit
+            # incremental por página, no al final).
+            len_antes = len(out)
             for r in registros:
                 idf = getattr(r, "IDFactura", None)
                 # En la respuesta de la AEAT el elemento se llama DatosFacturaEmitida
@@ -568,7 +571,8 @@ def _consultar_mensual_real(
             )
             if progress_cb is not None:
                 try:
-                    if progress_cb(pagina, len(out), clave_pag):
+                    facturas_pagina = out[len_antes:]
+                    if progress_cb(pagina, len(out), clave_pag, facturas_pagina):
                         _logger.info(
                             "Job cancelado por el usuario tras página %d",
                             pagina,
@@ -1072,15 +1076,24 @@ async def _ejecutar_consulta_mensual_job(
     el documento del job en Mongo."""
     loop = asyncio.get_running_loop()
 
-    async def _update_and_check(pag, acum, clave):
+    async def _update_and_check(pag, acum, clave, facturas_pagina):
+        # Commit incremental: persistimos las facturas de ESTA página antes
+        # de actualizar el progreso. Así si el job se cancela/falla, las
+        # facturas ya descargadas quedan en `facturas_sii`.
+        for f in facturas_pagina or []:
+            try:
+                await upsert_factura("facturas_sii", f, "consulta_mensual")
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "upsert_factura falló (num=%s) — se sigue con las demás",
+                    f.get("num_serie_factura"),
+                )
         upd = {
             "progress.page": pag,
             "progress.invoices": acum,
             "updated_at": _now_iso(),
         }
         if clave is not None:
-            # Guardamos la ClavePaginacion del último registro recibido para
-            # poder reanudar desde aquí si el job se cancela o el backend cae.
             upd["progress.clave_paginacion"] = clave
         await _db.jobs.update_one({"id": job_id}, {"$set": upd})
         doc = await _db.jobs.find_one(
@@ -1088,13 +1101,15 @@ async def _ejecutar_consulta_mensual_job(
         )
         return bool(doc and doc.get("cancel_requested"))
 
-    def _update_progress(pagina: int, acumuladas: int, clave=None) -> bool:
-        """Devuelve True si el usuario ha solicitado cancelar el job."""
+    def _update_progress(pagina: int, acumuladas: int, clave=None,
+                          facturas_pagina=None) -> bool:
+        """Persiste las facturas de la página y devuelve True si el usuario
+        ha solicitado cancelar el job."""
         fut = asyncio.run_coroutine_threadsafe(
-            _update_and_check(pagina, acumuladas, clave), loop
+            _update_and_check(pagina, acumuladas, clave, facturas_pagina), loop
         )
         try:
-            return bool(fut.result(timeout=5))
+            return bool(fut.result(timeout=120))
         except Exception:  # noqa: BLE001
             _logger.exception("No se pudo actualizar progreso del job")
             return False
@@ -1180,9 +1195,12 @@ async def _ejecutar_consulta_mensual_job(
                 f"<!-- mock: {n_facts} facturas generadas -->"
             )
 
-        # Persiste facturas en BD
-        for f in facturas:
-            await upsert_factura("facturas_sii", f, "consulta_mensual")
+        # Persiste facturas en BD: en modo real ya se guardaron página a
+        # página via `progress_cb`. En mock no había callback con facturas
+        # de página, así que persistimos aquí.
+        if effective_mode != "real":
+            for f in facturas:
+                await upsert_factura("facturas_sii", f, "consulta_mensual")
 
         # ¿Se solicitó cancelar a mitad del job?
         doc = await _db.jobs.find_one({"id": job_id}, {"cancel_requested": 1})
