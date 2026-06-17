@@ -1,0 +1,30 @@
+# =====================================================================
+# Configuración para descargar_sii.py
+# =====================================================================
+# Líneas que empiezan por # se ignoran.
+# Formato: clave = valor   (los espacios alrededor del = se ignoran).
+# Las comillas envolventes "..." o '...' se eliminan automáticamente.
+# =====================================================================
+
+# --- Certificado digital (obligatorio) -------------------------------
+cert_path     = /ruta/absoluta/a/tu_certificado.pfx
+cert_password = MI_PASSWORD_DEL_PFX
+
+# --- Datos del titular para la consulta (obligatorio) ----------------
+nif           = A95000295
+razon_social  = TotalEnergies Clientes S.A.U.
+
+# --- Periodo (obligatorio) -------------------------------------------
+ejercicio     = 2026
+periodo       = 05
+
+# --- Entorno (opcional, default: produccion) -------------------------
+#   - produccion           (mTLS estándar)
+#   - produccion_sello     (sello empresarial)
+#   - preproduccion        (pruebas AEAT)
+#   - preproduccion_sello  (sello en pre)
+entorno       = produccion
+
+# --- MongoDB (opcional: si no se ponen, se cogen del backend/.env) ---
+# mongo_url   = mongodb://localhost:27017
+# db_name     = sii_db
