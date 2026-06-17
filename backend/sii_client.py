@@ -174,8 +174,64 @@ class SIIClient(ABC):
     @abstractmethod
     def consultar(
         self, entrada: "ConsultaInput"
-    ) -> tuple["RespuestaSII", str, str]:
-        """Devuelve (RespuestaSII, soap_request_xml, soap_response_xml)."""
+    ) -> tuple["RespuestaSII", str, str, dict | None]:
+        """Devuelve (RespuestaSII, soap_request_xml, soap_response_xml,
+        datos_factura).
+
+        `datos_factura` es un dict con los campos canónicos parseados de la
+        respuesta del SII (importes, IVA, contraparte, etc.) listo para
+        persistir en `facturas_sii`. Es `None` cuando la AEAT no devuelve
+        registro (factura NoRegistrada o error)."""
+
+
+# ---------------------------------------------------------------------------
+# Helper común: extracción de campos canónicos desde un registro SII
+# ---------------------------------------------------------------------------
+
+
+def _extraer_factura_canonica(primer, entrada) -> dict:
+    """Construye un dict con los campos canónicos de una factura a partir del
+    primer registro de la respuesta `ConsultaLRFacturasEmitidas` y la entrada
+    original. Reutiliza `_extraer_iva_emitida` de `router_facturas` (lazy
+    import para evitar la dependencia circular)."""
+    from router_facturas import _extraer_iva_emitida  # noqa: WPS433
+
+    df = (
+        getattr(primer, "DatosFacturaEmitida", None)
+        or getattr(primer, "DatosFactura", None)
+    )
+    contra = getattr(df, "Contraparte", None) if df is not None else None
+    base, cuota, tipo, detalle_iva = _extraer_iva_emitida(df)
+    total = getattr(df, "ImporteTotal", None) if df is not None else None
+    return {
+        "num_serie_factura": entrada.num_serie_factura,
+        "fecha_expedicion": entrada.fecha_expedicion,
+        "nif_emisor": entrada.nif_emisor,
+        "nombre_emisor": entrada.nombre_emisor,
+        "ejercicio": entrada.ejercicio,
+        "periodo": entrada.periodo,
+        "nif_titular": entrada.nif_titular,
+        "contraparte_nif": getattr(contra, "NIF", None) if contra else None,
+        "contraparte_nombre": (
+            getattr(contra, "NombreRazon", None) if contra else None
+        ),
+        "tipo_factura": getattr(df, "TipoFactura", None) if df else None,
+        "clave_regimen_especial": (
+            getattr(df, "ClaveRegimenEspecialOTrascendencia", None)
+            if df else None
+        ),
+        "descripcion_operacion": (
+            getattr(df, "DescripcionOperacion", None) if df else None
+        ),
+        "fecha_operacion": (
+            str(getattr(df, "FechaOperacion", "")) or None if df else None
+        ),
+        "base_imponible": float(base) if base is not None else None,
+        "tipo_impositivo": float(tipo) if tipo is not None else None,
+        "cuota_repercutida": float(cuota) if cuota is not None else None,
+        "importe_total": float(total) if total is not None else None,
+        "detalle_iva": detalle_iva,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +294,45 @@ class MockSIIClient(SIIClient):
             endpoint=ENDPOINTS[entrada.entorno],
             wsdl=WSDL_URL,
         )
+        # Datos canónicos mock (deterministas) para que la unitaria también
+        # alimente `facturas_sii` y la comparativa funcione contra ella.
+        datos_factura = None
+        if estado_factura != "NoRegistrada":
+            base = round(rnd.uniform(50, 5000), 2)
+            tipo = rnd.choice([4.0, 10.0, 21.0])
+            cuota = round(base * tipo / 100, 2)
+            datos_factura = {
+                "num_serie_factura": entrada.num_serie_factura,
+                "fecha_expedicion": entrada.fecha_expedicion,
+                "nif_emisor": entrada.nif_emisor,
+                "nombre_emisor": entrada.nombre_emisor,
+                "ejercicio": entrada.ejercicio,
+                "periodo": entrada.periodo,
+                "nif_titular": entrada.nif_titular,
+                "contraparte_nif": f"B{rnd.randint(10**7, 10**8 - 1)}",
+                "contraparte_nombre": f"Cliente mock #{bucket}",
+                "tipo_factura": "F1",
+                "clave_regimen_especial": "01",
+                "descripcion_operacion": "Operación mock",
+                "fecha_operacion": entrada.fecha_expedicion,
+                "base_imponible": base,
+                "tipo_impositivo": tipo,
+                "cuota_repercutida": cuota,
+                "importe_total": round(base + cuota, 2),
+                "detalle_iva": [
+                    {
+                        "origen": "DesgloseFactura",
+                        "tipo_impositivo": tipo,
+                        "base_imponible": base,
+                        "cuota_repercutida": cuota,
+                    }
+                ],
+            }
         return (
             respuesta,
             build_soap_request_xml(entrada),
             build_soap_response_xml(entrada, respuesta),
+            datos_factura,
         )
 
 
@@ -452,6 +543,16 @@ class ZeepSIIClient(SIIClient):
                 wsdl=WSDL_URL,
             )
 
+            # ---- Datos canónicos parseados ---------------------------------
+            datos_factura = None
+            if primer is not None and estado_factura not in ("NoRegistrada",):
+                try:
+                    datos_factura = _extraer_factura_canonica(primer, entrada)
+                except Exception:  # noqa: BLE001
+                    # Si el parseo de algún campo falla no rompemos la consulta;
+                    # simplemente no persistimos en facturas_sii.
+                    datos_factura = None
+
             # ---- XMLs crudos capturados por HistoryPlugin ------------------
             req_xml = (
                 etree.tostring(history.last_sent["envelope"], pretty_print=True)
@@ -466,7 +567,7 @@ class ZeepSIIClient(SIIClient):
                 if history.last_received
                 else build_soap_response_xml(entrada, respuesta)
             )
-            return respuesta, req_xml, resp_xml
+            return respuesta, req_xml, resp_xml, datos_factura
         finally:
             for path in (cert_path, key_path):
                 try:

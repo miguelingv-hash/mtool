@@ -229,11 +229,13 @@ async def _execute_and_log(
     entrada: ConsultaInput,
     effective_mode: str,
     batch_id: Optional[str] = None,
-) -> tuple["RespuestaSII", str, str, WsLog]:
+) -> tuple["RespuestaSII", str, str, WsLog, dict | None]:
     """Ejecuta una consulta SII y guarda un WsLog (success o error).
 
-    Devuelve (respuesta, request_xml, response_xml, log). Si falla, persiste
-    el log con status=error y re-lanza la excepción.
+    Devuelve (respuesta, request_xml, response_xml, log, datos_factura).
+    `datos_factura` es el dict con los campos canónicos parseados (importes,
+    IVA, contraparte) listo para `upsert_factura`, o `None` si la AEAT no
+    devolvió registro útil.
     """
     start = datetime.now(timezone.utc)
     log = WsLog(
@@ -247,7 +249,9 @@ async def _execute_and_log(
         batch_id=batch_id,
     )
     try:
-        respuesta, req_xml, resp_xml = client_impl.consultar(entrada)
+        respuesta, req_xml, resp_xml, datos_factura = client_impl.consultar(
+            entrada
+        )
     except Exception as exc:  # noqa: BLE001
         log.status = "error"
         log.error_message = str(exc)[:2000]
@@ -264,7 +268,7 @@ async def _execute_and_log(
         (datetime.now(timezone.utc) - start).total_seconds() * 1000
     )
     await _log_ws_call(log)
-    return respuesta, req_xml, resp_xml, log
+    return respuesta, req_xml, resp_xml, log, datos_factura
 
 
 async def _invoke_sii(
@@ -282,7 +286,7 @@ async def _invoke_sii(
         raise HTTPException(400, str(exc))
 
     try:
-        respuesta, req_xml, resp_xml, _ = await _execute_and_log(
+        respuesta, req_xml, resp_xml, _, datos_factura = await _execute_and_log(
             client_impl, entrada, effective_mode
         )
     except ValueError as exc:
@@ -291,7 +295,7 @@ async def _invoke_sii(
         logger.exception("Error invocando SII (%s)", effective_mode)
         raise HTTPException(502, f"Error en servicio SII: {exc}")
 
-    return respuesta, req_xml, resp_xml, effective_mode
+    return respuesta, req_xml, resp_xml, effective_mode, datos_factura
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +335,7 @@ async def consulta_unitaria(entrada: ConsultaInput):
     """Consulta unitaria por JSON. Usa el modo configurado en el servidor
     (`SII_MODE`). Para invocación real con certificado aportado en cliente,
     usar ``POST /api/sii/consulta-unitaria-cert``."""
-    respuesta, req_xml, resp_xml, effective_mode = await _invoke_sii(
+    respuesta, req_xml, resp_xml, effective_mode, datos_factura = await _invoke_sii(
         entrada, cert_bytes=None, cert_password=None, mode_override=None
     )
     record = ConsultaRecord(
@@ -343,21 +347,14 @@ async def consulta_unitaria(entrada: ConsultaInput):
         soap_response_xml=resp_xml,
     )
     await db.consultas.insert_one(record.model_dump())
-    # Upsert de la factura en `facturas_sii` con histórico de versiones
-    from router_facturas import upsert_factura  # import diferido
-    await upsert_factura(
-        "facturas_sii",
-        {
-            "num_serie_factura": entrada.num_serie_factura,
-            "fecha_expedicion": entrada.fecha_expedicion,
-            "nif_emisor": entrada.nif_emisor,
-            "nombre_emisor": entrada.nombre_emisor,
-            "ejercicio": entrada.ejercicio,
-            "periodo": entrada.periodo,
-            "nif_titular": entrada.nif_titular,
-        },
-        "consulta_unitaria",
-    )
+    # Upsert de la factura en `facturas_sii` con los datos canónicos extraídos
+    # del XML de respuesta (importe, IVA, contraparte, etc.). De este modo la
+    # vista Comparativa puede contrastar la unitaria contra el CSV comercial.
+    if datos_factura:
+        from router_facturas import upsert_factura  # import diferido
+        await upsert_factura(
+            "facturas_sii", datos_factura, "consulta_unitaria"
+        )
     return record
 
 
@@ -402,7 +399,7 @@ async def consulta_unitaria_cert(
         raise HTTPException(422, exc.errors())
 
     cert_bytes = await _read_cert(certificate)
-    respuesta, req_xml, resp_xml, effective_mode = await _invoke_sii(
+    respuesta, req_xml, resp_xml, effective_mode, datos_factura = await _invoke_sii(
         entrada,
         cert_bytes=cert_bytes,
         cert_password=cert_password,
@@ -417,6 +414,11 @@ async def consulta_unitaria_cert(
         soap_response_xml=resp_xml,
     )
     await db.consultas.insert_one(record.model_dump())
+    if datos_factura:
+        from router_facturas import upsert_factura  # import diferido
+        await upsert_factura(
+            "facturas_sii", datos_factura, "consulta_unitaria"
+        )
     return record
 
 
@@ -565,7 +567,7 @@ async def consulta_batch(
             continue
 
         try:
-            respuesta, req_xml, resp_xml, _ = await _execute_and_log(
+            respuesta, req_xml, resp_xml, _, datos_factura = await _execute_and_log(
                 client_impl, entrada, effective_mode, batch_id=batch_id
             )
         except Exception as exc:  # noqa: BLE001
@@ -574,6 +576,13 @@ async def consulta_batch(
                 ErrorFila(fila=idx, motivo=f"SII: {exc}", datos=norm)
             )
             continue
+
+        # Upsert también en facturas_sii igual que las unitarias / mensuales
+        if datos_factura:
+            from router_facturas import upsert_factura  # noqa: WPS433
+            await upsert_factura(
+                "facturas_sii", datos_factura, "consulta_batch"
+            )
 
         record = ConsultaRecord(
             modo="batch",
