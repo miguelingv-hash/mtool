@@ -480,20 +480,22 @@ export default function Comparativa() {
         <div className="border border-slate-200 p-5">
           <div className="flex items-center justify-between mb-4">
             <h2 className="font-display text-lg font-bold tracking-tight">
-              Importar CSV comercial
+              Importar fichero comercial
             </h2>
             <a
               href={`${API}/comercial/csv-template`}
               className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1"
               data-testid="download-template-comercial"
             >
-              <Download className="h-3 w-3" /> plantilla
+              <Download className="h-3 w-3" /> plantilla CSV
             </a>
           </div>
           <p className="text-xs text-slate-500 mb-4">
-            CSV con las mismas cabeceras que la BD. La columna
-            <span className="font-mono"> num_serie_factura </span>es la clave de
-            comparación.
+            Acepta <span className="font-mono">.csv</span> con cabeceras
+            estándar (descarga la plantilla) o <span className="font-mono">.txt</span>{" "}
+            del report SAP de informes fiscales (con cabeceras
+            <span className="font-mono"> Soc.|Doc.causante|Nº doc.oficial|… </span>).
+            La clave de comparación con el SII es <span className="font-mono">Nº doc.oficial</span>.
           </p>
           <label
             htmlFor="csv-com"
@@ -502,12 +504,12 @@ export default function Comparativa() {
           >
             <Upload className="h-7 w-7 mx-auto text-slate-400" />
             <div className="text-sm mt-2 text-slate-700">
-              {csvFile ? csvFile.name : "Selecciona el CSV comercial"}
+              {csvFile ? csvFile.name : "Selecciona el fichero comercial (.csv ó .txt)"}
             </div>
             <input
               id="csv-com"
               type="file"
-              accept=".csv"
+              accept=".csv,.txt"
               className="hidden"
               onChange={(e) => setCsvFile(e.target.files?.[0])}
               data-testid="csv-input-comercial"
@@ -524,7 +526,7 @@ export default function Comparativa() {
             ) : (
               <Upload className="h-4 w-4 mr-2" />
             )}
-            Importar CSV
+            Importar fichero
           </Button>
         </div>
       </div>

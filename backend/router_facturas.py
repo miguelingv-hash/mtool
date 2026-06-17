@@ -581,8 +581,8 @@ async def csv_template_comercial():
 
 @router.post("/comercial/csv")
 async def upload_csv_comercial(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(400, "Debe ser CSV")
+    if not file.filename.lower().endswith((".csv", ".txt")):
+        raise HTTPException(400, "Debe ser un archivo .csv o .txt")
     raw = await file.read()
     try:
         text = raw.decode("utf-8-sig")
