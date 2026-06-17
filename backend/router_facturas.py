@@ -114,6 +114,36 @@ async def upsert_factura(coleccion: str, datos: dict, fuente: str):
     )
 
 
+async def upsert_facturas_bulk(coleccion: str, datos_list: list, fuente: str):
+    """Upsert masivo de facturas en una sola operación `bulk_write`.
+
+    Para jobs mensuales con miles de facturas por página, esto reduce ~10000
+    round-trips a 1. NO mantiene histórico de versiones (`$push`) para no
+    inflar los documentos: prima la velocidad de descarga sobre la auditoría
+    versionada. El histórico sigue disponible para upserts unitarios."""
+    from pymongo import UpdateOne  # noqa: WPS433
+    if not datos_list:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    ops = []
+    for d in datos_list:
+        if not d.get("num_serie_factura"):
+            continue
+        ops.append(
+            UpdateOne(
+                {"num_serie_factura": d["num_serie_factura"]},
+                {"$set": {
+                    **d,
+                    "fuente_ultima": fuente,
+                    "ultima_actualizacion": now,
+                }},
+                upsert=True,
+            )
+        )
+    if ops:
+        await _db[coleccion].bulk_write(ops, ordered=False)
+
+
 def _mock_factura_mensual(
     nif_titular: str,
     nombre_titular: str,
@@ -567,8 +597,9 @@ def _consultar_mensual_real(
             }
             _logger.info(
                 "SII consulta mensual: página %d completada, %d facturas "
-                "acumuladas, siguiente desde %s/%s",
-                pagina, len(out), num_last, fecha_last,
+                "acumuladas (total job: %d), siguiente desde %s/%s",
+                pagina, len(out), int(start_invoices or 0) + len(out),
+                num_last, fecha_last,
             )
             if progress_cb is not None:
                 try:
@@ -1081,16 +1112,16 @@ async def _ejecutar_consulta_mensual_job(
     loop = asyncio.get_running_loop()
 
     async def _update_and_check(pag, acum, clave, facturas_pagina):
-        # Commit incremental: persistimos las facturas de ESTA página antes
-        # de actualizar el progreso. Así si el job se cancela/falla, las
-        # facturas ya descargadas quedan en `facturas_sii`.
-        for f in facturas_pagina or []:
+        # Commit incremental: persistimos las facturas de ESTA página con
+        # bulk_write (1 round-trip Mongo) antes de actualizar el progreso.
+        if facturas_pagina:
             try:
-                await upsert_factura("facturas_sii", f, "consulta_mensual")
+                await upsert_facturas_bulk(
+                    "facturas_sii", facturas_pagina, "consulta_mensual"
+                )
             except Exception:  # noqa: BLE001
                 _logger.exception(
-                    "upsert_factura falló (num=%s) — se sigue con las demás",
-                    f.get("num_serie_factura"),
+                    "upsert_facturas_bulk falló — se sigue con el progreso"
                 )
         upd = {
             "progress.page": pag,
