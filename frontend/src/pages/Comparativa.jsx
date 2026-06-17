@@ -280,11 +280,18 @@ export default function Comparativa() {
       const { data } = await api.post("/comercial/csv", fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      toast.success(
-        `CSV comercial · ${data.total} facturas importadas${
-          data.errores.length ? ` · ${data.errores.length} errores` : ""
-        }`,
-      );
+      const desc = [
+        `${data.total.toLocaleString("es-ES")} facturas importadas`,
+        data.matches_sii != null &&
+          `${data.matches_sii.toLocaleString("es-ES")} ya en SII · ${data.sin_match_sii.toLocaleString("es-ES")} sin match`,
+        data.errores?.length && `${data.errores.length} errores`,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      toast.success("CSV comercial procesado", {
+        description: desc,
+        duration: 8000,
+      });
       setCsvFile(null);
       load();
     } catch (e) {

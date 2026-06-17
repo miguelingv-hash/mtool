@@ -589,34 +589,193 @@ async def upload_csv_comercial(file: UploadFile = File(...)):
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
 
+    # Detecta el formato SAP-style (report con cabeceras de texto + filas
+    # delimitadas por '|' y números en formato español con signo final '-').
+    if _detectar_sap_report(text):
+        registros, errores = _parsear_sap_report(text)
+    else:
+        registros, errores = _parsear_csv_generico(text)
+
+    total = 0
+    for norm in registros:
+        try:
+            FacturaDatos(**norm)
+        except Exception as e:  # noqa: BLE001
+            errores.append({
+                "fila": -1,
+                "num_serie_factura": norm.get("num_serie_factura"),
+                "motivo": str(e),
+            })
+            continue
+        await upsert_factura("facturas_comercial", norm, "csv_comercial")
+        total += 1
+
+    # Tras importar, hacemos match con facturas_sii y devolvemos un mini
+    # resumen para que el frontend muestre el resultado de la comparativa.
+    nums = [r["num_serie_factura"] for r in registros if r.get("num_serie_factura")]
+    matched_count = 0
+    if nums:
+        matched_count = await _db.facturas_sii.count_documents(
+            {"num_serie_factura": {"$in": nums}}
+        )
+    return {
+        "total": total,
+        "errores": errores,
+        "matches_sii": matched_count,
+        "sin_match_sii": max(0, len(nums) - matched_count),
+    }
+
+
+def _parsear_csv_generico(text: str) -> tuple[list[dict], list[dict]]:
+    """Parser CSV "clásico" (con cabeceras estándar, separador autodetectado)."""
     sample = next((l for l in text.splitlines() if l.strip()), "")
     delim = max((";", ",", "\t", "|"), key=lambda c: sample.count(c))
-
     reader = csv.DictReader(io.StringIO(text), delimiter=delim)
     if not reader.fieldnames or "num_serie_factura" not in {
         f.strip() for f in reader.fieldnames
     }:
-        raise HTTPException(
-            400,
-            "Cabeceras inválidas. La columna 'num_serie_factura' es obligatoria. "
-            "Descarga la plantilla con /api/comercial/csv-template.",
-        )
-
-    total = 0
-    errores = []
+        return [], [{
+            "fila": 0,
+            "motivo": "Cabeceras inválidas. La columna 'num_serie_factura' "
+                      "es obligatoria. Descarga la plantilla con "
+                      "/api/comercial/csv-template.",
+        }]
+    registros, errores = [], []
     for idx, row in enumerate(reader, start=1):
         norm = normalize_factura_row(row)
         if not norm.get("num_serie_factura"):
             errores.append({"fila": idx, "motivo": "num_serie_factura vacío"})
             continue
-        try:
-            FacturaDatos(**norm)  # validación
-        except Exception as e:  # noqa: BLE001
-            errores.append({"fila": idx, "motivo": str(e)})
+        registros.append(norm)
+    return registros, errores
+
+
+# ---------- SAP-style report parser ----------------------------------------
+
+_SAP_HEADER_SIG = (
+    "Soc.", "Doc.causante", "Nº doc.oficial",
+    "Tp.impos.", "BaseImpon", "Impto.ML",
+)
+
+
+def _detectar_sap_report(text: str) -> bool:
+    """Devuelve True si encuentra (en las primeras 100 líneas) una cabecera
+    con la firma de columnas del report SAP de informes fiscales."""
+    for line in text.splitlines()[:100]:
+        if all(sig in line for sig in _SAP_HEADER_SIG):
+            return True
+    return False
+
+
+def _parsear_numero_sap(valor: str) -> Optional[float]:
+    """Parsea importes en formato español/SAP:
+       - signo '-' al final  → negativo
+       - si hay ',': '.' = miles, ',' = decimal  (`1.234,56` → 1234.56)
+       - si NO hay ',': '.' = decimal estilo SAP (`10.000` → 10.0)"""
+    if valor is None:
+        return None
+    s = str(valor).strip()
+    if not s or s in ("-", "--"):
+        return None
+    neg = s.endswith("-")
+    if neg:
+        s = s[:-1].rstrip()
+    s = s.replace(" ", "")
+    try:
+        if "," in s:
+            s = s.replace(".", "").replace(",", ".")
+        v = float(s)
+        return -v if neg else v
+    except ValueError:
+        return None
+
+
+def _parsear_fecha_sap(valor: str) -> Optional[str]:
+    """`07.05.2026` → `07-05-2026`."""
+    s = (valor or "").strip()
+    if not s:
+        return None
+    if "." in s and len(s) == 10:
+        return s.replace(".", "-")
+    return s
+
+
+def _parsear_sap_report(text: str) -> tuple[list[dict], list[dict]]:
+    """Parsea un report SAP-style. Skips líneas de texto/separadoras hasta
+    encontrar la cabecera real, y extrae filas que empiecen por `|`."""
+    lines = text.splitlines()
+    header_idx = None
+    for i, line in enumerate(lines):
+        if all(sig in line for sig in _SAP_HEADER_SIG):
+            header_idx = i
+            break
+    if header_idx is None:
+        return [], [{"fila": 0, "motivo": "Cabecera SAP no encontrada"}]
+
+    header_cells = [c.strip() for c in lines[header_idx].strip("|").split("|")]
+
+    def _idx(name, occ=0):
+        seen = 0
+        for i, c in enumerate(header_cells):
+            if c == name:
+                if seen == occ:
+                    return i
+                seen += 1
+        return None
+
+    idx_num = _idx("Nº doc.oficial")
+    idx_fexp = _idx("Fe.doc.or.", 0)
+    idx_fope = _idx("Fe.doc.or.", 1)
+    idx_tipo = _idx("Tp.impos.")
+    idx_base = _idx("BaseImpon")
+    idx_imp = _idx("Impto.ML")
+
+    faltan = [n for n, v in [
+        ("Nº doc.oficial", idx_num), ("Tp.impos.", idx_tipo),
+        ("BaseImpon", idx_base), ("Impto.ML", idx_imp),
+    ] if v is None]
+    if faltan:
+        return [], [{
+            "fila": header_idx,
+            "motivo": f"Columnas requeridas no encontradas: {', '.join(faltan)}",
+        }]
+
+    registros: list[dict] = []
+    errores: list[dict] = []
+    for i, line in enumerate(lines[header_idx + 1 :], start=header_idx + 2):
+        s = line.rstrip()
+        if not s.startswith("|"):
             continue
-        await upsert_factura("facturas_comercial", norm, "csv_comercial")
-        total += 1
-    return {"total": total, "errores": errores}
+        # Líneas separadoras estilo `|------...|`
+        if set(s) <= {"|", "-", " "}:
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if len(cells) < len(header_cells):
+            continue
+        num = cells[idx_num] if idx_num < len(cells) else ""
+        if not num:
+            continue
+        try:
+            fexp = _parsear_fecha_sap(cells[idx_fexp]) if idx_fexp is not None else None
+            fope = _parsear_fecha_sap(cells[idx_fope]) if idx_fope is not None else None
+            tipo = _parsear_numero_sap(cells[idx_tipo])
+            base = _parsear_numero_sap(cells[idx_base])
+            cuota = _parsear_numero_sap(cells[idx_imp])
+            ejercicio = fexp.split("-")[-1] if fexp else None
+            periodo = fexp.split("-")[1] if fexp else None
+            registros.append({
+                "num_serie_factura": num,
+                "fecha_expedicion": fexp,
+                "fecha_operacion": fope,
+                "ejercicio": ejercicio,
+                "periodo": periodo,
+                "tipo_impositivo": tipo,
+                "base_imponible": base,
+                "cuota_repercutida": cuota,
+            })
+        except Exception as e:  # noqa: BLE001
+            errores.append({"fila": i, "motivo": str(e), "raw": s[:200]})
+    return registros, errores
 
 
 @router.get("/facturas/{fuente}")
