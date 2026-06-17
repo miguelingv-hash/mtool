@@ -383,6 +383,7 @@ def _extraer_iva_emitida(
 def _consultar_mensual_real(
     client, nif_titular, nombre_titular, ejercicio, periodo, entorno,
     progress_cb=None, max_paginas=None, start_clave=None,
+    start_pagina=0, start_invoices=0,
 ) -> tuple[list[dict], str, str]:
     """Invoca ConsultaLRFacturasEmitidas SIN IDFactura y mapea los registros
     devueltos al modelo canónico de Factura.
@@ -426,7 +427,7 @@ def _consultar_mensual_real(
         }
         out: list[dict] = []
         clave_pag = start_clave
-        pagina = 0
+        pagina = int(start_pagina or 0)
         while True:
             pagina += 1
             if clave_pag is not None:
@@ -572,7 +573,8 @@ def _consultar_mensual_real(
             if progress_cb is not None:
                 try:
                     facturas_pagina = out[len_antes:]
-                    if progress_cb(pagina, len(out), clave_pag, facturas_pagina):
+                    total_acumuladas = int(start_invoices or 0) + len(out)
+                    if progress_cb(pagina, total_acumuladas, clave_pag, facturas_pagina):
                         _logger.info(
                             "Job cancelado por el usuario tras página %d",
                             pagina,
@@ -1071,6 +1073,8 @@ async def _ejecutar_consulta_mensual_job(
     effective_mode: str,
     max_paginas: Optional[int] = None,
     start_clave: Optional[dict] = None,
+    start_pagina: int = 0,
+    start_invoices: int = 0,
 ):
     """Worker que ejecuta la consulta mensual en background y va actualizando
     el documento del job en Mongo."""
@@ -1148,6 +1152,8 @@ async def _ejecutar_consulta_mensual_job(
                     entorno, progress_cb=_update_progress,
                     max_paginas=max_paginas,
                     start_clave=start_clave,
+                    start_pagina=start_pagina,
+                    start_invoices=start_invoices,
                 )
             try:
                 facturas, req_xml, resp_xml = await asyncio.to_thread(_run)
@@ -1371,6 +1377,8 @@ async def reanudar_job(
             p["nif_titular"], p["nombre_titular"],
             p["ejercicio"], p["periodo"], p["entorno"],
             effective_mode, p.get("max_paginas"), start_clave=clave,
+            start_pagina=doc.get("progress", {}).get("page", 0),
+            start_invoices=doc.get("progress", {}).get("invoices", 0),
         )
     )
     return {
