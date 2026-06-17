@@ -67,6 +67,26 @@ def init(db, logger):
     _logger = logger
 
 
+async def cleanup_orphan_jobs():
+    """Marca como `failed` los jobs que quedaron en `queued`/`running` tras un
+    reinicio del backend (sus workers ya no existen). Se llama en `startup`."""
+    if _db is None:
+        return
+    res = await _db.jobs.update_many(
+        {"status": {"$in": ["queued", "running"]}},
+        {"$set": {
+            "status": "failed",
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "error_message": "Job huérfano: el backend se reinició durante "
+                             "la ejecución. Vuelve a lanzar la consulta.",
+        }},
+    )
+    if res.modified_count:
+        _logger.warning(
+            "Limpiados %d jobs huérfanos al arranque", res.modified_count
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -548,7 +568,12 @@ def _consultar_mensual_real(
             )
             if progress_cb is not None:
                 try:
-                    progress_cb(pagina, len(out))
+                    if progress_cb(pagina, len(out)):
+                        _logger.info(
+                            "Job cancelado por el usuario tras página %d",
+                            pagina,
+                        )
+                        break
                 except Exception:  # noqa: BLE001
                     _logger.exception("progress_cb falló")
             if max_paginas is not None and pagina >= max_paginas:
@@ -1046,23 +1071,30 @@ async def _ejecutar_consulta_mensual_job(
     el documento del job en Mongo."""
     loop = asyncio.get_running_loop()
 
-    def _update_progress(pagina: int, acumuladas: int):
-        # Schedule el update async desde el thread del worker SOAP.
+    async def _update_and_check(pag, acum):
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "progress.page": pag,
+                "progress.invoices": acum,
+                "updated_at": _now_iso(),
+            }},
+        )
+        doc = await _db.jobs.find_one(
+            {"id": job_id}, {"_id": 0, "cancel_requested": 1}
+        )
+        return bool(doc and doc.get("cancel_requested"))
+
+    def _update_progress(pagina: int, acumuladas: int) -> bool:
+        """Devuelve True si el usuario ha solicitado cancelar el job."""
         fut = asyncio.run_coroutine_threadsafe(
-            _db.jobs.update_one(
-                {"id": job_id},
-                {"$set": {
-                    "progress.page": pagina,
-                    "progress.invoices": acumuladas,
-                    "updated_at": _now_iso(),
-                }},
-            ),
-            loop,
+            _update_and_check(pagina, acumuladas), loop
         )
         try:
-            fut.result(timeout=5)
+            return bool(fut.result(timeout=5))
         except Exception:  # noqa: BLE001
             _logger.exception("No se pudo actualizar progreso del job")
+            return False
 
     start_ts = datetime.now(timezone.utc)
     await _db.jobs.update_one(
@@ -1148,10 +1180,13 @@ async def _ejecutar_consulta_mensual_job(
         for f in facturas:
             await upsert_factura("facturas_sii", f, "consulta_mensual")
 
+        # ¿Se solicitó cancelar a mitad del job?
+        doc = await _db.jobs.find_one({"id": job_id}, {"cancel_requested": 1})
+        final_status = "cancelled" if doc and doc.get("cancel_requested") else "completed"
         await _db.jobs.update_one(
             {"id": job_id},
             {"$set": {
-                "status": "completed",
+                "status": final_status,
                 "finished_at": _now_iso(),
                 "result": {
                     "total": len(facturas),
@@ -1246,6 +1281,29 @@ async def obtener_job(job_id: str):
     if not doc:
         raise HTTPException(404, "Job no encontrado")
     return doc
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancelar_job(job_id: str):
+    """Solicita la cancelación cooperativa de un job en background.
+    El worker detectará el flag tras finalizar la página en curso y dejará
+    el job en estado `cancelled` con todas las facturas ya descargadas
+    persistidas en `facturas_sii`."""
+    doc = await _db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Job no encontrado")
+    if doc.get("status") not in ("queued", "running"):
+        return {
+            "id": job_id,
+            "status": doc.get("status"),
+            "cancel_requested": doc.get("cancel_requested", False),
+            "message": "El job ya terminó, no se puede cancelar",
+        }
+    await _db.jobs.update_one(
+        {"id": job_id},
+        {"$set": {"cancel_requested": True, "updated_at": _now_iso()}},
+    )
+    return {"id": job_id, "status": doc.get("status"), "cancel_requested": True}
 
 
 @router.get("/jobs")

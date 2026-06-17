@@ -24,6 +24,7 @@ import {
   SheetContent,
   SheetHeader,
   SheetTitle,
+  SheetDescription,
 } from "@/components/ui/sheet";
 import {
   Upload,
@@ -35,6 +36,7 @@ import {
   Eye,
   CalendarRange,
   Loader2,
+  ListTodo,
   PlayCircle,
   ChevronLeft,
   ChevronRight,
@@ -388,6 +390,36 @@ export default function Comparativa() {
 
   const limpiarJob = () => setRunningJob(null);
 
+  const cancelarJob = async (id) => {
+    try {
+      await api.post(`/jobs/${id}/cancel`);
+      toast.info("Cancelación solicitada", {
+        description: "El job se detendrá tras la página en curso. Las facturas descargadas hasta ahora se conservan.",
+        duration: 8000,
+      });
+    } catch (e) {
+      toast.error("No se pudo cancelar el job", {
+        description: e.response?.data?.detail || "Error",
+      });
+    }
+  };
+
+  const [jobsOpen, setJobsOpen] = useState(false);
+  const [jobsList, setJobsList] = useState([]);
+  const [jobsLoading, setJobsLoading] = useState(false);
+  const cargarJobs = async () => {
+    setJobsLoading(true);
+    try {
+      const { data } = await api.get("/jobs", { params: { limit: 20 } });
+      setJobsList(data.items || []);
+    } finally {
+      setJobsLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (jobsOpen) cargarJobs();
+  }, [jobsOpen]);
+
   const subirCsv = async () => {
     if (!csvFile) {
       toast.error("Selecciona un CSV");
@@ -564,7 +596,7 @@ export default function Comparativa() {
                     Job {runningJob.id?.slice(0, 8)} · {runningJob.status}
                   </span>
                 </div>
-                {["completed", "failed"].includes(runningJob.status) && (
+                {["completed", "failed", "cancelled"].includes(runningJob.status) && (
                   <button
                     onClick={limpiarJob}
                     className="text-slate-400 hover:text-slate-900 text-[11px]"
@@ -572,6 +604,21 @@ export default function Comparativa() {
                   >
                     cerrar
                   </button>
+                )}
+                {["queued", "running"].includes(runningJob.status) &&
+                  !runningJob.cancel_requested && (
+                    <button
+                      onClick={() => cancelarJob(runningJob.id)}
+                      className="text-rose-600 hover:text-rose-800 text-[11px] font-semibold"
+                      data-testid="job-cancel"
+                    >
+                      Cancelar
+                    </button>
+                  )}
+                {runningJob.cancel_requested && (
+                  <span className="text-amber-600 text-[11px]" data-testid="job-cancel-pending">
+                    cancelando…
+                  </span>
                 )}
               </div>
               <div className="mt-1.5 font-mono text-[11px] text-slate-700 tabular-nums">
@@ -735,6 +782,16 @@ export default function Comparativa() {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-none"
+            onClick={() => setJobsOpen(true)}
+            data-testid="open-jobs-dialog"
+          >
+            <ListTodo className="h-4 w-4 mr-2" />
+            Jobs
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -1031,6 +1088,125 @@ export default function Comparativa() {
               })()}
             </>
           )}
+        </SheetContent>
+      </Sheet>
+
+      {/* Dialog: Jobs en background ------------------------------------- */}
+      <Sheet open={jobsOpen} onOpenChange={setJobsOpen}>
+        <SheetContent
+          side="right"
+          className="w-full sm:max-w-[640px] overflow-y-auto"
+          data-testid="jobs-sheet"
+        >
+          <SheetHeader>
+            <SheetTitle className="font-display tracking-tight">
+              Jobs en background
+            </SheetTitle>
+            <SheetDescription className="text-slate-500 text-xs">
+              Histórico de consultas mensuales lanzadas en background. Los
+              que están en cola o ejecutándose se pueden cancelar (la
+              cancelación es cooperativa: se aplica tras la página en curso).
+            </SheetDescription>
+          </SheetHeader>
+          <div className="mt-4 flex items-center justify-between">
+            <span className="text-xs text-slate-500">
+              {jobsLoading
+                ? "Cargando…"
+                : `${jobsList.length} job${jobsList.length === 1 ? "" : "s"}`}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-none h-7 text-xs"
+              onClick={cargarJobs}
+              data-testid="jobs-refresh"
+            >
+              <RefreshCw className="h-3 w-3 mr-1" /> Recargar
+            </Button>
+          </div>
+          <div className="mt-4 space-y-2" data-testid="jobs-list">
+            {jobsList.map((j) => {
+              const isActive = ["queued", "running"].includes(j.status);
+              return (
+                <div
+                  key={j.id}
+                  className="border border-slate-200 px-3 py-2 text-xs"
+                  data-testid={`jobs-item-${j.id}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      {j.status === "queued" && (
+                        <span className="text-slate-500">⏳</span>
+                      )}
+                      {j.status === "running" && (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />
+                      )}
+                      {j.status === "completed" && (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                      )}
+                      {j.status === "failed" && (
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-600" />
+                      )}
+                      {j.status === "cancelled" && (
+                        <span className="text-amber-600">⏸</span>
+                      )}
+                      <span className="font-mono">{j.id.slice(0, 8)}…</span>
+                      <span className="uppercase tracking-wider text-[10px] text-slate-600">
+                        {j.status}
+                      </span>
+                      {j.cancel_requested && isActive && (
+                        <span className="text-amber-600 text-[10px]">
+                          cancelando…
+                        </span>
+                      )}
+                    </div>
+                    {isActive && !j.cancel_requested && (
+                      <button
+                        onClick={async () => {
+                          await cancelarJob(j.id);
+                          cargarJobs();
+                        }}
+                        className="text-rose-600 hover:text-rose-800 text-[11px] font-semibold"
+                        data-testid={`jobs-cancel-${j.id}`}
+                      >
+                        Cancelar
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-1 text-slate-600 font-mono text-[11px] tabular-nums">
+                    {j.params?.ejercicio}/{j.params?.periodo} ·{" "}
+                    {j.params?.entorno} · {j.params?.sii_mode}
+                    {j.params?.max_paginas != null
+                      ? ` · máx ${j.params.max_paginas} pág`
+                      : " · todas las pág"}
+                  </div>
+                  <div className="mt-0.5 text-slate-700 font-mono text-[11px] tabular-nums">
+                    Página {j.progress?.page ?? 0} ·{" "}
+                    {(j.progress?.invoices ?? 0).toLocaleString("es-ES")}{" "}
+                    facturas
+                    {j.result?.total != null && (
+                      <span className="ml-2 text-emerald-700">
+                        ✓ total {j.result.total.toLocaleString("es-ES")}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-slate-400">
+                    {j.created_at?.slice(0, 19).replace("T", " ")}
+                  </div>
+                  {j.error_message && (
+                    <div className="mt-1 text-[11px] text-rose-700 whitespace-pre-line">
+                      {j.error_message.slice(0, 240)}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {!jobsLoading && jobsList.length === 0 && (
+              <div className="text-center text-xs text-slate-500 py-8">
+                No hay jobs registrados
+              </div>
+            )}
+          </div>
         </SheetContent>
       </Sheet>
     </div>

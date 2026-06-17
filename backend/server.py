@@ -841,10 +841,19 @@ async def exportar_batch(batch_id: str):
 app.include_router(api_router)
 
 # Router de gestión de facturas, CSV comercial y comparativa
-from router_facturas import router as facturas_router, init as facturas_init  # noqa: E402
+from router_facturas import router as facturas_router, init as facturas_init, cleanup_orphan_jobs  # noqa: E402
 
 facturas_init(db, logger)
 app.include_router(facturas_router)
+
+
+@app.on_event("startup")
+async def _startup_cleanup_jobs():
+    """Limpia jobs huérfanos (workers muertos por reinicio) al arrancar."""
+    try:
+        await cleanup_orphan_jobs()
+    except Exception:  # noqa: BLE001
+        logger.exception("cleanup_orphan_jobs falló")
 
 app.add_middleware(
     CORSMiddleware,
