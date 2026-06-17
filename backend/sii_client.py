@@ -504,7 +504,8 @@ class ZeepSIIClient(SIIClient):
             # ---- Parseo de la respuesta zeep -------------------------------
             estado_envio = getattr(response, "ResultadoConsulta", "Correcto")
             registros = (
-                getattr(response, "RegistroRespuestaConsultaLRFactEmitidas", [])
+                getattr(response, "RegistroRespuestaConsultaLRFacturasEmitidas", None)
+                or getattr(response, "RegistroRespuestaConsultaLRFactEmitidas", None)
                 or []
             )
             primer = registros[0] if registros else None
