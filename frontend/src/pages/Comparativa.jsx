@@ -240,6 +240,36 @@ export default function Comparativa() {
     return () => clearTimeout(t);
   }, [filtroNumSerie]);
 
+  // Al montar la página, comprobamos si hay un job de consulta mensual
+  // activo (queued/running) o terminado recientemente. Esto permite que el
+  // usuario cierre el navegador / pestaña / equipo durante horas y, al
+  // reabrir, vea el estado actual sin perder seguimiento del proceso.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get("/jobs", { params: { limit: 10 } });
+        if (cancelled) return;
+        const activos = (data.items || []).filter((j) =>
+          ["queued", "running"].includes(j.status),
+        );
+        if (activos.length > 0) {
+          // El más reciente
+          setRunningJob(activos[0]);
+          toast.info("Recuperado job en curso", {
+            description: `Job ${activos[0].id.slice(0, 8)}… (${activos[0].status})`,
+            duration: 6000,
+          });
+        }
+      } catch (e) {
+        // ignoramos silenciosamente — no es crítico
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const exportar = () => {
     const params = new URLSearchParams();
     params.set("only_diffs", onlyDiffs);

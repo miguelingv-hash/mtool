@@ -19,12 +19,12 @@ import QueryDetailSheet from "@/components/QueryDetailSheet";
 import CertUploader from "@/components/CertUploader";
 
 const INITIAL = {
-  nif_titular: "",
-  nombre_titular: "",
+  nif_titular: "A95000295",
+  nombre_titular: "TotalEnergies Clientes S.A.U.",
   ejercicio: String(new Date().getFullYear()),
   periodo: "01",
-  nif_emisor: "",
-  nombre_emisor: "",
+  nif_emisor: "A95000295",
+  nombre_emisor: "TotalEnergies Clientes S.A.U.",
   num_serie_factura: "",
   fecha_expedicion: "",
 };
