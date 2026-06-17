@@ -405,19 +405,17 @@ export default function Comparativa() {
   };
 
   const reanudarJob = async (id, jobSiiMode) => {
-    // Si el job original era real, exigimos certificado activo en la UI.
-    if (jobSiiMode === "real" && (!cert.enabled || !cert.file)) {
-      toast.error("Aporta el .pfx para reanudar", {
-        description: "Activa el modo real arriba y sube el certificado antes de reanudar este job.",
-        duration: 8000,
+    if (jobSiiMode === "real" && !resumeForm.file) {
+      toast.error("Falta el certificado", {
+        description: "Sube el .pfx en el bloque de reanudación de este job.",
       });
       return;
     }
     try {
       const fd = new FormData();
-      if (cert.enabled && cert.file) {
-        fd.append("certificate", cert.file);
-        if (cert.password) fd.append("cert_password", cert.password);
+      if (resumeForm.file) {
+        fd.append("certificate", resumeForm.file);
+        if (resumeForm.password) fd.append("cert_password", resumeForm.password);
       }
       const { data } = await api.post(`/jobs/${id}/resume`, fd, {
         headers: { "Content-Type": "multipart/form-data" },
@@ -426,7 +424,7 @@ export default function Comparativa() {
         description: `Continúa desde la página ${data.start_from_page + 1} (nuevo job ${data.job_id.slice(0, 8)}…)`,
         duration: 8000,
       });
-      // Refrescamos lista y enganchamos el polling al nuevo job
+      setResumeForm({ jobId: null, file: null, password: "" });
       cargarJobs();
       const { data: jdoc } = await api.get(`/jobs/${data.job_id}`);
       setRunningJob(jdoc);
@@ -441,6 +439,7 @@ export default function Comparativa() {
   const [jobsOpen, setJobsOpen] = useState(false);
   const [jobsList, setJobsList] = useState([]);
   const [jobsLoading, setJobsLoading] = useState(false);
+  const [resumeForm, setResumeForm] = useState({ jobId: null, file: null, password: "" });
   const cargarJobs = async () => {
     setJobsLoading(true);
     try {
@@ -1210,13 +1209,17 @@ export default function Comparativa() {
                       j.progress?.clave_paginacion && (
                         <button
                           onClick={() =>
-                            reanudarJob(j.id, j.params?.sii_mode)
+                            setResumeForm({
+                              jobId: resumeForm.jobId === j.id ? null : j.id,
+                              file: null,
+                              password: "",
+                            })
                           }
                           className="text-emerald-700 hover:text-emerald-900 text-[11px] font-semibold"
                           data-testid={`jobs-resume-${j.id}`}
                           title={`Reanudar desde la página ${(j.progress?.page ?? 0) + 1}`}
                         >
-                          Reanudar
+                          {resumeForm.jobId === j.id ? "✕ cancelar" : "Reanudar"}
                         </button>
                       )}
                   </div>
@@ -1243,6 +1246,59 @@ export default function Comparativa() {
                   {j.error_message && (
                     <div className="mt-1 text-[11px] text-rose-700 whitespace-pre-line">
                       {j.error_message.slice(0, 240)}
+                    </div>
+                  )}
+                  {resumeForm.jobId === j.id && (
+                    <div
+                      className="mt-2 border border-emerald-200 bg-emerald-50/40 px-3 py-2 space-y-2"
+                      data-testid={`jobs-resume-form-${j.id}`}
+                    >
+                      <div className="text-[11px] text-emerald-900 font-semibold">
+                        Reanudar desde página {(j.progress?.page ?? 0) + 1}
+                      </div>
+                      {j.params?.sii_mode === "real" && (
+                        <>
+                          <label className="block text-[11px] text-slate-600">
+                            Certificado .pfx
+                            <input
+                              type="file"
+                              accept=".pfx,.p12"
+                              className="block mt-1 text-[11px] w-full file:rounded-none file:border file:border-slate-300 file:bg-white file:px-2 file:py-0.5 file:mr-2 file:text-[11px]"
+                              onChange={(e) =>
+                                setResumeForm({ ...resumeForm, file: e.target.files?.[0] || null })
+                              }
+                              data-testid={`jobs-resume-cert-${j.id}`}
+                            />
+                          </label>
+                          <label className="block text-[11px] text-slate-600">
+                            Contraseña
+                            <input
+                              type="password"
+                              value={resumeForm.password}
+                              onChange={(e) =>
+                                setResumeForm({ ...resumeForm, password: e.target.value })
+                              }
+                              placeholder="(opcional si el .pfx no la tiene)"
+                              className="block mt-1 w-full rounded-none border border-slate-300 px-2 py-1 text-[11px] font-mono"
+                              data-testid={`jobs-resume-pwd-${j.id}`}
+                            />
+                          </label>
+                          {resumeForm.file && (
+                            <div className="text-[10px] text-emerald-700 font-mono truncate">
+                              ✓ {resumeForm.file.name} ({(resumeForm.file.size / 1024).toFixed(1)} KB)
+                            </div>
+                          )}
+                        </>
+                      )}
+                      <Button
+                        size="sm"
+                        className="rounded-none w-full h-7 text-[11px] bg-emerald-700 hover:bg-emerald-800 text-white"
+                        onClick={() => reanudarJob(j.id, j.params?.sii_mode)}
+                        disabled={j.params?.sii_mode === "real" && !resumeForm.file}
+                        data-testid={`jobs-resume-confirm-${j.id}`}
+                      >
+                        Lanzar reanudación
+                      </Button>
                     </div>
                   )}
                 </div>
