@@ -96,6 +96,7 @@ export default function Comparativa() {
     ejercicio: String(new Date().getFullYear()),
     periodo: "01",
   });
+  const [maxPaginas, setMaxPaginas] = useState("1"); // "1"…"10" o "all"
   const [loadingMes, setLoadingMes] = useState(false);
   const [runningJob, setRunningJob] = useState(null);
   const [csvFile, setCsvFile] = useState(null);
@@ -159,6 +160,7 @@ export default function Comparativa() {
       const fd = new FormData();
       Object.entries(mes).forEach(([k, v]) => fd.append(k, v));
       fd.append("entorno", entorno);
+      if (maxPaginas !== "all") fd.append("max_paginas", maxPaginas);
       if (cert.enabled && cert.file) {
         fd.append("mode", "real");
         fd.append("certificate", cert.file);
@@ -197,6 +199,7 @@ export default function Comparativa() {
       const fd = new FormData();
       Object.entries(mes).forEach(([k, v]) => fd.append(k, v));
       fd.append("entorno", entorno);
+      if (maxPaginas !== "all") fd.append("max_paginas", maxPaginas);
       if (cert.enabled && cert.file) {
         fd.append("mode", "real");
         fd.append("certificate", cert.file);
@@ -353,6 +356,28 @@ export default function Comparativa() {
           </div>
           <div className="mt-4">
             <CertUploader value={cert} onChange={setCert} testIdPrefix="mes-cert" />
+          </div>
+          <div className="mt-4 flex items-center gap-3">
+            <Label className="text-xs uppercase tracking-wider text-slate-600 whitespace-nowrap">
+              Máx. páginas
+            </Label>
+            <Select value={maxPaginas} onValueChange={setMaxPaginas}>
+              <SelectTrigger
+                className="rounded-none h-8 w-full text-sm"
+                data-testid="mes-max-paginas"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {Array.from({ length: 10 }, (_, i) => String(i + 1)).map((n) => (
+                  <SelectItem key={n} value={n}>
+                    {n} {n === "1" ? "página" : "páginas"} (
+                    {(Number(n) * 10000).toLocaleString("es-ES")} máx.)
+                  </SelectItem>
+                ))}
+                <SelectItem value="all">Todas las páginas (sin límite)</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <Button
             onClick={lanzarMensual}

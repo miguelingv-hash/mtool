@@ -145,6 +145,7 @@ async def consulta_mensual(
     mode: Optional[str] = Form(None),
     cert_password: Optional[str] = Form(None),
     certificate: Optional[UploadFile] = File(None),
+    max_paginas: Optional[int] = Form(None),
 ):
     """Consulta mensual al SII. Si se aporta certificado se invoca el SOAP
     real; si no, se usa mock determinista.
@@ -196,6 +197,7 @@ async def consulta_mensual(
                     ejercicio,
                     periodo,
                     entorno,
+                    max_paginas=max_paginas,
                 )
                 log_entry["request_xml"] = _truncar_xml(req_xml)
                 log_entry["response_xml"] = _truncar_xml(resp_xml)
@@ -341,7 +343,7 @@ def _extraer_iva_emitida(
 
 def _consultar_mensual_real(
     client, nif_titular, nombre_titular, ejercicio, periodo, entorno,
-    progress_cb=None,
+    progress_cb=None, max_paginas=None,
 ) -> tuple[list[dict], str, str]:
     """Invoca ConsultaLRFacturasEmitidas SIN IDFactura y mapea los registros
     devueltos al modelo canónico de Factura.
@@ -530,6 +532,12 @@ def _consultar_mensual_real(
                     progress_cb(pagina, len(out))
                 except Exception:  # noqa: BLE001
                     _logger.exception("progress_cb falló")
+            if max_paginas is not None and pagina >= max_paginas:
+                _logger.info(
+                    "Tope max_paginas=%d alcanzado, deteniendo paginación",
+                    max_paginas,
+                )
+                break
         # XML crudos de la **última** página recibida (las anteriores ya
         # quedaron auditadas en el history.last_* mientras se acumulaban).
         last_req = ""
@@ -814,6 +822,7 @@ async def _ejecutar_consulta_mensual_job(
     periodo: str,
     entorno: str,
     effective_mode: str,
+    max_paginas: Optional[int] = None,
 ):
     """Worker que ejecuta la consulta mensual en background y va actualizando
     el documento del job en Mongo."""
@@ -869,6 +878,7 @@ async def _ejecutar_consulta_mensual_job(
                 return _consultar_mensual_real(
                     client, nif_titular, nombre_titular, ejercicio, periodo,
                     entorno, progress_cb=_update_progress,
+                    max_paginas=max_paginas,
                 )
             try:
                 facturas, req_xml, resp_xml = await asyncio.to_thread(_run)
@@ -963,6 +973,7 @@ async def consulta_mensual_async(
     mode: Optional[str] = Form(None),
     cert_password: Optional[str] = Form(None),
     certificate: Optional[UploadFile] = File(None),
+    max_paginas: Optional[int] = Form(None),
 ):
     """Versión asíncrona de la consulta mensual.
 
@@ -990,6 +1001,7 @@ async def consulta_mensual_async(
             "periodo": periodo,
             "entorno": entorno,
             "sii_mode": effective_mode,
+            "max_paginas": max_paginas,
         },
         "result": None,
         "error_message": None,
@@ -1004,7 +1016,7 @@ async def consulta_mensual_async(
     asyncio.create_task(
         _ejecutar_consulta_mensual_job(
             job_id, cert_bytes, cert_password, nif_titular, nombre_titular,
-            ejercicio, periodo, entorno, effective_mode,
+            ejercicio, periodo, entorno, effective_mode, max_paginas,
         )
     )
     return {"job_id": job_id, "status": "queued"}
