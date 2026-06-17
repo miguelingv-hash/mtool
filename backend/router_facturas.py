@@ -72,6 +72,16 @@ async def cleanup_orphan_jobs():
     reinicio del backend (sus workers ya no existen). Se llama en `startup`."""
     if _db is None:
         return
+    # Crear índices críticos (idempotente). Sin estos, los upserts masivos
+    # hacen collection scan y el bulk_write tarda > 2 minutos por página.
+    try:
+        await _db.facturas_sii.create_index("num_serie_factura", unique=True)
+        await _db.facturas_comercial.create_index("num_serie_factura", unique=True)
+        await _db.jobs.create_index("id", unique=True)
+        await _db.jobs.create_index([("status", 1), ("created_at", -1)])
+    except Exception:  # noqa: BLE001
+        _logger.exception("No se pudieron crear los índices al arranque")
+
     res = await _db.jobs.update_many(
         {"status": {"$in": ["queued", "running"]}},
         {"$set": {
@@ -1144,7 +1154,7 @@ async def _ejecutar_consulta_mensual_job(
             _update_and_check(pagina, acumuladas, clave, facturas_pagina), loop
         )
         try:
-            return bool(fut.result(timeout=120))
+            return bool(fut.result(timeout=600))
         except Exception:  # noqa: BLE001
             _logger.exception("No se pudo actualizar progreso del job")
             return False
