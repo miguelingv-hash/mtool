@@ -112,7 +112,17 @@ function DetalleIvaTable({ label, lineas, testIdSuffix }) {
                     : undefined
                 }
               >
-                <TableCell className="text-xs text-slate-600">{li.origen || "—"}</TableCell>
+                <TableCell className="text-xs text-slate-600">
+                  {li.origen || "—"}
+                  {li.causa_exencion && (
+                    <span
+                      className="ml-1 text-[10px] uppercase tracking-wider bg-amber-100 text-amber-800 px-1.5 py-0.5"
+                      title="Operación exenta"
+                    >
+                      Exenta {li.causa_exencion}
+                    </span>
+                  )}
+                </TableCell>
                 <TableCell className="font-mono text-xs tabular-nums text-right">
                   {li.tipo_impositivo != null ? li.tipo_impositivo.toFixed(2) : "—"}
                 </TableCell>

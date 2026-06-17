@@ -258,25 +258,29 @@ async def consulta_mensual(
 
 def _sumar_detalle_iva(sin_desglose) -> tuple[float, float, float | None, list[dict]]:
     """Suma BaseImponible / CuotaRepercutida de los DetalleIVA dentro de un
-    `TipoSinDesgloseType` / `TipoSinDesglosePrestacionType`.
-    Devuelve (base, cuota, tipo, detalles) — `tipo` se toma del primer DetalleIVA;
-    `detalles` es la lista cruda de líneas {tipo_impositivo, base_imponible, cuota_repercutida}.
+    `TipoSinDesgloseType` / `TipoSinDesglosePrestacionType`. Incluye también
+    los tramos **Sujeta.Exenta.DetalleExenta** (con `causa_exencion` y sin
+    cuota repercutida).
+    Devuelve (base, cuota, tipo, detalles) — `tipo` se toma del primer
+    DetalleIVA no-exento; `detalles` incluye todas las líneas (no-exentas y
+    exentas), cada una con `tipo_impositivo`, `base_imponible`,
+    `cuota_repercutida` y opcionalmente `causa_exencion`.
     """
     if sin_desglose is None:
         return 0.0, 0.0, None, []
     sujeta = getattr(sin_desglose, "Sujeta", None)
     if sujeta is None:
         return 0.0, 0.0, None, []
+    base_tot = 0.0
+    cuota_tot = 0.0
+    tipo: float | None = None
+    lineas: list[dict] = []
+
+    # 1) Tramos NO exentos (con tipo y cuota)
     no_exenta = getattr(sujeta, "NoExenta", None)
     desg = getattr(no_exenta, "DesgloseIVA", None) if no_exenta else None
     detalles = getattr(desg, "DetalleIVA", None) if desg else None
-    if not detalles:
-        return 0.0, 0.0, None, []
-    base_tot = 0.0
-    cuota_tot = 0.0
-    tipo = None
-    lineas: list[dict] = []
-    for d in detalles:
+    for d in detalles or []:
         b = getattr(d, "BaseImponible", None)
         c = getattr(d, "CuotaRepercutida", None)
         t = getattr(d, "TipoImpositivo", None)
@@ -286,13 +290,28 @@ def _sumar_detalle_iva(sin_desglose) -> tuple[float, float, float | None, list[d
             cuota_tot += float(c)
         if tipo is None and t is not None:
             tipo = float(t)
-        lineas.append(
-            {
-                "tipo_impositivo": float(t) if t is not None else None,
-                "base_imponible": float(b) if b is not None else None,
-                "cuota_repercutida": float(c) if c is not None else None,
-            }
-        )
+        lineas.append({
+            "tipo_impositivo": float(t) if t is not None else None,
+            "base_imponible": float(b) if b is not None else None,
+            "cuota_repercutida": float(c) if c is not None else None,
+        })
+
+    # 2) Tramos EXENTOS (Sujeta.Exenta.DetalleExenta). No tienen cuota ni tipo,
+    # pero sí causa de exención (E1..E6) y base imponible. Suman en `base_tot`.
+    exenta = getattr(sujeta, "Exenta", None)
+    det_ex = getattr(exenta, "DetalleExenta", None) if exenta else None
+    for d in det_ex or []:
+        b = getattr(d, "BaseImponible", None)
+        causa = getattr(d, "CausaExencion", None)
+        if b is not None:
+            base_tot += float(b)
+        lineas.append({
+            "tipo_impositivo": None,
+            "base_imponible": float(b) if b is not None else None,
+            "cuota_repercutida": None,
+            "causa_exencion": str(causa) if causa is not None else None,
+        })
+
     return base_tot, cuota_tot, tipo, lineas
 
 
