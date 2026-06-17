@@ -740,7 +740,7 @@ def _parsear_sap_report(text: str) -> tuple[list[dict], list[dict]]:
             "motivo": f"Columnas requeridas no encontradas: {', '.join(faltan)}",
         }]
 
-    registros: list[dict] = []
+    registros_por_num: dict[str, dict] = {}
     errores: list[dict] = []
     for i, line in enumerate(lines[header_idx + 1 :], start=header_idx + 2):
         s = line.rstrip()
@@ -763,19 +763,48 @@ def _parsear_sap_report(text: str) -> tuple[list[dict], list[dict]]:
             cuota = _parsear_numero_sap(cells[idx_imp])
             ejercicio = fexp.split("-")[-1] if fexp else None
             periodo = fexp.split("-")[1] if fexp else None
-            registros.append({
-                "num_serie_factura": num,
-                "fecha_expedicion": fexp,
-                "fecha_operacion": fope,
-                "ejercicio": ejercicio,
-                "periodo": periodo,
+            # Una misma factura puede aparecer en varias filas (una por tramo
+            # de IVA). Agrupamos por num_serie_factura sumando bases/cuotas y
+            # acumulando los detalles para `detalle_iva`.
+            agg = registros_por_num.get(num)
+            if agg is None:
+                agg = {
+                    "num_serie_factura": num,
+                    "fecha_expedicion": fexp,
+                    "fecha_operacion": fope,
+                    "ejercicio": ejercicio,
+                    "periodo": periodo,
+                    "base_imponible": 0.0,
+                    "cuota_repercutida": 0.0,
+                    "tipo_impositivo": None,
+                    "detalle_iva": [],
+                }
+                registros_por_num[num] = agg
+            if base is not None:
+                agg["base_imponible"] += base
+            if cuota is not None:
+                agg["cuota_repercutida"] += cuota
+            agg["detalle_iva"].append({
                 "tipo_impositivo": tipo,
                 "base_imponible": base,
                 "cuota_repercutida": cuota,
+                "origen": "SAP",
             })
         except Exception as e:  # noqa: BLE001
             errores.append({"fila": i, "motivo": str(e), "raw": s[:200]})
-    return registros, errores
+
+    # Para el `tipo_impositivo` agregado: si la factura tiene una sola línea
+    # de IVA, usamos su tipo; si tiene varios tramos lo dejamos a None para
+    # evitar falsos positivos en la comparativa (la información detallada
+    # queda en `detalle_iva`).
+    for agg in registros_por_num.values():
+        if len(agg["detalle_iva"]) == 1:
+            agg["tipo_impositivo"] = agg["detalle_iva"][0]["tipo_impositivo"]
+        # Redondeo defensivo de las sumas a 2 decimales (evita ruido de coma
+        # flotante en agregados de 3+ líneas).
+        agg["base_imponible"] = round(agg["base_imponible"], 2)
+        agg["cuota_repercutida"] = round(agg["cuota_repercutida"], 2)
+    return list(registros_por_num.values()), errores
 
 
 @router.get("/facturas/{fuente}")
