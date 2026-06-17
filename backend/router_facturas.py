@@ -661,16 +661,25 @@ async def _comparativa_data(
     ejercicio: Optional[str],
     periodo: Optional[str],
     only_diffs: bool,
+    num_serie: Optional[str] = None,
 ) -> list[dict]:
     """Construye la lista completa de comparaciones SII vs Comercial.
-    Aplica filtros Mongo de `ejercicio`/`periodo` antes de cargar para no
-    traer documentos de más a memoria.
+    Aplica filtros Mongo de `ejercicio`/`periodo`/`num_serie` antes de cargar
+    para no traer documentos de más a memoria.
     """
+    import re
+
     filtro: dict = {}
     if ejercicio:
         filtro["ejercicio"] = str(ejercicio)
     if periodo:
         filtro["periodo"] = str(periodo)
+    if num_serie:
+        # Filtro "contiene", case-insensitive (escapamos regex meta-chars).
+        filtro["num_serie_factura"] = {
+            "$regex": re.escape(num_serie),
+            "$options": "i",
+        }
 
     sii_docs = await _db.facturas_sii.find(
         filtro, {"_id": 0, "versiones": 0}
@@ -723,13 +732,14 @@ async def comparativa(
     only_diffs: bool = True,
     ejercicio: Optional[str] = None,
     periodo: Optional[str] = None,
+    num_serie: Optional[str] = None,
 ):
     """Compara facturas SII vs Comercial por `num_serie_factura`.
 
-    Filtros: `ejercicio` y `periodo` (opcionales).
+    Filtros: `ejercicio`, `periodo`, `num_serie` (contiene, case-insensitive).
     Paginación: `skip` / `limit` (default 50).
     """
-    resultados = await _comparativa_data(ejercicio, periodo, only_diffs)
+    resultados = await _comparativa_data(ejercicio, periodo, only_diffs, num_serie)
     return {
         "total": len(resultados),
         "skip": skip,
@@ -758,10 +768,11 @@ async def comparativa_export(
     only_diffs: bool = True,
     ejercicio: Optional[str] = None,
     periodo: Optional[str] = None,
+    num_serie: Optional[str] = None,
 ):
     """Exporta la comparativa completa (sin paginar) a CSV (UTF-8 BOM) abrible
     directamente en Excel/LibreOffice."""
-    resultados = await _comparativa_data(ejercicio, periodo, only_diffs)
+    resultados = await _comparativa_data(ejercicio, periodo, only_diffs, num_serie)
 
     headers = ["num_serie_factura", "estado", "campos_con_diferencias"]
     for c in CAMPOS_CANONICOS:

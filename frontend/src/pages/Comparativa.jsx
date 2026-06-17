@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { api, API } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -74,12 +75,16 @@ const tieneIvaIncorrecto = (row) => {
 
 export default function Comparativa() {
   const { entorno } = useEnv();
+  const location = useLocation();
+  const initialNumSerie = new URLSearchParams(location.search).get("num_serie") || "";
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
-  const [onlyDiffs, setOnlyDiffs] = useState(true);
+  const [onlyDiffs, setOnlyDiffs] = useState(!initialNumSerie);
   const [onlyIvaErr, setOnlyIvaErr] = useState(false);
   const [filtroEjercicio, setFiltroEjercicio] = useState("__all__");
   const [filtroPeriodo, setFiltroPeriodo] = useState("__all__");
+  const [filtroNumSerie, setFiltroNumSerie] = useState(initialNumSerie);
+  const [filtroNumSerieDebounced, setFiltroNumSerieDebounced] = useState(initialNumSerie);
   const [periodosDisponibles, setPeriodosDisponibles] = useState({
     ejercicios: [],
     periodos: [],
@@ -113,6 +118,7 @@ export default function Comparativa() {
       };
       if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
       if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
+      if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
       const { data } = await api.get("/comparativa", { params });
       setItems(data.items);
       setTotal(data.total);
@@ -131,18 +137,25 @@ export default function Comparativa() {
   useEffect(() => {
     load();
     // eslint-disable-next-line
-  }, [onlyDiffs, page, pageSize, filtroEjercicio, filtroPeriodo]);
+  }, [onlyDiffs, page, pageSize, filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced]);
 
   // Reset paginación al cambiar filtros
   useEffect(() => {
     setPage(1);
-  }, [onlyDiffs, filtroEjercicio, filtroPeriodo, pageSize]);
+  }, [onlyDiffs, filtroEjercicio, filtroPeriodo, pageSize, filtroNumSerieDebounced]);
+
+  // Debounce 300ms para el filtro de num_serie (evita request por keystroke)
+  useEffect(() => {
+    const t = setTimeout(() => setFiltroNumSerieDebounced(filtroNumSerie), 300);
+    return () => clearTimeout(t);
+  }, [filtroNumSerie]);
 
   const exportar = () => {
     const params = new URLSearchParams();
     params.set("only_diffs", onlyDiffs);
     if (filtroEjercicio !== "__all__") params.set("ejercicio", filtroEjercicio);
     if (filtroPeriodo !== "__all__") params.set("periodo", filtroPeriodo);
+    if (filtroNumSerieDebounced.trim()) params.set("num_serie", filtroNumSerieDebounced.trim());
     window.location.href = `${API}/comparativa/export?${params.toString()}`;
   };
 
@@ -555,6 +568,24 @@ export default function Comparativa() {
               ))}
             </SelectContent>
           </Select>
+
+          <Input
+            value={filtroNumSerie}
+            onChange={(e) => setFiltroNumSerie(e.target.value)}
+            placeholder="Nº factura (contiene)"
+            className="rounded-none h-8 w-[200px] text-xs font-mono"
+            data-testid="filter-num-serie"
+          />
+          {filtroNumSerie && (
+            <button
+              onClick={() => setFiltroNumSerie("")}
+              className="text-[11px] text-slate-500 hover:text-slate-900 -ml-1"
+              data-testid="filter-num-serie-clear"
+              title="Limpiar"
+            >
+              ×
+            </button>
+          )}
 
           <label
             className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none px-2 py-1 border border-slate-200 hover:bg-white"

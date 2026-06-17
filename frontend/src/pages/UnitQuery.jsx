@@ -12,7 +12,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { Loader2, Send, RotateCcw, FileSearch } from "lucide-react";
+import { Loader2, Send, RotateCcw, FileSearch, GitCompareArrows } from "lucide-react";
+import { Link } from "react-router-dom";
 import EstadoBadge from "@/components/EstadoBadge";
 import QueryDetailSheet from "@/components/QueryDetailSheet";
 import CertUploader from "@/components/CertUploader";
@@ -347,6 +348,21 @@ export default function UnitQuery() {
                 <FileSearch className="h-4 w-4 mr-2" />
                 Ver SOAP completo
               </Button>
+              {result.entrada?.num_serie_factura && (
+                <Link
+                  to={`/comparativa?num_serie=${encodeURIComponent(result.entrada.num_serie_factura)}`}
+                  className="block"
+                  data-testid="open-comparativa-link"
+                >
+                  <Button
+                    variant="outline"
+                    className="w-full rounded-none mt-2"
+                  >
+                    <GitCompareArrows className="h-4 w-4 mr-2" />
+                    Ver en Comparativa
+                  </Button>
+                </Link>
+              )}
             </div>
           )}
         </div>
