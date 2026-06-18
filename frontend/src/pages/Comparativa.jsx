@@ -42,6 +42,7 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  ShieldCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 import CertUploader from "@/components/CertUploader";
@@ -196,6 +197,8 @@ export default function Comparativa() {
   });
   const [maxPaginas, setMaxPaginas] = useState("1"); // "1"…"10" o "all"
   const [loadingMes, setLoadingMes] = useState(false);
+  const [loadingVerify, setLoadingVerify] = useState(false);
+  const [verifyResult, setVerifyResult] = useState(null);
   const [runningJob, setRunningJob] = useState(null);
   const [csvFile, setCsvFile] = useState(null);
   const [loadingCsv, setLoadingCsv] = useState(false);
@@ -309,6 +312,64 @@ export default function Comparativa() {
     if (filtroPeriodo !== "__all__") params.set("periodo", filtroPeriodo);
     if (filtroNumSerieDebounced.trim()) params.set("num_serie", filtroNumSerieDebounced.trim());
     window.location.href = `${API}/comparativa/export?${params.toString()}`;
+  };
+
+  const verificarCompletitud = async () => {
+    if (!mes.nif_titular || !mes.nombre_titular) {
+      toast.error("Completa NIF y nombre titular");
+      return;
+    }
+    if (cert.enabled && !cert.file) {
+      toast.error("Aporta el .pfx o desactiva el modo real");
+      return;
+    }
+    setLoadingVerify(true);
+    setVerifyResult(null);
+    try {
+      const fd = new FormData();
+      fd.append("nif_titular", mes.nif_titular);
+      fd.append("nombre_titular", mes.nombre_titular);
+      fd.append("ejercicio", mes.ejercicio);
+      fd.append("periodo", mes.periodo);
+      fd.append("entorno", entorno);
+      if (cert.enabled && cert.file) {
+        fd.append("mode", "real");
+        fd.append("certificate", cert.file);
+        if (cert.password) fd.append("cert_password", cert.password);
+      } else {
+        fd.append("mode", "mock");
+      }
+      const { data } = await api.post("/sii/verificar-completitud", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setVerifyResult(data);
+      if (data.completo) {
+        toast.success(
+          `Periodo ${data.ejercicio}/${data.periodo} completo`,
+          {
+            description: `${data.total_antes.toLocaleString("es-ES")} facturas SII confirmadas — AEAT no devolvió ninguna factura adicional.`,
+          },
+        );
+      } else {
+        toast.warning(
+          `Faltaban ${data.nuevas_facturas.toLocaleString("es-ES")} facturas`,
+          {
+            description: `${data.total_antes.toLocaleString("es-ES")} → ${data.total_despues.toLocaleString("es-ES")} en BD. Se han añadido las nuevas.`,
+            duration: 12000,
+          },
+        );
+        load();
+      }
+    } catch (e) {
+      const d = e.response?.data?.detail;
+      const msg = typeof d === "string" ? d : "Error verificando completitud";
+      toast.error("Verificación fallida", {
+        description: msg,
+        duration: 12000,
+      });
+    } finally {
+      setLoadingVerify(false);
+    }
   };
 
   const lanzarMensual = async () => {
@@ -647,6 +708,81 @@ export default function Comparativa() {
             <PlayCircle className="h-4 w-4 mr-2" />
             Lanzar en background (con progreso)
           </Button>
+          <Button
+            onClick={verificarCompletitud}
+            disabled={loadingVerify || loadingMes || !!runningJob}
+            variant="outline"
+            className="rounded-none mt-2 w-full border-dashed"
+            data-testid="verificar-completitud"
+            title="Comprueba si AEAT tiene facturas posteriores a las ya descargadas en BD para este periodo. Coste mínimo: 1 sola llamada SOAP."
+          >
+            {loadingVerify ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <ShieldCheck className="h-4 w-4 mr-2" />
+            )}
+            Verificar completitud del periodo
+          </Button>
+
+          {/* Resultado de la última verificación */}
+          {verifyResult && (
+            <div
+              className={`mt-3 border px-3 py-2 text-xs ${
+                verifyResult.completo
+                  ? "border-emerald-200 bg-emerald-50"
+                  : "border-amber-200 bg-amber-50"
+              }`}
+              data-testid="verify-result"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  {verifyResult.completo ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                  ) : (
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                  )}
+                  <span className="font-mono text-[11px] uppercase tracking-wider text-slate-700">
+                    {verifyResult.completo
+                      ? "Periodo completo"
+                      : `Faltaban ${verifyResult.nuevas_facturas.toLocaleString("es-ES")} facturas`}
+                  </span>
+                </div>
+                <button
+                  onClick={() => setVerifyResult(null)}
+                  className="text-slate-400 hover:text-slate-900 text-[11px]"
+                  data-testid="verify-clear"
+                >
+                  cerrar
+                </button>
+              </div>
+              <div className="mt-1.5 font-mono text-[11px] text-slate-700 tabular-nums leading-relaxed">
+                <span className="text-slate-500">SII en BD: </span>
+                {verifyResult.total_antes.toLocaleString("es-ES")}
+                {verifyResult.total_despues !== verifyResult.total_antes && (
+                  <>
+                    {" → "}
+                    <span className="font-semibold text-amber-700">
+                      {verifyResult.total_despues.toLocaleString("es-ES")}
+                    </span>
+                  </>
+                )}
+                {verifyResult.ultima_factura_bd && (
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    Última factura BD usada como clave:{" "}
+                    <span className="font-mono">
+                      {verifyResult.ultima_factura_bd.num_serie_factura}
+                    </span>{" "}
+                    · {verifyResult.ultima_factura_bd.fecha_expedicion}
+                  </div>
+                )}
+                {!verifyResult.completo && (
+                  <div className="text-[10px] text-amber-700 mt-1">
+                    Las nuevas facturas se han persistido vía upsert.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Progreso del job background */}
           {runningJob && (

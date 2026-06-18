@@ -322,6 +322,153 @@ async def consulta_mensual(
     }
 
 
+@router.post("/sii/verificar-completitud")
+async def verificar_completitud(
+    nif_titular: str = Form(...),
+    nombre_titular: str = Form(""),
+    ejercicio: str = Form(...),
+    periodo: str = Form(...),
+    entorno: str = Form("preproduccion"),
+    mode: Optional[str] = Form(None),
+    cert_password: Optional[str] = Form(None),
+    certificate: Optional[UploadFile] = File(None),
+):
+    """Verifica si AEAT tiene facturas posteriores a las ya descargadas en BD
+    para `(nif, ejercicio, periodo)`. Si las hay, las inserta vía upsert.
+
+    Devuelve `completo: bool` y `nuevas_facturas: N`. Coste mínimo: 1 sola
+    llamada SOAP cuando el periodo ya está completo.
+    """
+    cert_bytes = None
+    if certificate is not None:
+        cert_bytes = await certificate.read()
+        if not cert_bytes:
+            cert_bytes = None
+    effective_mode = "real" if cert_bytes else (mode or get_default_mode())
+
+    # 1) Buscar la última factura de BD para construir ClavePaginacion
+    ult = await _db.facturas_sii.find_one(
+        {
+            "ejercicio": str(ejercicio),
+            "periodo": str(periodo),
+            "nif_titular": nif_titular,
+        },
+        sort=[("num_serie_factura", -1), ("fecha_expedicion", -1)],
+        projection={
+            "_id": 0,
+            "num_serie_factura": 1,
+            "fecha_expedicion": 1,
+        },
+    )
+    total_antes = await _db.facturas_sii.count_documents({
+        "ejercicio": str(ejercicio),
+        "periodo": str(periodo),
+        "nif_titular": nif_titular,
+    })
+
+    start_clave = None
+    if ult:
+        start_clave = {
+            "IDEmisorFactura": {"NIF": nif_titular},
+            "NumSerieFacturaEmisor": ult["num_serie_factura"],
+            "FechaExpedicionFacturaEmisor": ult["fecha_expedicion"],
+        }
+
+    # 2) Llamar al SII
+    start_ts = datetime.now(timezone.utc)
+    facturas: list[dict] = []
+    error_msg: Optional[str] = None
+    try:
+        if effective_mode == "real":
+            try:
+                client = build_client(
+                    "real", cert_bytes=cert_bytes, cert_password=cert_password
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            facturas, _req_xml, _resp_xml = await asyncio.to_thread(
+                _consultar_mensual_real,
+                client,
+                nif_titular,
+                nombre_titular or nif_titular,
+                str(ejercicio),
+                str(periodo),
+                entorno,
+                None,           # progress_cb
+                None,           # max_paginas
+                start_clave,    # start_clave
+            )
+        else:
+            # Mock: tras la primera "página" simulada, AEAT devolvería 0
+            # facturas adicionales con la ClavePaginacion construida desde la
+            # última real. Aquí devolvemos 0 deterministicamente.
+            facturas = [] if start_clave else []
+
+        # 3) Persistir nuevas (idempotente: upsert por num_serie_factura)
+        if facturas:
+            await upsert_facturas_bulk("facturas_sii", facturas, "verificacion_completitud")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        error_msg = str(exc)[:1500]
+        _logger.exception("Fallo en verificar-completitud")
+
+    total_despues = await _db.facturas_sii.count_documents({
+        "ejercicio": str(ejercicio),
+        "periodo": str(periodo),
+        "nif_titular": nif_titular,
+    })
+
+    # 4) Log auditoría (truncado)
+    duration_ms = int(
+        (datetime.now(timezone.utc) - start_ts).total_seconds() * 1000
+    )
+    try:
+        await _db.wslogs.insert_one({
+            "id": uuid.uuid4().hex,
+            "timestamp": start_ts.isoformat(),
+            "operation": "ConsultaLRFacturasEmitidas.VerificarCompletitud",
+            "endpoint": ENDPOINTS.get(entorno, ""),
+            "entorno": entorno,
+            "sii_mode": effective_mode,
+            "status": "error" if error_msg else "ok",
+            "http_status": 502 if error_msg else 200,
+            "error_message": error_msg,
+            "duration_ms": duration_ms,
+            "request_xml": "",
+            "response_xml": "",
+            "nif_titular": nif_titular,
+            "nif_emisor": nif_titular,
+            "num_serie_factura": None,
+            "consulta_id": None,
+            "batch_id": None,
+            "extra": {
+                "ejercicio": str(ejercicio),
+                "periodo": str(periodo),
+                "nuevas_facturas": len(facturas),
+                "total_antes": total_antes,
+                "total_despues": total_despues,
+                "ultima_bd": ult,
+            },
+        })
+    except Exception:  # noqa: BLE001
+        _logger.exception("No se pudo guardar log de verificar-completitud")
+
+    if error_msg:
+        raise HTTPException(502, error_msg)
+
+    return {
+        "completo": len(facturas) == 0,
+        "nuevas_facturas": len(facturas),
+        "total_antes": total_antes,
+        "total_despues": total_despues,
+        "ultima_factura_bd": ult,
+        "ejercicio": str(ejercicio),
+        "periodo": str(periodo),
+        "sii_mode": effective_mode,
+    }
+
+
 def _sumar_detalle_iva(sin_desglose) -> tuple[float, float, float | None, list[dict]]:
     """Suma BaseImponible / CuotaRepercutida de los DetalleIVA dentro de un
     `TipoSinDesgloseType` / `TipoSinDesglosePrestacionType`. Incluye también
