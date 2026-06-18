@@ -80,22 +80,70 @@ newman run AEAT_SII_Loop.postman_collection.json ^
   --reporter-cli-no-summary --reporter-cli-no-assertions ^
   --timeout-request 60000 > export.txt 2>&1
 
-findstr /B "CSV" export.txt > facturas.csv
+:: ⚠️  NO uses `findstr` aquí. Newman parte las líneas largas
+:: en varios renglones con bordes │ ... │ y findstr sólo recoge
+:: trozos. Usa el script Python que reensambla:
+python extraer_csv.py export.txt facturas.csv
+```
+
+### Extracción robusta del CSV (Windows / Mac / Linux)
+
+Newman pinta su salida como una "tabla" con bordes `│ ... │` y, cuando
+una línea de `console.log` es muy larga, la **parte en varios renglones**.
+Por eso un `findstr /B "CSVROW"` o un `grep` simple **trunca filas**.
+
+Para extraer el CSV correctamente usa el script `extraer_csv.py` (incluido
+en esta carpeta). Reensambla las líneas partidas, quita los códigos ANSI
+de color y los bordes de tabla.
+
+**⚠️  IMPORTANTE — Cómo lanzar el script:**
+
+NO lo ejecutes desde el REPL interactivo de Python (el que muestra `>>>`).
+Si pones `run` o `python ...` dentro del `>>>` verás
+`NameError: name 'run' is not defined` o `SyntaxError`.
+
+Hay que lanzarlo desde **CMD** o **PowerShell** de Windows:
+
+```cmd
+:: Abre CMD (Win+R → cmd) y cd a la carpeta donde está export.txt
+cd C:\ruta\donde\tienes\export.txt
+
+:: Lanza el script (asumiendo que extraer_csv.py está en la misma carpeta)
+python extraer_csv.py
+```
+
+```cmd
+:: O con rutas explícitas (lo más fiable):
+python C:\ruta\al\extraer_csv.py C:\ruta\export.txt C:\ruta\facturas.csv
+```
+
+```powershell
+# Desde PowerShell es idéntico:
+python .\extraer_csv.py .\export.txt .\facturas.csv
+```
+
+Salida esperada:
+
+```
+[OK] Cabecera detectada: sí
+[OK] Filas extraídas:    128453
+[OK] CSV generado en:    facturas.csv
 ```
 
 **Smoke test rápido** (sólo 1 página): añade `-n 1` al final del `newman run`.
 
-El fichero `facturas.csv` queda con la cabecera `CSVHEAD:...` en la 1ª línea
-y luego una línea `CSVROW:...` por factura. Para abrirlo en Excel:
+El fichero `facturas.csv` queda con la cabecera (sin prefijo `CSVHEAD:`)
+en la 1ª línea y luego una línea por factura. Para abrirlo en Excel:
 
 ```bash
 # Quita el prefijo CSVHEAD:/CSVROW: y convierte | en ; para Excel español
+# (sólo necesario si NO usaste extraer_csv.py; el script ya quita los prefijos)
 sed -e 's/^CSVHEAD://' -e 's/^CSVROW://' -e 's/|/;/g' facturas.csv > facturas_excel.csv
 ```
 
-```cmd
-:: Windows PowerShell
-(Get-Content facturas.csv) -replace '^CSV(HEAD|ROW):','' -replace '\|',';' |
+```powershell
+# Windows PowerShell — convierte | en ; para que Excel español lo abra bien
+(Get-Content facturas.csv) -replace '\|',';' |
   Set-Content -Encoding utf8 facturas_excel.csv
 ```
 
