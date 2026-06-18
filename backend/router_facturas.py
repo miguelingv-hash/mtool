@@ -374,7 +374,10 @@ async def verificar_completitud(
             "FechaExpedicionFacturaEmisor": ult["fecha_expedicion"],
         }
 
-    # 2) Llamar al SII
+    # 2) Llamar al SII — UNA SOLA PÁGINA (≤ 10K facturas) para no superar
+    #    el timeout del ingress. Si la primera página devuelve N>0 facturas
+    #    sabemos que el periodo NO estaba completo. El usuario puede luego
+    #    lanzar una consulta mensual normal para traer el resto.
     start_ts = datetime.now(timezone.utc)
     facturas: list[dict] = []
     error_msg: Optional[str] = None
@@ -395,14 +398,14 @@ async def verificar_completitud(
                 str(periodo),
                 entorno,
                 None,           # progress_cb
-                None,           # max_paginas
+                1,              # max_paginas: SÓLO 1 página para no timeout
                 start_clave,    # start_clave
             )
         else:
             # Mock: tras la primera "página" simulada, AEAT devolvería 0
             # facturas adicionales con la ClavePaginacion construida desde la
             # última real. Aquí devolvemos 0 deterministicamente.
-            facturas = [] if start_clave else []
+            facturas = []
 
         # 3) Persistir nuevas (idempotente: upsert por num_serie_factura)
         if facturas:
@@ -457,9 +460,16 @@ async def verificar_completitud(
     if error_msg:
         raise HTTPException(502, error_msg)
 
+    # Si la única página devuelta venía llena (cap 10K), AEAT puede tener más
+    # facturas pendientes después. Avisamos al usuario para que lance una
+    # consulta mensual normal y termine de descargarlas.
+    PAGE_CAP = 10000
+    posiblemente_hay_mas = len(facturas) >= PAGE_CAP
+
     return {
         "completo": len(facturas) == 0,
         "nuevas_facturas": len(facturas),
+        "posiblemente_hay_mas": posiblemente_hay_mas,
         "total_antes": total_antes,
         "total_despues": total_despues,
         "ultima_factura_bd": ult,

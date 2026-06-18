@@ -778,6 +778,16 @@ export default function Comparativa() {
                 {!verifyResult.completo && (
                   <div className="text-[10px] text-amber-700 mt-1">
                     Las nuevas facturas se han persistido vía upsert.
+                    {verifyResult.posiblemente_hay_mas && (
+                      <>
+                        <br />
+                        <span className="font-semibold">
+                          ⚠ La página venía llena (10.000 facturas). AEAT
+                          puede tener más pendientes — relanza "Lanzar en
+                          background" para descargar el resto.
+                        </span>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
