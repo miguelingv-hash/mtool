@@ -181,6 +181,7 @@ export default function Comparativa() {
     ejercicios: [],
     periodos: [],
   });
+  const [resumenOrigenes, setResumenOrigenes] = useState([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [loading, setLoading] = useState(false);
@@ -234,6 +235,19 @@ export default function Comparativa() {
       .then((r) => setPeriodosDisponibles(r.data))
       .catch(() => {});
   }, []);
+
+  // Carga el resumen agregado por origen comercial (SAP / SIGLO / desconocido)
+  // cuando cambian los filtros de ejercicio / periodo / num_serie.
+  useEffect(() => {
+    const params = {};
+    if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
+    if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
+    if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
+    api
+      .get("/comparativa/resumen-origenes", { params })
+      .then((r) => setResumenOrigenes(r.data.items || []))
+      .catch(() => setResumenOrigenes([]));
+  }, [filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced]);
 
   useEffect(() => {
     load();
@@ -496,6 +510,15 @@ export default function Comparativa() {
       });
       setCsvFile(null);
       load();
+      // Recargar el resumen de orígenes (los counts pueden haber cambiado)
+      const rsParams = {};
+      if (filtroEjercicio !== "__all__") rsParams.ejercicio = filtroEjercicio;
+      if (filtroPeriodo !== "__all__") rsParams.periodo = filtroPeriodo;
+      if (filtroNumSerieDebounced.trim()) rsParams.num_serie = filtroNumSerieDebounced.trim();
+      api
+        .get("/comparativa/resumen-origenes", { params: rsParams })
+        .then((r) => setResumenOrigenes(r.data.items || []))
+        .catch(() => {});
     } catch (e) {
       const d = e.response?.data?.detail;
       toast.error(typeof d === "string" ? d : "Error al subir CSV");
@@ -755,6 +778,101 @@ export default function Comparativa() {
           </Button>
         </div>
       </div>
+
+      {/* Dashboard resumen por origen comercial (SAP / SIGLO / desconocido) */}
+      {resumenOrigenes.length > 0 && (
+        <div
+          className="mb-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
+          data-testid="resumen-origenes"
+        >
+          {resumenOrigenes.map((o) => {
+            const pctMatch = o.total_facturas
+              ? Math.round((o.matches_sii / o.total_facturas) * 100)
+              : 0;
+            const pctCoincide = o.matches_sii
+              ? Math.round((o.coincidencias / o.matches_sii) * 100)
+              : 0;
+            const accent =
+              o.origen === "SAP"
+                ? "border-l-blue-500"
+                : o.origen === "SIGLO"
+                  ? "border-l-amber-500"
+                  : "border-l-slate-400";
+            return (
+              <div
+                key={o.origen}
+                className={`border border-slate-200 border-l-4 ${accent} bg-white p-4`}
+                data-testid={`resumen-origen-${o.origen}`}
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs uppercase tracking-wider font-semibold text-slate-700 font-mono">
+                      {o.origen}
+                    </span>
+                    <span className="text-xs text-slate-400">comercial</span>
+                  </div>
+                  <span
+                    className="font-mono text-2xl font-light text-slate-900 tabular-nums"
+                    data-testid={`resumen-${o.origen}-total`}
+                  >
+                    {o.total_facturas.toLocaleString("es-ES")}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                  <div className="text-slate-500">Base imp.</div>
+                  <div className="font-mono tabular-nums text-right text-slate-800">
+                    {o.base_total.toLocaleString("es-ES", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}{" "}
+                    €
+                  </div>
+                  <div className="text-slate-500">Cuota IVA</div>
+                  <div className="font-mono tabular-nums text-right text-slate-800">
+                    {o.cuota_total.toLocaleString("es-ES", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}{" "}
+                    €
+                  </div>
+                </div>
+                <div className="mt-3 pt-3 border-t border-slate-100 text-xs space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Conciliación</span>
+                    <span className="font-mono tabular-nums text-slate-700">
+                      {pctMatch}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 bg-slate-100">
+                    <div
+                      className="h-full bg-slate-700"
+                      style={{ width: `${pctMatch}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between pt-1 text-[11px]">
+                    <span className="text-green-700">
+                      {o.coincidencias.toLocaleString("es-ES")} match
+                    </span>
+                    <span className="text-red-600">
+                      {o.discrepancias.toLocaleString("es-ES")} discrep.
+                    </span>
+                    <span className="text-amber-600">
+                      {o.sin_match_sii.toLocaleString("es-ES")} sólo com.
+                    </span>
+                  </div>
+                  {o.matches_sii > 0 && (
+                    <div className="text-[11px] text-slate-500 pt-1">
+                      De las {o.matches_sii.toLocaleString("es-ES")} con
+                      contrapartida en SII, {pctCoincide}% coinciden
+                      exactamente.
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Tabla de comparativa */}
       <div className="border border-slate-200 bg-slate-50/40 p-4 mb-4 flex items-center justify-between flex-wrap gap-3">

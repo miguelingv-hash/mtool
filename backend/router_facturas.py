@@ -1276,6 +1276,107 @@ async def comparativa_periodos():
     return {"ejercicios": ejercicios, "periodos": periodos}
 
 
+@router.get("/comparativa/resumen-origenes")
+async def comparativa_resumen_origenes(
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+    num_serie: Optional[str] = None,
+):
+    """Resumen agregado por `origen_comercial` (SAP / SIGLO / desconocido).
+
+    Devuelve por cada origen:
+      - total_facturas (count)
+      - base_total / cuota_total / importe_total (sumas)
+      - matches_sii / sin_match_sii (cuántas tienen contrapartida en SII)
+      - discrepancias / coincidencias (sólo entre las que tienen match)
+
+    Soporta los mismos filtros que `/comparativa`: ejercicio, periodo,
+    num_serie (contiene). Pensado para una banda de tarjetas KPI encima
+    de la tabla.
+    """
+    import re
+
+    filtro_com: dict = {}
+    if ejercicio:
+        filtro_com["ejercicio"] = str(ejercicio)
+    if periodo:
+        filtro_com["periodo"] = str(periodo)
+    if num_serie:
+        filtro_com["num_serie_factura"] = {
+            "$regex": re.escape(num_serie), "$options": "i",
+        }
+
+    # 1) Aggregation: cuentas y sumas por origen
+    pipeline = [
+        {"$match": filtro_com} if filtro_com else {"$match": {}},
+        {"$group": {
+            "_id": {"$ifNull": ["$origen_comercial", "desconocido"]},
+            "total_facturas": {"$sum": 1},
+            "base_total": {"$sum": {"$ifNull": ["$base_imponible", 0]}},
+            "cuota_total": {"$sum": {"$ifNull": ["$cuota_repercutida", 0]}},
+            "importe_total": {"$sum": {"$ifNull": ["$importe_total", 0]}},
+        }},
+        {"$sort": {"total_facturas": -1}},
+    ]
+    grupos = await _db.facturas_comercial.aggregate(pipeline).to_list(length=None)
+
+    # 2) Para cada origen calculamos matches/discrepancias contra SII
+    #    Cargamos las facturas comerciales del grupo (sólo num_serie),
+    #    cruzamos con SII por num_serie ∈ comercial (uses unique index)
+    #    y diff sólo de las que coinciden.
+    resultados = []
+    for g in grupos:
+        origen_label = g["_id"]
+        ftr = {**filtro_com}
+        if origen_label == "desconocido":
+            ftr["origen_comercial"] = {"$in": [None, ""]}
+        else:
+            ftr["origen_comercial"] = origen_label
+
+        com_docs = await _db.facturas_comercial.find(
+            ftr, {"_id": 0, "versiones": 0}
+        ).to_list(length=None)
+        com_keys = [d["num_serie_factura"] for d in com_docs]
+
+        sii_docs = []
+        if com_keys:
+            sii_filter = {"num_serie_factura": {"$in": com_keys}}
+            if ejercicio:
+                sii_filter["ejercicio"] = str(ejercicio)
+            if periodo:
+                sii_filter["periodo"] = str(periodo)
+            sii_docs = await _db.facturas_sii.find(
+                sii_filter, {"_id": 0, "versiones": 0}
+            ).to_list(length=None)
+        sii_map = {d["num_serie_factura"]: d for d in sii_docs}
+
+        matches = 0
+        coincidencias = 0
+        discrepancias = 0
+        for com in com_docs:
+            sii = sii_map.get(com["num_serie_factura"])
+            if sii:
+                matches += 1
+                if not diff_facturas(sii, com):
+                    coincidencias += 1
+                else:
+                    discrepancias += 1
+
+        resultados.append({
+            "origen": origen_label,
+            "total_facturas": g["total_facturas"],
+            "base_total": round(g.get("base_total") or 0, 2),
+            "cuota_total": round(g.get("cuota_total") or 0, 2),
+            "importe_total": round(g.get("importe_total") or 0, 2),
+            "matches_sii": matches,
+            "sin_match_sii": g["total_facturas"] - matches,
+            "coincidencias": coincidencias,
+            "discrepancias": discrepancias,
+        })
+
+    return {"items": resultados}
+
+
 @router.get("/comparativa/export")
 async def comparativa_export(
     only_diffs: bool = True,
