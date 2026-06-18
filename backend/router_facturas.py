@@ -30,6 +30,7 @@ import uuid
 
 from factura_model import (
     CAMPOS_CANONICOS,
+    CAMPOS_COMPARADOS_DEFAULT,
     CAMPOS_NUMERICOS,
     FacturaDatos,
     FacturaVersion,
@@ -106,6 +107,30 @@ async def cleanup_orphan_jobs():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_CONFIG_DOC_ID = "default"
+
+
+async def _load_comparativa_config() -> dict:
+    """Devuelve la configuración de comparativa (qué campos comparar y si se
+    invierte el signo de los importes comerciales por origen).
+    Si no existe en BD, devuelve los defaults.
+    """
+    doc = await _db.comparativa_config.find_one({"_id": _CONFIG_DOC_ID})
+    if not doc:
+        return {
+            "campos_comparados": list(CAMPOS_COMPARADOS_DEFAULT),
+            "invertir_signo_por_origen": {},
+        }
+    return {
+        "campos_comparados": doc.get(
+            "campos_comparados", list(CAMPOS_COMPARADOS_DEFAULT)
+        ),
+        "invertir_signo_por_origen": doc.get(
+            "invertir_signo_por_origen", {}
+        ) or {},
+    }
+
 
 async def upsert_factura(coleccion: str, datos: dict, fuente: str):
     """Inserta o actualiza una factura con histórico de versiones."""
@@ -1217,9 +1242,14 @@ async def detalle_factura(fuente: str, num_serie: str):
     return doc
 
 
-def _build_row_from_docs(sii: Optional[dict], com: Optional[dict], ns: str) -> dict:
+def _build_row_from_docs(
+    sii: Optional[dict],
+    com: Optional[dict],
+    ns: str,
+    config: Optional[dict] = None,
+) -> dict:
     if sii and com:
-        d = diff_facturas(sii, com)
+        d = diff_facturas(sii, com, config)
         return {
             "num_serie_factura": ns,
             "estado": "coincide" if not d else "discrepancia",
@@ -1284,6 +1314,7 @@ async def _comparativa_data(
     Para listado paginado usar `comparativa()` directamente, que ya optimiza
     los estados que no requieren cargar todo el SII."""
     filtro_sii, filtro_com = await _build_filtros(ejercicio, periodo, num_serie)
+    config = await _load_comparativa_config()
 
     sii_docs = await _db.facturas_sii.find(
         filtro_sii, {"_id": 0, "versiones": 0}
@@ -1297,7 +1328,7 @@ async def _comparativa_data(
     todas = sorted(set(sii_map.keys()) | set(com_map.keys()))
 
     resultados = [
-        _build_row_from_docs(sii_map.get(ns), com_map.get(ns), ns)
+        _build_row_from_docs(sii_map.get(ns), com_map.get(ns), ns, config)
         for ns in todas
     ]
 
@@ -1331,6 +1362,7 @@ async def comparativa(
     pagina a nivel BD para no consumir memoria.
     """
     filtro_sii, filtro_com = await _build_filtros(ejercicio, periodo, num_serie)
+    config = await _load_comparativa_config()
 
     # 1) Universo comercial completo en scope (siempre pequeño)
     com_docs = await _db.facturas_comercial.find(
@@ -1351,7 +1383,7 @@ async def comparativa(
     filas_com: list[dict] = []
     for ns, com in com_map.items():
         sii = sii_match_map.get(ns)
-        filas_com.append(_build_row_from_docs(sii, com, ns))
+        filas_com.append(_build_row_from_docs(sii, com, ns, config))
 
     # 4) Contar SII fuera del comercial → estado solo_sii
     solo_sii_filter = {**filtro_sii, "num_serie_factura": {"$nin": com_keys}}
@@ -1365,7 +1397,7 @@ async def comparativa(
         ).sort("num_serie_factura", 1).skip(skip).limit(limit)
         sii_pagina = await cursor.to_list(length=limit)
         items = [
-            _build_row_from_docs(d, None, d["num_serie_factura"])
+            _build_row_from_docs(d, None, d["num_serie_factura"], config)
             for d in sii_pagina
         ]
         total = solo_sii_total
@@ -1397,6 +1429,58 @@ async def comparativa(
         "campos_numericos": CAMPOS_NUMERICOS,
         "items": items,
     }
+
+
+@router.get("/comparativa/config")
+async def get_comparativa_config():
+    """Devuelve la configuración actual de comparativa, junto con los
+    catálogos disponibles para que la UI pueda renderizar los selectores."""
+    cfg = await _load_comparativa_config()
+    # Detecta orígenes que existen en BD para mostrar toggles dinámicos
+    origenes_db = await _db.facturas_comercial.aggregate([
+        {"$group": {"_id": {"$ifNull": ["$origen_comercial", "desconocido"]}}},
+    ]).to_list(length=None)
+    origenes = sorted({o["_id"] for o in origenes_db}) or ["SAP", "SIGLO"]
+    return {
+        "campos_comparados": cfg["campos_comparados"],
+        "invertir_signo_por_origen": cfg["invertir_signo_por_origen"],
+        "campos_disponibles": list(CAMPOS_CANONICOS),
+        "campos_numericos": list(CAMPOS_NUMERICOS),
+        "origenes_disponibles": origenes,
+        "campos_comparados_default": list(CAMPOS_COMPARADOS_DEFAULT),
+    }
+
+
+@router.put("/comparativa/config")
+async def put_comparativa_config(payload: dict):
+    """Actualiza la configuración de comparativa. Acepta:
+      - `campos_comparados`: lista de campos canónicos a incluir en el diff.
+      - `invertir_signo_por_origen`: dict `{ "SAP": bool, "SIGLO": bool, ... }`.
+    """
+    campos_in = payload.get("campos_comparados")
+    if not isinstance(campos_in, list):
+        raise HTTPException(400, "campos_comparados debe ser una lista")
+    # Filtrar a campos canónicos válidos para evitar inyección de claves raras
+    campos_valid = [c for c in campos_in if c in CAMPOS_CANONICOS]
+
+    inv_in = payload.get("invertir_signo_por_origen") or {}
+    if not isinstance(inv_in, dict):
+        raise HTTPException(
+            400, "invertir_signo_por_origen debe ser un dict { origen: bool }"
+        )
+    inv_clean = {str(k): bool(v) for k, v in inv_in.items() if k}
+
+    await _db.comparativa_config.update_one(
+        {"_id": _CONFIG_DOC_ID},
+        {"$set": {
+            "campos_comparados": campos_valid,
+            "invertir_signo_por_origen": inv_clean,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
+    return {"ok": True, "campos_comparados": campos_valid,
+            "invertir_signo_por_origen": inv_clean}
 
 
 @router.get("/comparativa/periodos")
@@ -1468,6 +1552,7 @@ async def comparativa_resumen_origenes(
         {"$sort": {"total_facturas": -1}},
     ]
     grupos = await _db.facturas_comercial.aggregate(pipeline).to_list(length=None)
+    config = await _load_comparativa_config()
 
     # 2) Para cada origen calculamos matches/discrepancias contra SII
     #    Cargamos las facturas comerciales del grupo (sólo num_serie),
@@ -1506,7 +1591,7 @@ async def comparativa_resumen_origenes(
             sii = sii_map.get(com["num_serie_factura"])
             if sii:
                 matches += 1
-                if not diff_facturas(sii, com):
+                if not diff_facturas(sii, com, config):
                     coincidencias += 1
                 else:
                     discrepancias += 1

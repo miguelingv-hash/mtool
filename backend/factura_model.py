@@ -53,6 +53,20 @@ CAMPOS_NUMERICOS: list[str] = [
 ]
 
 
+# Campos comparados por defecto. Excluye los que típicamente no aparecen en
+# los ficheros comerciales (razón social, descripción operación...). El
+# usuario puede sobreescribir esta lista desde Configuración.
+CAMPOS_COMPARADOS_DEFAULT: list[str] = [
+    "fecha_expedicion",
+    "ejercicio",
+    "periodo",
+    "base_imponible",
+    "tipo_impositivo",
+    "cuota_repercutida",
+    "importe_total",
+]
+
+
 class FacturaDatos(BaseModel):
     """Datos canónicos de una factura. Todos opcionales para que un upsert
     parcial (p.ej. CSV con menos columnas) no rompa la validación."""
@@ -131,22 +145,40 @@ def normalize_factura_row(row: dict) -> dict:
     return out
 
 
-def diff_facturas(a: Optional[dict], b: Optional[dict]) -> dict:
-    """Compara dos snapshots de factura y devuelve la lista de campos con
-    diferencias.
+def diff_facturas(
+    a: Optional[dict],
+    b: Optional[dict],
+    config: Optional[dict] = None,
+) -> dict:
+    """Compara dos snapshots de factura y devuelve los campos con diferencias.
+
+    `a` = SII, `b` = comercial.
 
     Estricto: cualquier diferencia (incluyendo ``None`` vs valor) cuenta. Los
-    importes se comparan con `==` tras normalizar a float.
+    importes se comparan con `==` tras normalizar a float y, opcionalmente,
+    invirtiendo el signo del comercial según `config.invertir_signo_por_origen`
+    (para ficheros SAP/SIGLO con notas de abono que llegan en negativo y deben
+    compararse en positivo con el SII).
+
+    `config` es opcional; si no se pasa, se usa `CAMPOS_COMPARADOS_DEFAULT`
+    y no se invierten signos.
     """
     a = a or {}
     b = b or {}
+    cfg = config or {}
+    campos_comp: list[str] = cfg.get("campos_comparados") or CAMPOS_COMPARADOS_DEFAULT
+    inv_map: dict = cfg.get("invertir_signo_por_origen") or {}
+    invertir = bool(inv_map.get(b.get("origen_comercial")))
+
     diffs: dict = {}
-    for campo in CAMPOS_CANONICOS:
+    for campo in campos_comp:
         va = a.get(campo)
         vb = b.get(campo)
         if campo in CAMPOS_NUMERICOS:
             va = _parse_amount(va) if va is not None else None
             vb = _parse_amount(vb) if vb is not None else None
+            if invertir and vb is not None:
+                vb = -vb
         if va != vb:
             diffs[campo] = {"sii": va, "comercial": vb}
     return diffs

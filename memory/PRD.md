@@ -84,6 +84,16 @@
 - **Causa**: optimización de Iteración 5 acotaba el universo SII a los `(ejercicio, periodo)` presentes en `facturas_comercial` cuando no se filtraba explícitamente. Como comercial sólo tenía datos de 2026/05, las 10.006 facturas SII de los periodos 2026/01 y 2026/02 quedaban excluidas del total.
 - **Fix**: eliminada la restricción implícita en `_build_filtros`. Ahora "Todas las facturas" muestra literalmente todas (1.292.188 = 7.047 + 1.282.968 + 2.173). Los índices `num_serie_factura` (unique) y `ejercicio_1_periodo_1` mantienen las consultas en ~1s.
 - **Parser tabular multiformato**: refactor de `_parsear_sap_report` → `_parsear_report_tabular(text, origen)` con catálogo `_FORMATOS_TABULARES` que define la firma de cabeceras y los alias de columnas por origen. Detector `_detectar_formato_tabular(text)` devuelve `"SAP"`, `"SIGLO"` o `None`. Las funciones legacy `_parsear_sap_report` y `_detectar_sap_report` se mantienen como aliases retrocompatibles.
+
+## Iteración 8 — Configuración de comparativa (18 Feb 2026)
+- **Backend**: nueva colección `comparativa_config` (single doc) + endpoints `GET /api/comparativa/config` y `PUT /api/comparativa/config`. Helper `_load_comparativa_config()` cacheado a llamada. `diff_facturas(a, b, config)` ahora acepta:
+  - `campos_comparados`: lista de campos canónicos a incluir en el diff (excluye `razon_social`, `descripcion_operacion`, etc. que NO aparecen en los ficheros comerciales).
+  - `invertir_signo_por_origen`: dict `{ "SAP": bool, "SIGLO": bool }` que multiplica los importes del comercial por −1 antes de comparar (notas de crédito en negativo vs SII en positivo).
+- Defaults: `["fecha_expedicion","ejercicio","periodo","base_imponible","tipo_impositivo","cuota_repercutida","importe_total"]`. Sin invertir signos.
+- Propagación: `_comparativa_data`, `comparativa` y `comparativa_resumen_origenes` cargan la config y la pasan a `diff_facturas`.
+- **Frontend**: nueva página `/configuracion` accesible desde la sidebar (icono ⚙️ Settings). Dos secciones: checkboxes de 17 campos (con `Nº serie factura` y `NIF titular` marcados como CLAVE no desactivables) + switches por origen para invertir signo. Botones Guardar / Restaurar defaults.
+- **Validación lógica**: 4 casos unitarios verifican (a) sin invertir comercial=−100 ≠ SII=+100, (b) invertir SIGLO comercial=−100 → +100 = SII match, (c) invertir SAP no afecta a docs SIGLO, (d) campos no seleccionados se ignoran. UI verificada con screenshot funcional.
+
 - **SIGLO**: cabeceras `Soc.|Doc.caus.|Nº oficial|FechaEntr|Fe.doc.or.|Fe.doc.or.|II|Tp.impos.|BaseImpon|Impto.ML` (notar `Doc.caus.` vs `Doc.causante` y `Nº oficial` vs `Nº doc.oficial` en SAP FI). Encoding latin-1, número con coma decimal y signo `-` al final, fechas `dd.mm.yyyy`, múltiples filas por factura (una por tramo IVA T6/T7) agrupadas por `num_serie_factura`.
 - **Persistencia origen**: cada factura comercial almacena `origen_comercial: "SAP" | "SIGLO"` en `facturas_comercial`. El endpoint `POST /api/comercial/csv` devuelve el origen detectado.
 - **UI**: badge "SAP"/"SIGLO" al lado del importe comercial en la tabla de Comparativa y en el panel de detalle. Texto de ayuda actualizado con descripción de ambos formatos. Toast tras importar incluye `formato SAP/SIGLO`.

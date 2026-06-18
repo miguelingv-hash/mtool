@@ -7,6 +7,7 @@ import {
   History as HistoryIcon,
   ScrollText,
   ServerCog,
+  Settings,
   Stamp,
   Radio,
 } from "lucide-react";
@@ -28,6 +29,7 @@ const NAV_ITEMS = [
   { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch" },
   { to: "/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-history" },
   { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs" },
+  { to: "/configuracion", label: "Configuración", icon: Settings, testId: "nav-config" },
 ];
 
 export default function Layout() {
