@@ -738,10 +738,11 @@ async def upload_csv_comercial(file: UploadFile = File(...)):
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
 
-    # Detecta el formato SAP-style (report con cabeceras de texto + filas
-    # delimitadas por '|' y números en formato español con signo final '-').
-    if _detectar_sap_report(text):
-        registros, errores = _parsear_sap_report(text)
+    # Detecta automáticamente el formato del report (SAP FI o SIGLO) por la
+    # firma de cabeceras. Si no coincide ninguno, cae al parser CSV genérico.
+    origen_detectado = _detectar_formato_tabular(text)
+    if origen_detectado:
+        registros, errores = _parsear_report_tabular(text, origen_detectado)
     else:
         registros, errores = _parsear_csv_generico(text)
 
@@ -770,6 +771,7 @@ async def upload_csv_comercial(file: UploadFile = File(...)):
     return {
         "total": total,
         "errores": errores,
+        "origen": origen_detectado,
         "matches_sii": matched_count,
         "sin_match_sii": max(0, len(nums) - matched_count),
     }
@@ -799,21 +801,50 @@ def _parsear_csv_generico(text: str) -> tuple[list[dict], list[dict]]:
     return registros, errores
 
 
-# ---------- SAP-style report parser ----------------------------------------
+# ---------- SAP-style / SIGLO report parser --------------------------------
 
-_SAP_HEADER_SIG = (
-    "Soc.", "Doc.causante", "Nº doc.oficial",
-    "Tp.impos.", "BaseImpon", "Impto.ML",
-)
+# Catálogo de formatos tabulares soportados. Cada formato define las firmas
+# necesarias para reconocer su cabecera y la lista de alias por columna
+# canónica. Si añades un origen nuevo, lo declaras aquí y el parser lo soporta
+# automáticamente.
+_FORMATOS_TABULARES: dict[str, dict] = {
+    "SAP": {
+        "header_signatures": (
+            "Soc.", "Doc.causante", "Nº doc.oficial",
+            "Tp.impos.", "BaseImpon", "Impto.ML",
+        ),
+        "col_num":  ["Nº doc.oficial"],
+        "col_fexp": ["Fe.doc.or."],          # 1ª ocurrencia
+        "col_fope": ["Fe.doc.or."],          # 2ª ocurrencia
+        "col_tipo": ["Tp.impos."],
+        "col_base": ["BaseImpon"],
+        "col_imp":  ["Impto.ML"],
+    },
+    "SIGLO": {
+        "header_signatures": (
+            "Soc.", "Doc.caus.", "Nº oficial",
+            "Tp.impos.", "BaseImpon", "Impto.ML",
+        ),
+        "col_num":  ["Nº oficial"],
+        "col_fexp": ["Fe.doc.or."],          # 1ª ocurrencia
+        "col_fope": ["Fe.doc.or."],          # 2ª ocurrencia
+        "col_tipo": ["Tp.impos."],
+        "col_base": ["BaseImpon"],
+        "col_imp":  ["Impto.ML"],
+    },
+}
 
 
-def _detectar_sap_report(text: str) -> bool:
-    """Devuelve True si encuentra (en las primeras 100 líneas) una cabecera
-    con la firma de columnas del report SAP de informes fiscales."""
-    for line in text.splitlines()[:100]:
-        if all(sig in line for sig in _SAP_HEADER_SIG):
-            return True
-    return False
+def _detectar_formato_tabular(text: str) -> Optional[str]:
+    """Recorre las primeras 100 líneas y devuelve el nombre del primer formato
+    cuya firma de cabecera coincida (`SAP`, `SIGLO`...). None si ninguna."""
+    head = text.splitlines()[:100]
+    for nombre, spec in _FORMATOS_TABULARES.items():
+        sigs = spec["header_signatures"]
+        for line in head:
+            if all(sig in line for sig in sigs):
+                return nombre
+    return None
 
 
 def _parsear_numero_sap(valor: str) -> Optional[float]:
@@ -849,44 +880,64 @@ def _parsear_fecha_sap(valor: str) -> Optional[str]:
     return s
 
 
-def _parsear_sap_report(text: str) -> tuple[list[dict], list[dict]]:
-    """Parsea un report SAP-style. Skips líneas de texto/separadoras hasta
-    encontrar la cabecera real, y extrae filas que empiecen por `|`."""
+def _parsear_report_tabular(
+    text: str, origen: str,
+) -> tuple[list[dict], list[dict]]:
+    """Parsea un report tabular SAP-style (SAP FI o SIGLO).
+
+    Ambos formatos comparten:
+      - cabeceras de texto + filas delimitadas por `|`
+      - números en formato español con `,` decimal y signo `-` al final
+      - fechas `dd.mm.yyyy`
+      - múltiples filas por factura (una por tramo de IVA) → se agrupan por
+        `num_serie_factura` sumando base y cuota, acumulando `detalle_iva`.
+
+    Difiere sólo en los nombres de las columnas, definidos en
+    `_FORMATOS_TABULARES[origen]`.
+    """
+    spec = _FORMATOS_TABULARES[origen]
     lines = text.splitlines()
     header_idx = None
+    sigs = spec["header_signatures"]
     for i, line in enumerate(lines):
-        if all(sig in line for sig in _SAP_HEADER_SIG):
+        if all(sig in line for sig in sigs):
             header_idx = i
             break
     if header_idx is None:
-        return [], [{"fila": 0, "motivo": "Cabecera SAP no encontrada"}]
+        return [], [{
+            "fila": 0,
+            "motivo": f"Cabecera {origen} no encontrada",
+        }]
 
     header_cells = [c.strip() for c in lines[header_idx].strip("|").split("|")]
 
-    def _idx(name, occ=0):
+    def _idx(aliases: list[str], occ: int = 0) -> Optional[int]:
+        """Devuelve el índice de la ``occ``-ésima ocurrencia de cualquier
+        alias en `header_cells`."""
         seen = 0
         for i, c in enumerate(header_cells):
-            if c == name:
+            if c in aliases:
                 if seen == occ:
                     return i
                 seen += 1
         return None
 
-    idx_num = _idx("Nº doc.oficial")
-    idx_fexp = _idx("Fe.doc.or.", 0)
-    idx_fope = _idx("Fe.doc.or.", 1)
-    idx_tipo = _idx("Tp.impos.")
-    idx_base = _idx("BaseImpon")
-    idx_imp = _idx("Impto.ML")
+    idx_num  = _idx(spec["col_num"])
+    idx_fexp = _idx(spec["col_fexp"], 0)
+    idx_fope = _idx(spec["col_fope"], 1)
+    idx_tipo = _idx(spec["col_tipo"])
+    idx_base = _idx(spec["col_base"])
+    idx_imp  = _idx(spec["col_imp"])
 
     faltan = [n for n, v in [
-        ("Nº doc.oficial", idx_num), ("Tp.impos.", idx_tipo),
+        ("Nº (oficial)", idx_num), ("Tp.impos.", idx_tipo),
         ("BaseImpon", idx_base), ("Impto.ML", idx_imp),
     ] if v is None]
     if faltan:
         return [], [{
             "fila": header_idx,
-            "motivo": f"Columnas requeridas no encontradas: {', '.join(faltan)}",
+            "motivo": f"Columnas requeridas no encontradas ({origen}): "
+                      f"{', '.join(faltan)}",
         }]
 
     registros_por_num: dict[str, dict] = {}
@@ -927,6 +978,7 @@ def _parsear_sap_report(text: str) -> tuple[list[dict], list[dict]]:
                     "cuota_repercutida": 0.0,
                     "tipo_impositivo": None,
                     "detalle_iva": [],
+                    "origen_comercial": origen,
                 }
                 registros_por_num[num] = agg
             if base is not None:
@@ -937,7 +989,7 @@ def _parsear_sap_report(text: str) -> tuple[list[dict], list[dict]]:
                 "tipo_impositivo": tipo,
                 "base_imponible": base,
                 "cuota_repercutida": cuota,
-                "origen": "SAP",
+                "origen": origen,
             })
         except Exception as e:  # noqa: BLE001
             errores.append({"fila": i, "motivo": str(e), "raw": s[:200]})
@@ -954,6 +1006,20 @@ def _parsear_sap_report(text: str) -> tuple[list[dict], list[dict]]:
         agg["base_imponible"] = round(agg["base_imponible"], 2)
         agg["cuota_repercutida"] = round(agg["cuota_repercutida"], 2)
     return list(registros_por_num.values()), errores
+
+
+# --- Alias retrocompatibles (no romper imports externos) -------------------
+_SAP_HEADER_SIG = _FORMATOS_TABULARES["SAP"]["header_signatures"]
+
+
+def _detectar_sap_report(text: str) -> bool:
+    """Mantiene la API previa: True si el report es SAP FI (no SIGLO)."""
+    return _detectar_formato_tabular(text) == "SAP"
+
+
+def _parsear_sap_report(text: str) -> tuple[list[dict], list[dict]]:
+    """Mantiene la API previa: parsea como SAP FI."""
+    return _parsear_report_tabular(text, "SAP")
 
 
 @router.get("/facturas/{fuente}")

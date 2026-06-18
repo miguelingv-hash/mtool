@@ -483,6 +483,7 @@ export default function Comparativa() {
       });
       const desc = [
         `${data.total.toLocaleString("es-ES")} facturas importadas`,
+        data.origen && `formato ${data.origen}`,
         data.matches_sii != null &&
           `${data.matches_sii.toLocaleString("es-ES")} ya en SII · ${data.sin_match_sii.toLocaleString("es-ES")} sin match`,
         data.errores?.length && `${data.errores.length} errores`,
@@ -709,9 +710,17 @@ export default function Comparativa() {
           <p className="text-xs text-slate-500 mb-4">
             Acepta <span className="font-mono">.csv</span> con cabeceras
             estándar (descarga la plantilla) o <span className="font-mono">.txt</span>{" "}
-            del report SAP de informes fiscales (con cabeceras
-            <span className="font-mono"> Soc.|Doc.causante|Nº doc.oficial|… </span>).
-            La clave de comparación con el SII es <span className="font-mono">Nº doc.oficial</span>.
+            del report de informes fiscales en dos formatos:
+            <br />
+            <span className="font-mono">· SAP FI</span> — cabeceras{" "}
+            <span className="font-mono">Soc.|Doc.causante|Nº doc.oficial|…</span>
+            <br />
+            <span className="font-mono">· SIGLO</span> — cabeceras{" "}
+            <span className="font-mono">Soc.|Doc.caus.|Nº oficial|…</span>
+            <br />
+            La clave de comparación con el SII es el{" "}
+            <span className="font-mono">Nº (doc.) oficial</span>. El origen
+            (SAP / SIGLO) queda registrado en cada factura importada.
           </p>
           <label
             htmlFor="csv-com"
@@ -936,9 +945,21 @@ export default function Comparativa() {
                         : "—"}
                     </TableCell>
                     <TableCell className="font-mono text-xs tabular-nums text-right">
-                      {r.comercial?.importe_total != null
-                        ? r.comercial.importe_total.toFixed(2)
-                        : "—"}
+                      <div className="flex items-center justify-end gap-2">
+                        {r.comercial?.origen_comercial ? (
+                          <span
+                            className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 bg-slate-100 text-slate-600 font-sans"
+                            data-testid={`origen-${r.num_serie_factura}`}
+                          >
+                            {r.comercial.origen_comercial}
+                          </span>
+                        ) : null}
+                        <span>
+                          {r.comercial?.importe_total != null
+                            ? r.comercial.importe_total.toFixed(2)
+                            : "—"}
+                        </span>
+                      </div>
                     </TableCell>
                     <TableCell className="text-xs text-slate-700">
                       {Object.keys(r.diferencias).length
@@ -1057,10 +1078,18 @@ export default function Comparativa() {
                 <SheetTitle className="font-display text-xl">
                   {detail.num_serie_factura}
                 </SheetTitle>
-                <div>
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className={`pill ${ESTADO_PILL[detail.estado].cls}`}>
                     {ESTADO_PILL[detail.estado].label}
                   </span>
+                  {detail.comercial?.origen_comercial && (
+                    <span
+                      className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 bg-slate-100 text-slate-700"
+                      data-testid="detail-origen-comercial"
+                    >
+                      Comercial · {detail.comercial.origen_comercial}
+                    </span>
+                  )}
                 </div>
               </SheetHeader>
               <div className="mt-4 border border-slate-200">

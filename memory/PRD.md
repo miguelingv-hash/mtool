@@ -77,6 +77,20 @@
 - **Helper `_build_filtros`**: centraliza la construcción de filtros Mongo y la restricción del universo SII a (ejercicio, periodo) presentes en comercial cuando no hay filtro explícito.
 - **Cambio sutil de semántica**: cuando filtras "Sólo con diferencias" (default), `total` ahora cuenta sólo *lo accionable* (discrepancias + solo_comercial = 168), NO los 1.28M `solo_sii` (que serían facturas correctamente reportadas y no requieren acción). El usuario puede ver el universo `solo_sii` seleccionando explícitamente ese filtro.
 
+## Iteración 6 — Soporte formato SIGLO + retry CLI (18 Feb 2026)
+- **Parser tabular multiformato**: refactor de `_parsear_sap_report` → `_parsear_report_tabular(text, origen)` con catálogo `_FORMATOS_TABULARES` que define la firma de cabeceras y los alias de columnas por origen. Detector `_detectar_formato_tabular(text)` devuelve `"SAP"`, `"SIGLO"` o `None`. Las funciones legacy `_parsear_sap_report` y `_detectar_sap_report` se mantienen como aliases retrocompatibles.
+- **SIGLO**: cabeceras `Soc.|Doc.caus.|Nº oficial|FechaEntr|Fe.doc.or.|Fe.doc.or.|II|Tp.impos.|BaseImpon|Impto.ML` (notar `Doc.caus.` vs `Doc.causante` y `Nº oficial` vs `Nº doc.oficial` en SAP FI). Encoding latin-1, número con coma decimal y signo `-` al final, fechas `dd.mm.yyyy`, múltiples filas por factura (una por tramo IVA T6/T7) agrupadas por `num_serie_factura`.
+- **Persistencia origen**: cada factura comercial almacena `origen_comercial: "SAP" | "SIGLO"` en `facturas_comercial`. El endpoint `POST /api/comercial/csv` devuelve el origen detectado.
+- **UI**: badge "SAP"/"SIGLO" al lado del importe comercial en la tabla de Comparativa y en el panel de detalle. Texto de ayuda actualizado con descripción de ambos formatos. Toast tras importar incluye `formato SAP/SIGLO`.
+- **Validación E2E**: fichero SIGLO real de 15.675 líneas → 9.218 facturas únicas, 0 errores, totales coincidentes con el footer del report (-530.769,69 € base / -57.739,43 € cuota). SAP FI sigue funcionando (test con 2 facturas con tramos IVA múltiples y signo negativo).
+- **CLI retry + reanudación** (script `descargar_sii.py`): backoff exponencial ante errores transitorios de red (`ConnectionResetError 10054`) + state file `<config>.state.json` para reanudar exactamente desde la última `ClavePaginacion` exitosa. Flag `--from-start` ignora el state.
+- **Problema**: con 1.28M facturas SII en BD el endpoint `/api/comparativa` tardaba 17s y `/api/comparativa/periodos` 28s → 502 Bad Gateway intermitentes del ingress.
+- **Fix índices**: añadidos `ejercicio_1_periodo_1` (compuesto) en `facturas_sii` y `facturas_comercial`. Ejecutado al arranque (idempotente).
+- **Fix `/comparativa/periodos`**: sustituido `distinct()` (collection scan) por `aggregate $group` apoyado en el índice compuesto. 28s → 1.2s (24x más rápido).
+- **Fix `/comparativa`**: reescrito el handler para construir resultados desde el universo comercial (siempre pequeño), cargando SII docs sólo cuando `num_serie ∈ comercial` (uses unique index). Para el estado `solo_sii` (potencialmente millones) se pagina a nivel BD con `skip/limit`. 17s → 1.7-2.9s. La función legacy `_comparativa_data` queda para `/comparativa/export` (full dump).
+- **Helper `_build_filtros`**: centraliza la construcción de filtros Mongo y la restricción del universo SII a (ejercicio, periodo) presentes en comercial cuando no hay filtro explícito.
+- **Cambio sutil de semántica**: cuando filtras "Sólo con diferencias" (default), `total` ahora cuenta sólo *lo accionable* (discrepancias + solo_comercial = 168), NO los 1.28M `solo_sii` (que serían facturas correctamente reportadas y no requieren acción). El usuario puede ver el universo `solo_sii` seleccionando explícitamente ese filtro.
+
 ## Backlog priorizado
 **P0 — Producción real**
 - ~~Integración del cliente SOAP real con `zeep`/`requests` + autenticación mTLS con certificado digital (PFX/P12)~~ ✅ Hecho. Falta probar end-to-end con certificado AEAT real.
