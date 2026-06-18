@@ -33,6 +33,11 @@
               "const per    = pm.variables.get('periodo');",
               "const clave  = pm.variables.get('clave_pag') || '';",
               "",
+              "// Selecciona endpoint según use_test (Postman no soporta ternarios en {{...}})",
+              "const useTest = String(pm.variables.get('use_test')).toLowerCase() === 'true';",
+              "const url = useTest ? pm.variables.get('endpoint_test') : pm.variables.get('endpoint');",
+              "pm.variables.set('soap_url', url);",
+              "",
               "let clavePag = '';",
               "if (clave) {",
               "  try {",
@@ -185,8 +190,8 @@
           "options": { "raw": { "language": "xml" } }
         },
         "url": {
-          "raw": "{{use_test:true ? endpoint_test : endpoint}}",
-          "host": ["{{use_test:true ? endpoint_test : endpoint}}"]
+          "raw": "{{soap_url}}",
+          "host": ["{{soap_url}}"]
         }
       }
     }
