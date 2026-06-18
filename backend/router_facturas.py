@@ -1089,8 +1089,13 @@ async def _build_filtros(
     periodo: Optional[str],
     num_serie: Optional[str],
 ) -> tuple[dict, dict]:
-    """Construye filtros Mongo para SII y comercial, restringiendo SII al
-    universo (ejercicio,periodo) de comercial si no se filtra explícitamente.
+    """Construye filtros Mongo para SII y comercial a partir de los parámetros
+    de consulta. No aplica restricciones implícitas: el universo SII se acota
+    SÓLO si el usuario filtra explícitamente por ejercicio/periodo.
+
+    (Antes acotábamos el SII a los (ejercicio,periodo) presentes en comercial
+    para acelerar, pero eso hacía que "Todas las facturas" no incluyera las
+    SII de periodos sin contrapartida comercial, confundiendo al usuario.)
     """
     import re
 
@@ -1106,19 +1111,6 @@ async def _build_filtros(
         regex_ns = {"$regex": re.escape(num_serie), "$options": "i"}
         filtro_sii["num_serie_factura"] = regex_ns
         filtro_com["num_serie_factura"] = regex_ns
-
-    if not ejercicio and not periodo:
-        pares_com = await _db.facturas_comercial.aggregate([
-            {"$group": {
-                "_id": {"ejercicio": "$ejercicio", "periodo": "$periodo"},
-            }},
-        ]).to_list(length=None)
-        pares = [p["_id"] for p in pares_com if p["_id"].get("ejercicio")]
-        if pares:
-            filtro_sii["$or"] = [
-                {"ejercicio": p["ejercicio"], "periodo": p["periodo"]}
-                for p in pares
-            ]
 
     return filtro_sii, filtro_com
 

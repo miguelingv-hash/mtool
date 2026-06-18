@@ -78,6 +78,11 @@
 - **Cambio sutil de semántica**: cuando filtras "Sólo con diferencias" (default), `total` ahora cuenta sólo *lo accionable* (discrepancias + solo_comercial = 168), NO los 1.28M `solo_sii` (que serían facturas correctamente reportadas y no requieren acción). El usuario puede ver el universo `solo_sii` seleccionando explícitamente ese filtro.
 
 ## Iteración 6 — Soporte formato SIGLO + retry CLI (18 Feb 2026)
+
+## Iteración 7 — Fix contador "Todas las facturas" (18 Feb 2026)
+- **Problema reportado**: el usuario veía 1.282.182 en "Todas las facturas" cuando la BD tenía 1.290.015 SII + 9.220 comercial. Le faltaban 10.006 facturas.
+- **Causa**: optimización de Iteración 5 acotaba el universo SII a los `(ejercicio, periodo)` presentes en `facturas_comercial` cuando no se filtraba explícitamente. Como comercial sólo tenía datos de 2026/05, las 10.006 facturas SII de los periodos 2026/01 y 2026/02 quedaban excluidas del total.
+- **Fix**: eliminada la restricción implícita en `_build_filtros`. Ahora "Todas las facturas" muestra literalmente todas (1.292.188 = 7.047 + 1.282.968 + 2.173). Los índices `num_serie_factura` (unique) y `ejercicio_1_periodo_1` mantienen las consultas en ~1s.
 - **Parser tabular multiformato**: refactor de `_parsear_sap_report` → `_parsear_report_tabular(text, origen)` con catálogo `_FORMATOS_TABULARES` que define la firma de cabeceras y los alias de columnas por origen. Detector `_detectar_formato_tabular(text)` devuelve `"SAP"`, `"SIGLO"` o `None`. Las funciones legacy `_parsear_sap_report` y `_detectar_sap_report` se mantienen como aliases retrocompatibles.
 - **SIGLO**: cabeceras `Soc.|Doc.caus.|Nº oficial|FechaEntr|Fe.doc.or.|Fe.doc.or.|II|Tp.impos.|BaseImpon|Impto.ML` (notar `Doc.caus.` vs `Doc.causante` y `Nº oficial` vs `Nº doc.oficial` en SAP FI). Encoding latin-1, número con coma decimal y signo `-` al final, fechas `dd.mm.yyyy`, múltiples filas por factura (una por tramo IVA T6/T7) agrupadas por `num_serie_factura`.
 - **Persistencia origen**: cada factura comercial almacena `origen_comercial: "SAP" | "SIGLO"` en `facturas_comercial`. El endpoint `POST /api/comercial/csv` devuelve el origen detectado.
