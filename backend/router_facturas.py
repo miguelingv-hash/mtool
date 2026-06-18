@@ -25,6 +25,7 @@ import csv
 import io
 import random
 import hashlib
+import time
 import uuid
 
 from factura_model import (
@@ -473,14 +474,66 @@ def _consultar_mensual_real(
         out: list[dict] = []
         clave_pag = start_clave
         pagina = int(start_pagina or 0)
+
+        # --- helper de retry para llamadas SOAP transitorias --------------
+        def _is_transient_network_error(exc: BaseException) -> bool:
+            """Detecta errores de red transitorios que merecen reintento.
+            Recorremos la cadena de causas/contexts porque `zeep` envuelve
+            la excepción original de `urllib3`/`requests`.
+            """
+            visited: set[int] = set()
+            cur: Optional[BaseException] = exc
+            while cur is not None and id(cur) not in visited:
+                visited.add(id(cur))
+                if isinstance(cur, (ConnectionResetError, ConnectionAbortedError,
+                                    ConnectionRefusedError, BrokenPipeError,
+                                    TimeoutError)):
+                    return True
+                # requests / urllib3
+                name = type(cur).__name__
+                if name in {
+                    "ConnectionError", "ChunkedEncodingError", "ProtocolError",
+                    "ReadTimeoutError", "ReadTimeout", "RemoteDisconnected",
+                    "IncompleteRead",
+                }:
+                    return True
+                cur = cur.__cause__ or cur.__context__
+            return False
+
+        def _llamar_sii_con_retry(filtro_actual: dict, n_pagina: int):
+            """Invoca el SOAP con reintentos exponenciales ante errores de red
+            transitorios (ConnectionResetError 10054 típicos de AEAT en
+            descargas largas)."""
+            delays = [2, 5, 10, 20, 30]  # 5 reintentos, máx ~67s espera total
+            last_exc: Optional[Exception] = None
+            for intento, sleep_s in enumerate([0, *delays]):
+                if sleep_s:
+                    _logger.warning(
+                        "SII página %d: reintento %d tras %ds por error "
+                        "de red transitorio (%s)",
+                        n_pagina, intento, sleep_s,
+                        type(last_exc).__name__ if last_exc else "?",
+                    )
+                    time.sleep(sleep_s)
+                try:
+                    return service.ConsultaLRFacturasEmitidas(
+                        Cabecera=cabecera, FiltroConsulta=filtro_actual
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if not _is_transient_network_error(exc):
+                        raise
+            # Agotados los reintentos
+            assert last_exc is not None
+            raise last_exc
+        # ------------------------------------------------------------------
+
         while True:
             pagina += 1
             if clave_pag is not None:
                 filtro["ClavePaginacion"] = clave_pag
             try:
-                resp = service.ConsultaLRFacturasEmitidas(
-                    Cabecera=cabecera, FiltroConsulta=filtro
-                )
+                resp = _llamar_sii_con_retry(filtro, pagina)
             except (ZeepXMLSyntaxError, Exception) as exc:  # noqa: BLE001
                 raw = ""
                 req_dump = ""

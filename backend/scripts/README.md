@@ -87,14 +87,40 @@ python3 -m pip install -r scripts/requirements-cli.txt
 
 ## Interrumpir y reanudar
 
-- **Ctrl-C** detiene el script limpiamente. Todas las facturas descargadas
-  hasta esa página quedan persistidas en `facturas_sii`.
-- Para reanudar **desde donde se quedó** sin re-descargar, ejecuta de nuevo
-  el mismo `mi_descarga.txt`. El upsert con índice único garantiza que las
-  ya existentes no se dupliquen (se sobrescriben con los mismos datos).
-- Si quieres saltar páginas iniciales por completo, usa la UI web
-  (sheet **Jobs → Reanudar**) que pasa la `ClavePaginacion` exacta al
-  worker. El CLI siempre arranca desde el principio del periodo.
+### Reanudación automática tras error o Ctrl-C
+
+El script escribe un **state file** (`<config>.state.json`) tras cada página
+persistida con la última `ClavePaginacion` exitosa. Si el script falla por
+una desconexión transitoria del SII (típico `ConnectionResetError 10054`
+tras muchas páginas), simplemente vuelve a lanzar el mismo comando:
+
+```bash
+python scripts/descargar_sii.py --config mi_descarga.txt
+```
+
+El script detecta el state file, te muestra "Reanudando desde página N
+(M facturas ya descargadas en ejecuciones previas)" y continúa exactamente
+desde la `ClavePaginacion` siguiente. Las facturas ya descargadas no se
+re-descargan: la AEAT paginará a partir de ese punto.
+
+Al terminar correctamente la descarga completa, el state file se borra
+automáticamente. Si quieres descartarlo manualmente y arrancar desde cero,
+añade `--from-start` o borra el `.state.json`.
+
+### Retry automático ante errores de red
+
+Si la conexión TCP con AEAT se corta durante una llamada SOAP
+(`ConnectionResetError`, `ChunkedEncodingError`, timeouts…) el script
+reintenta automáticamente esa página hasta 5 veces con backoff exponencial
+(2, 5, 10, 20, 30 segundos). Sólo si **todos** los reintentos fallan se
+aborta — en ese caso, relanza el comando y el script reanudará desde la
+última página con éxito.
+
+### Ctrl-C limpio
+
+**Ctrl-C** detiene el script. Todas las facturas descargadas hasta esa
+página quedan persistidas en `facturas_sii` y el state file mantiene la
+posición exacta para que puedas reanudar después.
 
 ## Notas
 

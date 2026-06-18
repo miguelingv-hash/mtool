@@ -63,6 +63,11 @@ def main():
         default=None,
         help="Límite de páginas a descargar (None = todas)",
     )
+    ap.add_argument(
+        "--from-start",
+        action="store_true",
+        help="Ignora el state file de reanudación y arranca desde la página 1",
+    )
     args = ap.parse_args()
 
     cfg = cargar_config(args.config)
@@ -125,6 +130,54 @@ def main():
     persistidas_total = [0]
     t_start = time.time()
 
+    # Fichero de estado para reanudar: junto al config, con sufijo `.state.json`.
+    # Guarda la última ClavePaginacion procesada con éxito + contadores.
+    import json
+    state_path = Path(args.config).with_suffix(".state.json")
+    state_key = f"{nif}|{ejercicio}|{periodo}|{entorno}"
+
+    def cargar_estado_previo() -> dict:
+        if args.from_start or not state_path.exists():
+            return {}
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return {}
+        if data.get("key") != state_key:
+            print(
+                f"AVISO: state file existe pero corresponde a otra descarga "
+                f"({data.get('key')!r} != {state_key!r}). Se ignora.",
+                flush=True,
+            )
+            return {}
+        return data
+
+    def guardar_estado(clave_pag, pagina, acumuladas):
+        try:
+            state_path.write_text(
+                json.dumps({
+                    "key": state_key,
+                    "clave_pag": clave_pag,
+                    "pagina": pagina,
+                    "acumuladas": acumuladas,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001
+            print("AVISO: no se pudo escribir el state file de reanudación", flush=True)
+
+    estado_previo = cargar_estado_previo()
+    start_clave = estado_previo.get("clave_pag")
+    start_pagina = estado_previo.get("pagina", 0)
+    start_invoices = estado_previo.get("acumuladas", 0)
+    if start_clave:
+        print(
+            f"INFO Reanudando desde página {start_pagina + 1} "
+            f"({start_invoices:,} facturas ya descargadas en ejecuciones previas).",
+            flush=True,
+        )
+
     def progress_cb(pagina, acumuladas, clave_pag, facturas_pagina):
         """Callback síncrono: hace bulk_write a Mongo y muestra progreso."""
         if facturas_pagina:
@@ -148,6 +201,8 @@ def main():
                 paginas[0] += 1
                 persistidas_total[0] += len(ops)
                 elapsed = time.time() - t_start
+                # Guardamos estado de reanudación tras cada bulk_write exitoso
+                guardar_estado(clave_pag, pagina, acumuladas)
                 print(
                     f"[pág {pagina:>3}] +{len(ops):>5} facturas | "
                     f"total persistidas: {persistidas_total[0]:>7,} | "
@@ -167,6 +222,9 @@ def main():
     print(f"  Mongo        : {db_name}@{mongo_url.split('@')[-1].split('/')[0]}")
     print(f"  facturas_sii : {docs_antes:,} docs (antes)")
     print(f"  Máx páginas  : {args.max_paginas or 'todas'}")
+    if start_clave:
+        print(f"  Reanudando   : desde página {start_pagina + 1} "
+              f"({start_invoices:,} facturas previas)")
     print("=" * 70, flush=True)
 
     try:
@@ -174,14 +232,31 @@ def main():
             client, nif, razon, ejercicio, periodo, entorno,
             progress_cb=progress_cb,
             max_paginas=args.max_paginas,
+            start_clave=start_clave,
+            start_pagina=start_pagina,
+            start_invoices=start_invoices,
         )
     except KeyboardInterrupt:
         print("\n*** Interrupción manual (Ctrl-C). Las facturas ya descargadas "
-              "quedan persistidas en `facturas_sii`. ***", flush=True)
+              "quedan persistidas en `facturas_sii`. Relanza el mismo comando "
+              "para reanudar desde donde se quedó. ***", flush=True)
         sys.exit(130)
     except Exception as exc:  # noqa: BLE001
         print(f"\n*** ERROR durante la descarga: {exc} ***", flush=True)
+        print(f"*** Las {persistidas_total[0]:,} facturas descargadas hasta la "
+              f"página {paginas[0]} están persistidas en `facturas_sii`.", flush=True)
+        if state_path.exists():
+            print(f"*** Para REANUDAR desde donde se quedó, vuelve a lanzar:\n"
+                  f"      python scripts/descargar_sii.py --config {args.config}\n"
+                  f"    (state guardado en {state_path.name})", flush=True)
         raise
+
+    # Descarga completada con éxito → eliminamos el state file
+    try:
+        if state_path.exists():
+            state_path.unlink()
+    except Exception:  # noqa: BLE001
+        pass
 
     elapsed = time.time() - t_start
     docs_despues = coll.count_documents({})
