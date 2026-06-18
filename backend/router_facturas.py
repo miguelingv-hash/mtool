@@ -77,6 +77,11 @@ async def cleanup_orphan_jobs():
     try:
         await _db.facturas_sii.create_index("num_serie_factura", unique=True)
         await _db.facturas_comercial.create_index("num_serie_factura", unique=True)
+        # Indices compuestos para acelerar comparativa y los `distinct` del
+        # endpoint /comparativa/periodos. Sin ellos, con 1M+ facturas la
+        # consulta tarda > 25 s y el ingress devuelve 502.
+        await _db.facturas_sii.create_index([("ejercicio", 1), ("periodo", 1)])
+        await _db.facturas_comercial.create_index([("ejercicio", 1), ("periodo", 1)])
         await _db.jobs.create_index("id", unique=True)
         await _db.jobs.create_index([("status", 1), ("created_at", -1)])
     except Exception:  # noqa: BLE001
@@ -936,6 +941,69 @@ async def detalle_factura(fuente: str, num_serie: str):
     return doc
 
 
+def _build_row_from_docs(sii: Optional[dict], com: Optional[dict], ns: str) -> dict:
+    if sii and com:
+        d = diff_facturas(sii, com)
+        return {
+            "num_serie_factura": ns,
+            "estado": "coincide" if not d else "discrepancia",
+            "en_sii": True, "en_comercial": True,
+            "diferencias": d, "sii": sii, "comercial": com,
+        }
+    if sii:
+        return {
+            "num_serie_factura": ns,
+            "estado": "solo_sii",
+            "en_sii": True, "en_comercial": False,
+            "diferencias": {}, "sii": sii, "comercial": None,
+        }
+    return {
+        "num_serie_factura": ns,
+        "estado": "solo_comercial",
+        "en_sii": False, "en_comercial": True,
+        "diferencias": {}, "sii": None, "comercial": com,
+    }
+
+
+async def _build_filtros(
+    ejercicio: Optional[str],
+    periodo: Optional[str],
+    num_serie: Optional[str],
+) -> tuple[dict, dict]:
+    """Construye filtros Mongo para SII y comercial, restringiendo SII al
+    universo (ejercicio,periodo) de comercial si no se filtra explícitamente.
+    """
+    import re
+
+    filtro_sii: dict = {}
+    filtro_com: dict = {}
+    if ejercicio:
+        filtro_sii["ejercicio"] = str(ejercicio)
+        filtro_com["ejercicio"] = str(ejercicio)
+    if periodo:
+        filtro_sii["periodo"] = str(periodo)
+        filtro_com["periodo"] = str(periodo)
+    if num_serie:
+        regex_ns = {"$regex": re.escape(num_serie), "$options": "i"}
+        filtro_sii["num_serie_factura"] = regex_ns
+        filtro_com["num_serie_factura"] = regex_ns
+
+    if not ejercicio and not periodo:
+        pares_com = await _db.facturas_comercial.aggregate([
+            {"$group": {
+                "_id": {"ejercicio": "$ejercicio", "periodo": "$periodo"},
+            }},
+        ]).to_list(length=None)
+        pares = [p["_id"] for p in pares_com if p["_id"].get("ejercicio")]
+        if pares:
+            filtro_sii["$or"] = [
+                {"ejercicio": p["ejercicio"], "periodo": p["periodo"]}
+                for p in pares
+            ]
+
+    return filtro_sii, filtro_com
+
+
 async def _comparativa_data(
     ejercicio: Optional[str],
     periodo: Optional[str],
@@ -943,68 +1011,31 @@ async def _comparativa_data(
     num_serie: Optional[str] = None,
     estado: Optional[str] = None,
 ) -> list[dict]:
-    """Construye la lista completa de comparaciones SII vs Comercial.
-    Filtros Mongo de `ejercicio`/`periodo`/`num_serie` antes de cargar; filtro
-    de `estado` (coincide/discrepancia/solo_sii/solo_comercial) tras el match.
-    """
-    import re
-
-    filtro: dict = {}
-    if ejercicio:
-        filtro["ejercicio"] = str(ejercicio)
-    if periodo:
-        filtro["periodo"] = str(periodo)
-    if num_serie:
-        # Filtro "contiene", case-insensitive (escapamos regex meta-chars).
-        filtro["num_serie_factura"] = {
-            "$regex": re.escape(num_serie),
-            "$options": "i",
-        }
+    """Versión legacy (carga todo en memoria). Mantenida para `/export` y
+    en escenarios sin necesidad de paginación a nivel BD.
+    Para listado paginado usar `comparativa()` directamente, que ya optimiza
+    los estados que no requieren cargar todo el SII."""
+    filtro_sii, filtro_com = await _build_filtros(ejercicio, periodo, num_serie)
 
     sii_docs = await _db.facturas_sii.find(
-        filtro, {"_id": 0, "versiones": 0}
+        filtro_sii, {"_id": 0, "versiones": 0}
     ).to_list(length=None)
     com_docs = await _db.facturas_comercial.find(
-        filtro, {"_id": 0, "versiones": 0}
+        filtro_com, {"_id": 0, "versiones": 0}
     ).to_list(length=None)
 
     sii_map = {d["num_serie_factura"]: d for d in sii_docs}
     com_map = {d["num_serie_factura"]: d for d in com_docs}
     todas = sorted(set(sii_map.keys()) | set(com_map.keys()))
 
-    resultados = []
-    for ns in todas:
-        sii = sii_map.get(ns)
-        com = com_map.get(ns)
-        if sii and com:
-            d = diff_facturas(sii, com)
-            row_estado = "coincide" if not d else "discrepancia"
-            resultados.append({
-                "num_serie_factura": ns,
-                "estado": row_estado,
-                "en_sii": True, "en_comercial": True,
-                "diferencias": d, "sii": sii, "comercial": com,
-            })
-        elif sii:
-            resultados.append({
-                "num_serie_factura": ns,
-                "estado": "solo_sii",
-                "en_sii": True, "en_comercial": False,
-                "diferencias": {}, "sii": sii, "comercial": None,
-            })
-        else:
-            resultados.append({
-                "num_serie_factura": ns,
-                "estado": "solo_comercial",
-                "en_sii": False, "en_comercial": True,
-                "diferencias": {}, "sii": None, "comercial": com,
-            })
+    resultados = [
+        _build_row_from_docs(sii_map.get(ns), com_map.get(ns), ns)
+        for ns in todas
+    ]
 
     if only_diffs:
         resultados = [r for r in resultados if r["estado"] != "coincide"]
     if estado:
-        # Cuando se filtra explícitamente por estado, ignoramos `only_diffs`
-        # (más natural: si pides "sólo comercial" no quieres además filtrar por diffs).
         resultados = [r for r in resultados if r["estado"] == estado]
     return resultados
 
@@ -1024,30 +1055,105 @@ async def comparativa(
     Filtros: `ejercicio`, `periodo`, `num_serie` (contiene), `estado`
     (coincide | discrepancia | solo_sii | solo_comercial).
     Paginación: `skip` / `limit` (default 50).
+
+    Optimización: para evitar cargar millones de facturas SII en memoria,
+    construimos los resultados desde el universo comercial (que siempre es
+    pequeño) y sólo cargamos SII docs cuyo `num_serie` aparece en comercial.
+    El estado `solo_sii` requiere escanear SII fuera del comercial y se
+    pagina a nivel BD para no consumir memoria.
     """
-    resultados = await _comparativa_data(
-        ejercicio, periodo, only_diffs, num_serie, estado
-    )
+    filtro_sii, filtro_com = await _build_filtros(ejercicio, periodo, num_serie)
+
+    # 1) Universo comercial completo en scope (siempre pequeño)
+    com_docs = await _db.facturas_comercial.find(
+        filtro_com, {"_id": 0, "versiones": 0}
+    ).to_list(length=None)
+    com_map = {d["num_serie_factura"]: d for d in com_docs}
+    com_keys = list(com_map.keys())
+
+    # 2) Matches SII por num_serie ∈ comercial (uses unique index)
+    sii_match_docs = await _db.facturas_sii.find(
+        {**filtro_sii, "num_serie_factura": {"$in": com_keys}}
+        if com_keys else {**filtro_sii, "num_serie_factura": {"$in": []}},
+        {"_id": 0, "versiones": 0},
+    ).to_list(length=None) if com_keys else []
+    sii_match_map = {d["num_serie_factura"]: d for d in sii_match_docs}
+
+    # 3) Filas de comercial: cada una será coincide / discrepancia / solo_comercial
+    filas_com: list[dict] = []
+    for ns, com in com_map.items():
+        sii = sii_match_map.get(ns)
+        filas_com.append(_build_row_from_docs(sii, com, ns))
+
+    # 4) Contar SII fuera del comercial → estado solo_sii
+    solo_sii_filter = {**filtro_sii, "num_serie_factura": {"$nin": com_keys}}
+    solo_sii_total = await _db.facturas_sii.count_documents(solo_sii_filter)
+
+    # 5) Aplicar filtros only_diffs / estado para decidir total e items
+    if estado == "solo_sii":
+        # Sólo SII: paginamos a nivel BD. No mezclamos con filas_com.
+        cursor = _db.facturas_sii.find(
+            solo_sii_filter, {"_id": 0, "versiones": 0}
+        ).sort("num_serie_factura", 1).skip(skip).limit(limit)
+        sii_pagina = await cursor.to_list(length=limit)
+        items = [
+            _build_row_from_docs(d, None, d["num_serie_factura"])
+            for d in sii_pagina
+        ]
+        total = solo_sii_total
+    else:
+        # coincide / discrepancia / solo_comercial / all / diffs → desde filas_com
+        if estado:
+            filas = [r for r in filas_com if r["estado"] == estado]
+        elif only_diffs:
+            filas = [r for r in filas_com if r["estado"] != "coincide"]
+        else:
+            # "Todas" mezcla filas comerciales + solo_sii paginado
+            filas = list(filas_com)
+
+        filas.sort(key=lambda r: r["num_serie_factura"])
+        # Cuando estado=None y only_diffs=False, sumamos contador de solo_sii al total
+        # pero NO inyectamos los docs (sería caro). Si el usuario quiere verlos,
+        # debe seleccionar explícitamente "Sólo en SII".
+        if estado is None and not only_diffs:
+            total = len(filas) + solo_sii_total
+        else:
+            total = len(filas)
+        items = filas[skip : skip + limit]
+
     return {
-        "total": len(resultados),
+        "total": total,
         "skip": skip,
         "limit": limit,
         "campos_canonicos": CAMPOS_CANONICOS,
         "campos_numericos": CAMPOS_NUMERICOS,
-        "items": resultados[skip : skip + limit],
+        "items": items,
     }
 
 
 @router.get("/comparativa/periodos")
 async def comparativa_periodos():
     """Devuelve los ejercicios/periodos distintos disponibles en `facturas_sii`
-    (combinados con los de `facturas_comercial`) para poblar los filtros."""
-    sii_keys = await _db.facturas_sii.distinct("ejercicio")
-    com_keys = await _db.facturas_comercial.distinct("ejercicio")
-    ejercicios = sorted({str(e) for e in (sii_keys + com_keys) if e})
-    sii_p = await _db.facturas_sii.distinct("periodo")
-    com_p = await _db.facturas_comercial.distinct("periodo")
-    periodos = sorted({str(p) for p in (sii_p + com_p) if p})
+    (combinados con los de `facturas_comercial`) para poblar los filtros.
+
+    Usa aggregation con `$group` apoyado en el índice compuesto
+    (ejercicio, periodo) → segundos en lugar de minutos sobre 1M+ docs.
+    """
+    async def _distinct_eje_per(col):
+        cursor = col.aggregate([
+            {"$group": {
+                "_id": {"ejercicio": "$ejercicio", "periodo": "$periodo"},
+            }},
+        ])
+        docs = await cursor.to_list(length=None)
+        eje = {d["_id"].get("ejercicio") for d in docs if d["_id"].get("ejercicio")}
+        per = {d["_id"].get("periodo") for d in docs if d["_id"].get("periodo")}
+        return eje, per
+
+    sii_eje, sii_per = await _distinct_eje_per(_db.facturas_sii)
+    com_eje, com_per = await _distinct_eje_per(_db.facturas_comercial)
+    ejercicios = sorted({str(e) for e in (sii_eje | com_eje)})
+    periodos = sorted({str(p) for p in (sii_per | com_per)})
     return {"ejercicios": ejercicios, "periodos": periodos}
 
 

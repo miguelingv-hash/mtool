@@ -69,6 +69,14 @@
 - **Bug crítico backend**: en `_comparativa_data` (router_facturas.py) el bucle reasignaba la variable `estado` (parámetro de la función) por cada fila procesada, lo que desactivaba silenciosamente el filtro de estado pedido por el usuario (e.g. `?estado=coincide` devolvía discrepancias). Renombrado a `row_estado`. Verificado con curl: `coincide`, `discrepancia`, `solo_sii`, `solo_comercial` ahora devuelven sólo filas del estado correcto.
 - **UnitQuery**: removidos los campos "NIF emisor" y "Nombre emisor" del formulario porque en `ConsultaLRFacturasEmitidas` el emisor es implícito (= titular). Los campos se auto-pueblan desde `nif_titular`/`nombre_titular` al construir el payload, manteniendo intacto el contrato del backend.
 
+## Iteración 5 — Performance Comparativa con 1.28M facturas SII (18 Feb 2026)
+- **Problema**: con 1.28M facturas SII en BD el endpoint `/api/comparativa` tardaba 17s y `/api/comparativa/periodos` 28s → 502 Bad Gateway intermitentes del ingress.
+- **Fix índices**: añadidos `ejercicio_1_periodo_1` (compuesto) en `facturas_sii` y `facturas_comercial`. Ejecutado al arranque (idempotente).
+- **Fix `/comparativa/periodos`**: sustituido `distinct()` (collection scan) por `aggregate $group` apoyado en el índice compuesto. 28s → 1.2s (24x más rápido).
+- **Fix `/comparativa`**: reescrito el handler para construir resultados desde el universo comercial (siempre pequeño), cargando SII docs sólo cuando `num_serie ∈ comercial` (uses unique index). Para el estado `solo_sii` (potencialmente millones) se pagina a nivel BD con `skip/limit`. 17s → 1.7-2.9s. La función legacy `_comparativa_data` queda para `/comparativa/export` (full dump).
+- **Helper `_build_filtros`**: centraliza la construcción de filtros Mongo y la restricción del universo SII a (ejercicio, periodo) presentes en comercial cuando no hay filtro explícito.
+- **Cambio sutil de semántica**: cuando filtras "Sólo con diferencias" (default), `total` ahora cuenta sólo *lo accionable* (discrepancias + solo_comercial = 168), NO los 1.28M `solo_sii` (que serían facturas correctamente reportadas y no requieren acción). El usuario puede ver el universo `solo_sii` seleccionando explícitamente ese filtro.
+
 ## Backlog priorizado
 **P0 — Producción real**
 - ~~Integración del cliente SOAP real con `zeep`/`requests` + autenticación mTLS con certificado digital (PFX/P12)~~ ✅ Hecho. Falta probar end-to-end con certificado AEAT real.
