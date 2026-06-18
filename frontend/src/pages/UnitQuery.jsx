@@ -23,8 +23,6 @@ const INITIAL = {
   nombre_titular: "TotalEnergies Clientes S.A.U.",
   ejercicio: String(new Date().getFullYear()),
   periodo: "01",
-  nif_emisor: "A95000295",
-  nombre_emisor: "TotalEnergies Clientes S.A.U.",
   num_serie_factura: "",
   fecha_expedicion: "",
 };
@@ -60,7 +58,6 @@ export default function UnitQuery() {
       return "NIF titular inválido";
     if (!form.nombre_titular) return "Nombre titular requerido";
     if (!/^\d{4}$/.test(form.ejercicio)) return "Ejercicio inválido (YYYY)";
-    if (!form.nif_emisor) return "NIF emisor requerido";
     if (!form.num_serie_factura) return "Nº serie factura requerido";
     if (!FECHA_RE.test(form.fecha_expedicion))
       return "Fecha de expedición debe tener formato DD-MM-YYYY";
@@ -81,10 +78,17 @@ export default function UnitQuery() {
     setLoading(true);
     setResult(null);
     try {
+      // En ConsultaLRFacturasEmitidas el emisor es implícito (= el titular).
+      // Auto-poblamos los campos para satisfacer el contrato del backend.
+      const payloadBase = {
+        ...form,
+        nif_emisor: form.nif_titular,
+        nombre_emisor: form.nombre_titular,
+      };
       let data;
       if (cert.enabled && cert.file) {
         const fd = new FormData();
-        Object.entries(form).forEach(([k, v]) => {
+        Object.entries(payloadBase).forEach(([k, v]) => {
           if (v) fd.append(k, v);
         });
         fd.append("entorno", entorno);
@@ -96,8 +100,7 @@ export default function UnitQuery() {
         });
         data = r.data;
       } else {
-        const payload = { ...form, entorno };
-        if (!payload.nombre_emisor) delete payload.nombre_emisor;
+        const payload = { ...payloadBase, entorno };
         const r = await api.post("/sii/consulta-unitaria", payload);
         data = r.data;
       }
@@ -202,28 +205,12 @@ export default function UnitQuery() {
               <div className="text-xs uppercase tracking-wider text-slate-500 mb-3">
                 Identificación de la factura
               </div>
+              <p className="text-[11px] text-slate-400 -mt-1 mb-2">
+                En <span className="font-mono">ConsultaLRFacturasEmitidas</span> el emisor es implícito (= titular),
+                por lo que no se solicita aquí.
+              </p>
             </div>
 
-            <Field label="NIF emisor" required testId="field-nif-emisor">
-              <Input
-                value={form.nif_emisor}
-                onChange={(e) =>
-                  update("nif_emisor", e.target.value.toUpperCase())
-                }
-                placeholder="A87654321"
-                className="rounded-none font-mono"
-                data-testid="input-nif-emisor"
-              />
-            </Field>
-            <Field label="Nombre emisor (opcional)" testId="field-nombre-emisor">
-              <Input
-                value={form.nombre_emisor}
-                onChange={(e) => update("nombre_emisor", e.target.value)}
-                placeholder="Proveedor Ejemplo SA"
-                className="rounded-none"
-                data-testid="input-nombre-emisor"
-              />
-            </Field>
             <Field label="Nº serie / Nº factura" required testId="field-num-serie">
               <Input
                 value={form.num_serie_factura}

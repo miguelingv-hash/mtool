@@ -64,6 +64,11 @@
 ## Iteración 3 — Bug fix selector de entorno (Feb 2026)
 - **Fix P0**: `Comparativa.jsx` hardcodeaba `entorno="preproduccion"` en la consulta mensual, ignorando el selector global. Ahora usa `useEnv()` igual que `UnitQuery`/`BatchQuery`. Verificado vía wslogs que los 4 endpoints (`preproduccion`, `preproduccion_sello`, `produccion`, `produccion_sello`) se mapean correctamente al endpoint AEAT esperado.
 
+## Iteración 4 — Filtro estado Comparativa + limpieza UnitQuery (18 Feb 2026)
+- **Comparativa**: el selector "Mostrar" ahora ofrece 6 estados granulares: *Sólo con diferencias*, *Todas las facturas*, *Match (coinciden)*, *Con discrepancias*, *Sólo en SII*, *Sólo en Comercial*. Se eliminó el estado redundante `onlyDiffs` y se cableó directamente `filtroEstado` al `Select`, manteniendo el cableado existente con `params.estado` en `/api/comparativa` y `/api/comparativa/export`.
+- **Bug crítico backend**: en `_comparativa_data` (router_facturas.py) el bucle reasignaba la variable `estado` (parámetro de la función) por cada fila procesada, lo que desactivaba silenciosamente el filtro de estado pedido por el usuario (e.g. `?estado=coincide` devolvía discrepancias). Renombrado a `row_estado`. Verificado con curl: `coincide`, `discrepancia`, `solo_sii`, `solo_comercial` ahora devuelven sólo filas del estado correcto.
+- **UnitQuery**: removidos los campos "NIF emisor" y "Nombre emisor" del formulario porque en `ConsultaLRFacturasEmitidas` el emisor es implícito (= titular). Los campos se auto-pueblan desde `nif_titular`/`nombre_titular` al construir el payload, manteniendo intacto el contrato del backend.
+
 ## Backlog priorizado
 **P0 — Producción real**
 - ~~Integración del cliente SOAP real con `zeep`/`requests` + autenticación mTLS con certificado digital (PFX/P12)~~ ✅ Hecho. Falta probar end-to-end con certificado AEAT real.

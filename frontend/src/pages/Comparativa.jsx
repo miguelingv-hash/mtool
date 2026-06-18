@@ -171,12 +171,12 @@ export default function Comparativa() {
   const initialNumSerie = new URLSearchParams(location.search).get("num_serie") || "";
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
-  const [onlyDiffs, setOnlyDiffs] = useState(!initialNumSerie);
   const [onlyIvaErr, setOnlyIvaErr] = useState(false);
   const [filtroEjercicio, setFiltroEjercicio] = useState("__all__");
   const [filtroPeriodo, setFiltroPeriodo] = useState("__all__");
   const [filtroNumSerie, setFiltroNumSerie] = useState(initialNumSerie);
   const [filtroNumSerieDebounced, setFiltroNumSerieDebounced] = useState(initialNumSerie);
+  const [filtroEstado, setFiltroEstado] = useState(initialNumSerie ? "all" : "diffs"); // diffs|all|coincide|discrepancia|solo_sii|solo_comercial
   const [periodosDisponibles, setPeriodosDisponibles] = useState({
     ejercicios: [],
     periodos: [],
@@ -204,10 +204,19 @@ export default function Comparativa() {
     setLoading(true);
     try {
       const params = {
-        only_diffs: onlyDiffs,
         skip: (page - 1) * pageSize,
         limit: pageSize,
       };
+      // Mapeo del selector "Mostrar" a los parámetros del backend
+      if (filtroEstado === "diffs") {
+        params.only_diffs = true;
+      } else if (filtroEstado === "all") {
+        params.only_diffs = false;
+      } else {
+        // estado específico: coincide / discrepancia / solo_sii / solo_comercial
+        params.only_diffs = false;
+        params.estado = filtroEstado;
+      }
       if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
       if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
       if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
@@ -229,12 +238,12 @@ export default function Comparativa() {
   useEffect(() => {
     load();
     // eslint-disable-next-line
-  }, [onlyDiffs, page, pageSize, filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced]);
+  }, [filtroEstado, page, pageSize, filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced]);
 
   // Reset paginación al cambiar filtros
   useEffect(() => {
     setPage(1);
-  }, [onlyDiffs, filtroEjercicio, filtroPeriodo, pageSize, filtroNumSerieDebounced]);
+  }, [filtroEstado, filtroEjercicio, filtroPeriodo, pageSize, filtroNumSerieDebounced]);
 
   // Debounce 300ms para el filtro de num_serie (evita request por keystroke)
   useEffect(() => {
@@ -274,7 +283,14 @@ export default function Comparativa() {
 
   const exportar = () => {
     const params = new URLSearchParams();
-    params.set("only_diffs", onlyDiffs);
+    if (filtroEstado === "diffs") {
+      params.set("only_diffs", "true");
+    } else if (filtroEstado === "all") {
+      params.set("only_diffs", "false");
+    } else {
+      params.set("only_diffs", "false");
+      params.set("estado", filtroEstado);
+    }
     if (filtroEjercicio !== "__all__") params.set("ejercicio", filtroEjercicio);
     if (filtroPeriodo !== "__all__") params.set("periodo", filtroPeriodo);
     if (filtroNumSerieDebounced.trim()) params.set("num_serie", filtroNumSerieDebounced.trim());
@@ -738,15 +754,19 @@ export default function Comparativa() {
             Mostrar:
           </Label>
           <Select
-            value={onlyDiffs ? "diffs" : "all"}
-            onValueChange={(v) => setOnlyDiffs(v === "diffs")}
+            value={filtroEstado}
+            onValueChange={setFiltroEstado}
           >
-            <SelectTrigger className="rounded-none h-8 w-[200px] text-xs" data-testid="filter-diffs">
+            <SelectTrigger className="rounded-none h-8 w-[220px] text-xs" data-testid="filter-estado">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="diffs">Sólo con diferencias</SelectItem>
               <SelectItem value="all">Todas las facturas</SelectItem>
+              <SelectItem value="coincide">Match (coinciden)</SelectItem>
+              <SelectItem value="discrepancia">Con discrepancias</SelectItem>
+              <SelectItem value="solo_sii">Sólo en SII</SelectItem>
+              <SelectItem value="solo_comercial">Sólo en Comercial</SelectItem>
             </SelectContent>
           </Select>
 
@@ -879,9 +899,17 @@ export default function Comparativa() {
                 <TableCell colSpan={6} className="text-center py-10 text-slate-500">
                   {onlyIvaErr
                     ? "Ninguna factura con redondeo IVA incorrecto"
-                    : onlyDiffs
+                    : filtroEstado === "diffs"
                       ? "Sin diferencias detectadas"
-                      : "Sin datos"}
+                      : filtroEstado === "coincide"
+                        ? "Ninguna factura coincide entre SII y Comercial"
+                        : filtroEstado === "discrepancia"
+                          ? "Sin discrepancias detectadas"
+                          : filtroEstado === "solo_sii"
+                            ? "Ninguna factura presente sólo en SII"
+                            : filtroEstado === "solo_comercial"
+                              ? "Ninguna factura presente sólo en Comercial"
+                              : "Sin datos"}
                 </TableCell>
               </TableRow>
             ) : (

@@ -941,10 +941,11 @@ async def _comparativa_data(
     periodo: Optional[str],
     only_diffs: bool,
     num_serie: Optional[str] = None,
+    estado: Optional[str] = None,
 ) -> list[dict]:
     """Construye la lista completa de comparaciones SII vs Comercial.
-    Aplica filtros Mongo de `ejercicio`/`periodo`/`num_serie` antes de cargar
-    para no traer documentos de más a memoria.
+    Filtros Mongo de `ejercicio`/`periodo`/`num_serie` antes de cargar; filtro
+    de `estado` (coincide/discrepancia/solo_sii/solo_comercial) tras el match.
     """
     import re
 
@@ -977,10 +978,10 @@ async def _comparativa_data(
         com = com_map.get(ns)
         if sii and com:
             d = diff_facturas(sii, com)
-            estado = "coincide" if not d else "discrepancia"
+            row_estado = "coincide" if not d else "discrepancia"
             resultados.append({
                 "num_serie_factura": ns,
-                "estado": estado,
+                "estado": row_estado,
                 "en_sii": True, "en_comercial": True,
                 "diferencias": d, "sii": sii, "comercial": com,
             })
@@ -1001,6 +1002,10 @@ async def _comparativa_data(
 
     if only_diffs:
         resultados = [r for r in resultados if r["estado"] != "coincide"]
+    if estado:
+        # Cuando se filtra explícitamente por estado, ignoramos `only_diffs`
+        # (más natural: si pides "sólo comercial" no quieres además filtrar por diffs).
+        resultados = [r for r in resultados if r["estado"] == estado]
     return resultados
 
 
@@ -1012,13 +1017,17 @@ async def comparativa(
     ejercicio: Optional[str] = None,
     periodo: Optional[str] = None,
     num_serie: Optional[str] = None,
+    estado: Optional[str] = None,
 ):
     """Compara facturas SII vs Comercial por `num_serie_factura`.
 
-    Filtros: `ejercicio`, `periodo`, `num_serie` (contiene, case-insensitive).
+    Filtros: `ejercicio`, `periodo`, `num_serie` (contiene), `estado`
+    (coincide | discrepancia | solo_sii | solo_comercial).
     Paginación: `skip` / `limit` (default 50).
     """
-    resultados = await _comparativa_data(ejercicio, periodo, only_diffs, num_serie)
+    resultados = await _comparativa_data(
+        ejercicio, periodo, only_diffs, num_serie, estado
+    )
     return {
         "total": len(resultados),
         "skip": skip,
@@ -1048,10 +1057,13 @@ async def comparativa_export(
     ejercicio: Optional[str] = None,
     periodo: Optional[str] = None,
     num_serie: Optional[str] = None,
+    estado: Optional[str] = None,
 ):
     """Exporta la comparativa completa (sin paginar) a CSV (UTF-8 BOM) abrible
     directamente en Excel/LibreOffice."""
-    resultados = await _comparativa_data(ejercicio, periodo, only_diffs, num_serie)
+    resultados = await _comparativa_data(
+        ejercicio, periodo, only_diffs, num_serie, estado
+    )
 
     headers = ["num_serie_factura", "estado", "campos_con_diferencias"]
     for c in CAMPOS_CANONICOS:
