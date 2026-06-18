@@ -14,8 +14,27 @@ con la AEAT durante horas y persiste cada página en `facturas_sii` con
 
 - Python 3.10+
 - Acceso de red a la AEAT y a la MongoDB de la aplicación.
-- Las dependencias del backend instaladas (ya están en `requirements.txt`).
 - El certificado `.pfx` accesible localmente.
+
+### Instalar dependencias (primera vez)
+
+Desde la carpeta `backend/` del repo, en una terminal:
+
+**Windows (CMD / PowerShell):**
+```cmd
+cd C:\Users\TUUSUARIO\Documents\GitHub\mtool\backend
+python -m pip install -r scripts\requirements-cli.txt
+```
+
+**Linux / macOS:**
+```bash
+cd ~/mtool/backend
+python3 -m pip install -r scripts/requirements-cli.txt
+```
+
+> Si prefieres instalar todas las dependencias del backend (necesarias si vas
+> a ejecutar también el servidor web), usa `pip install -r requirements.txt`
+> en su lugar.
 
 ## Uso rápido
 
