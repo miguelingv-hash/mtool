@@ -166,12 +166,9 @@
               "      FechaExpedicionFacturaEmisor: tag(idF,'FechaExpedicionFacturaEmisor')",
               "    };",
               "    pm.variables.set('clave_pag', JSON.stringify(clavePag));",
-              "    if (pm.execution && pm.execution.setNextRequest) {",
-              "      pm.execution.setNextRequest('ConsultaLRFacturasEmitidas - Loop');",
-              "    } else { postman.setNextRequest('ConsultaLRFacturasEmitidas - Loop'); }",
+              "    postman.setNextRequest('ConsultaLRFacturasEmitidas - Loop');",
               "  } else {",
-              "    if (pm.execution && pm.execution.setNextRequest) { pm.execution.setNextRequest(null); }",
-              "    else { postman.setNextRequest(null); }",
+              "    postman.setNextRequest(null);",
               "  }",
               "} else {",
               "  console.log(`DONE: descarga finalizada. Total facturas: ${acumuladas}`);",
@@ -181,8 +178,7 @@
               "    console.log(xml.substring(0, 4000));",
               "    console.log('XMLDUMP_END');",
               "  }",
-              "  if (pm.execution && pm.execution.setNextRequest) { pm.execution.setNextRequest(null); }",
-              "  else { postman.setNextRequest(null); }",
+              "  postman.setNextRequest(null);",
               "}"
             ]
           }
