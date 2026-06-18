@@ -41,8 +41,26 @@ CSVAEAT | NumRegistroPresentacion | TimestampPresentacion
 
 ## Uso con Newman CLI (volcado a fichero — recomendado)
 
-Postman sandbox no escribe a disco, pero **Newman sí** acepta certificado `.pfx`
-directamente y puedes redirigir la salida a un fichero.
+Postman sandbox no escribe a disco, pero **Newman sí**. Para usar `.pfx/.p12`,
+Newman 6.x requiere un fichero JSON aparte mapeando el certificado al host.
+
+**Paso 1 — Crea `ssl_certs.json` junto a la colección:**
+
+```json
+[
+  {
+    "name": "AEAT SII",
+    "matches": [
+      "https://*.agenciatributaria.gob.es/*",
+      "https://prewww1.aeat.es/*"
+    ],
+    "pfx": { "src": "./cert.p12" },
+    "passphrase": "TU_PASSWORD"
+  }
+]
+```
+
+**Paso 2 — Ejecuta Newman:**
 
 ```bash
 npm install -g newman
@@ -50,24 +68,22 @@ npm install -g newman
 # Linux / Mac
 newman run AEAT_SII_Loop.postman_collection.json \
   -e AEAT_SII_env.postman_environment.json \
-  --ssl-client-cert-pfx ./cert.pfx \
-  --ssl-client-passphrase "MI_PASSWORD" \
-  --reporter-cli-no-summary \
-  --reporter-cli-no-assertions \
+  --ssl-client-cert-list ssl_certs.json \
+  --reporter-cli-no-summary --reporter-cli-no-assertions \
   --timeout-request 60000 \
   2>&1 | grep "^CSV" > facturas.csv
 
 # Windows (cmd)
 newman run AEAT_SII_Loop.postman_collection.json ^
   -e AEAT_SII_env.postman_environment.json ^
-  --ssl-client-cert-pfx .\cert.pfx ^
-  --ssl-client-passphrase "MI_PASSWORD" ^
-  --reporter-cli-no-summary ^
-  --reporter-cli-no-assertions ^
+  --ssl-client-cert-list ssl_certs.json ^
+  --reporter-cli-no-summary --reporter-cli-no-assertions ^
   --timeout-request 60000 > export.txt 2>&1
 
 findstr /B "CSV" export.txt > facturas.csv
 ```
+
+**Smoke test rápido** (sólo 1 página): añade `-n 1` al final del `newman run`.
 
 El fichero `facturas.csv` queda con la cabecera `CSVHEAD:...` en la 1ª línea
 y luego una línea `CSVROW:...` por factura. Para abrirlo en Excel:
