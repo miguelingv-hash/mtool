@@ -121,6 +121,7 @@ async def _load_comparativa_config() -> dict:
         return {
             "campos_comparados": list(CAMPOS_COMPARADOS_DEFAULT),
             "invertir_signo_por_origen": {},
+            "excluir_comercial_base_cero": False,
         }
     return {
         "campos_comparados": doc.get(
@@ -129,6 +130,9 @@ async def _load_comparativa_config() -> dict:
         "invertir_signo_por_origen": doc.get(
             "invertir_signo_por_origen", {}
         ) or {},
+        "excluir_comercial_base_cero": bool(
+            doc.get("excluir_comercial_base_cero", False)
+        ),
     }
 
 
@@ -1275,14 +1279,15 @@ async def _build_filtros(
     ejercicio: Optional[str],
     periodo: Optional[str],
     num_serie: Optional[str],
+    excluir_base_cero: bool = False,
 ) -> tuple[dict, dict]:
     """Construye filtros Mongo para SII y comercial a partir de los parámetros
     de consulta. No aplica restricciones implícitas: el universo SII se acota
     SÓLO si el usuario filtra explícitamente por ejercicio/periodo.
 
-    (Antes acotábamos el SII a los (ejercicio,periodo) presentes en comercial
-    para acelerar, pero eso hacía que "Todas las facturas" no incluyera las
-    SII de periodos sin contrapartida comercial, confundiendo al usuario.)
+    Si `excluir_base_cero=True`, excluye en el filtro comercial las facturas
+    con `base_imponible == 0` (o `null`). Útil para descartar anulaciones y
+    asientos contables que no aportan a la conciliación.
     """
     import re
 
@@ -1298,6 +1303,10 @@ async def _build_filtros(
         regex_ns = {"$regex": re.escape(num_serie), "$options": "i"}
         filtro_sii["num_serie_factura"] = regex_ns
         filtro_com["num_serie_factura"] = regex_ns
+    if excluir_base_cero:
+        # `$ne: 0` excluye exactamente 0; ausencia o null se mantienen porque
+        # el comercial ya almacena `base_imponible` como número tras el parser.
+        filtro_com["base_imponible"] = {"$nin": [0, 0.0, None]}
 
     return filtro_sii, filtro_com
 
@@ -1313,8 +1322,11 @@ async def _comparativa_data(
     en escenarios sin necesidad de paginación a nivel BD.
     Para listado paginado usar `comparativa()` directamente, que ya optimiza
     los estados que no requieren cargar todo el SII."""
-    filtro_sii, filtro_com = await _build_filtros(ejercicio, periodo, num_serie)
     config = await _load_comparativa_config()
+    filtro_sii, filtro_com = await _build_filtros(
+        ejercicio, periodo, num_serie,
+        excluir_base_cero=config["excluir_comercial_base_cero"],
+    )
 
     sii_docs = await _db.facturas_sii.find(
         filtro_sii, {"_id": 0, "versiones": 0}
@@ -1361,8 +1373,11 @@ async def comparativa(
     El estado `solo_sii` requiere escanear SII fuera del comercial y se
     pagina a nivel BD para no consumir memoria.
     """
-    filtro_sii, filtro_com = await _build_filtros(ejercicio, periodo, num_serie)
     config = await _load_comparativa_config()
+    filtro_sii, filtro_com = await _build_filtros(
+        ejercicio, periodo, num_serie,
+        excluir_base_cero=config["excluir_comercial_base_cero"],
+    )
 
     # 1) Universo comercial completo en scope (siempre pequeño)
     com_docs = await _db.facturas_comercial.find(
@@ -1444,6 +1459,7 @@ async def get_comparativa_config():
     return {
         "campos_comparados": cfg["campos_comparados"],
         "invertir_signo_por_origen": cfg["invertir_signo_por_origen"],
+        "excluir_comercial_base_cero": cfg["excluir_comercial_base_cero"],
         "campos_disponibles": list(CAMPOS_CANONICOS),
         "campos_numericos": list(CAMPOS_NUMERICOS),
         "origenes_disponibles": origenes,
@@ -1456,6 +1472,9 @@ async def put_comparativa_config(payload: dict):
     """Actualiza la configuración de comparativa. Acepta:
       - `campos_comparados`: lista de campos canónicos a incluir en el diff.
       - `invertir_signo_por_origen`: dict `{ "SAP": bool, "SIGLO": bool, ... }`.
+      - `excluir_comercial_base_cero`: bool — si True, ignora en la comparativa
+        las filas comerciales con base imponible = 0 (típicamente facturas
+        anuladas o ajustes contables que no aportan a la conciliación).
     """
     campos_in = payload.get("campos_comparados")
     if not isinstance(campos_in, list):
@@ -1470,17 +1489,24 @@ async def put_comparativa_config(payload: dict):
         )
     inv_clean = {str(k): bool(v) for k, v in inv_in.items() if k}
 
+    excl_base_cero = bool(payload.get("excluir_comercial_base_cero", False))
+
     await _db.comparativa_config.update_one(
         {"_id": _CONFIG_DOC_ID},
         {"$set": {
             "campos_comparados": campos_valid,
             "invertir_signo_por_origen": inv_clean,
+            "excluir_comercial_base_cero": excl_base_cero,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }},
         upsert=True,
     )
-    return {"ok": True, "campos_comparados": campos_valid,
-            "invertir_signo_por_origen": inv_clean}
+    return {
+        "ok": True,
+        "campos_comparados": campos_valid,
+        "invertir_signo_por_origen": inv_clean,
+        "excluir_comercial_base_cero": excl_base_cero,
+    }
 
 
 @router.get("/comparativa/periodos")
@@ -1529,6 +1555,7 @@ async def comparativa_resumen_origenes(
     """
     import re
 
+    config = await _load_comparativa_config()
     filtro_com: dict = {}
     if ejercicio:
         filtro_com["ejercicio"] = str(ejercicio)
@@ -1538,6 +1565,8 @@ async def comparativa_resumen_origenes(
         filtro_com["num_serie_factura"] = {
             "$regex": re.escape(num_serie), "$options": "i",
         }
+    if config["excluir_comercial_base_cero"]:
+        filtro_com["base_imponible"] = {"$nin": [0, 0.0, None]}
 
     # 1) Aggregation: cuentas y sumas por origen
     pipeline = [
@@ -1552,7 +1581,6 @@ async def comparativa_resumen_origenes(
         {"$sort": {"total_facturas": -1}},
     ]
     grupos = await _db.facturas_comercial.aggregate(pipeline).to_list(length=None)
-    config = await _load_comparativa_config()
 
     # 2) Para cada origen calculamos matches/discrepancias contra SII
     #    Cargamos las facturas comerciales del grupo (sólo num_serie),

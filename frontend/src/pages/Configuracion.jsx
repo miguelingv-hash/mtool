@@ -64,6 +64,14 @@ export default function Configuracion() {
     setCfg({ ...cfg, invertir_signo_por_origen: next });
   };
 
+  const toggleExcluirBaseCero = () => {
+    if (!cfg) return;
+    setCfg({
+      ...cfg,
+      excluir_comercial_base_cero: !cfg.excluir_comercial_base_cero,
+    });
+  };
+
   const guardar = async () => {
     if (!cfg) return;
     setSaving(true);
@@ -71,6 +79,7 @@ export default function Configuracion() {
       await api.put("/comparativa/config", {
         campos_comparados: cfg.campos_comparados,
         invertir_signo_por_origen: cfg.invertir_signo_por_origen,
+        excluir_comercial_base_cero: cfg.excluir_comercial_base_cero,
       });
       toast.success("Configuración guardada", {
         description:
@@ -91,6 +100,7 @@ export default function Configuracion() {
       ...cfg,
       campos_comparados: cfg.campos_comparados_default || [],
       invertir_signo_por_origen: {},
+      excluir_comercial_base_cero: false,
     });
   };
 
@@ -232,6 +242,42 @@ export default function Configuracion() {
               );
             })
           )}
+        </div>
+      </section>
+
+      {/* Bloque 3 — Exclusión de filas comerciales con base imponible 0 */}
+      <section className="mb-10" data-testid="seccion-filtros-fila">
+        <h2 className="font-display text-lg font-semibold text-slate-900 mb-1">
+          Exclusión de filas comerciales
+        </h2>
+        <p className="text-xs text-slate-500 mb-4 max-w-2xl">
+          Algunos asientos contables (anulaciones, regularizaciones, ajustes)
+          aparecen en el comercial con base imponible 0 y no aportan a la
+          conciliación con el SII. Actívalo para ignorarlas en toda la
+          comparativa y en el dashboard de orígenes.
+        </p>
+        <div className="border border-slate-200 bg-white">
+          <div
+            className="flex items-center justify-between px-4 py-3 border-l-4 border-l-slate-400"
+            data-testid="row-excluir-base-cero"
+          >
+            <div>
+              <div className="font-mono text-sm font-semibold text-slate-800">
+                Excluir comerciales con{" "}
+                <span className="bg-slate-100 px-1.5 py-0.5">
+                  base_imponible = 0
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                No se borran de la BD — sólo se omiten al comparar.
+              </div>
+            </div>
+            <Switch
+              checked={!!cfg.excluir_comercial_base_cero}
+              onCheckedChange={toggleExcluirBaseCero}
+              data-testid="switch-excluir-base-cero"
+            />
+          </div>
         </div>
       </section>
 
