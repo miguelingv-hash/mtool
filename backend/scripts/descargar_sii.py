@@ -68,6 +68,15 @@ def main():
         action="store_true",
         help="Ignora el state file de reanudación y arranca desde la página 1",
     )
+    ap.add_argument(
+        "--verificar-completitud",
+        action="store_true",
+        help="Comprueba si AEAT tiene facturas posteriores a las ya descargadas "
+             "en BD para este (nif, ejercicio, periodo). Construye ClavePaginacion "
+             "desde la última factura del periodo en BD (o desde el state file si "
+             "existe) y consulta AEAT. Cualquier factura nueva se inserta. Útil "
+             "cuando dudas si el periodo está completo.",
+    )
     args = ap.parse_args()
 
     cfg = cargar_config(args.config)
@@ -178,6 +187,54 @@ def main():
             flush=True,
         )
 
+    # --- Modo verificación de completitud ---------------------------------
+    # Calcula la ClavePaginacion a partir de la última factura del periodo en
+    # BD (la mayor lexicográficamente por num_serie + fecha) si no hay state
+    # file. AEAT sólo devolverá facturas que vengan DESPUÉS de esa clave en
+    # su ordenación interna → si devuelve 0, el periodo está completo.
+    verificar = args.verificar_completitud
+    if verificar and not start_clave:
+        ult = coll.find_one(
+            {"ejercicio": ejercicio, "periodo": periodo, "nif_titular": nif},
+            sort=[
+                ("num_serie_factura", -1),
+                ("fecha_expedicion", -1),
+            ],
+            projection={
+                "_id": 0,
+                "num_serie_factura": 1,
+                "fecha_expedicion": 1,
+            },
+        )
+        if ult:
+            start_clave = {
+                "IDEmisorFactura": {"NIF": nif},
+                "NumSerieFacturaEmisor": ult["num_serie_factura"],
+                "FechaExpedicionFacturaEmisor": ult["fecha_expedicion"],
+            }
+            # Para que la auditoría de pagina sea coherente, partimos de la
+            # cuenta actual en BD para este (nif, ejercicio, periodo).
+            start_invoices = coll.count_documents({
+                "ejercicio": ejercicio,
+                "periodo": periodo,
+                "nif_titular": nif,
+            })
+            start_pagina = 0
+            print(
+                f"INFO Verificación: ClavePaginacion construida desde la "
+                f"última factura del periodo en BD: "
+                f"{ult['num_serie_factura']!r} / {ult['fecha_expedicion']!r} "
+                f"({start_invoices:,} facturas previas en BD).",
+                flush=True,
+            )
+        else:
+            print(
+                f"AVISO Verificación: no hay facturas en BD para "
+                f"({nif}, {ejercicio}, {periodo}). Se hará una descarga "
+                f"completa desde el principio.",
+                flush=True,
+            )
+
     def progress_cb(pagina, acumuladas, clave_pag, facturas_pagina):
         """Callback síncrono: hace bulk_write a Mongo y muestra progreso."""
         if facturas_pagina:
@@ -213,7 +270,10 @@ def main():
         return False  # nunca cancelamos desde CLI
 
     print("=" * 70)
-    print("  Descarga masiva de facturas SII — CLI")
+    if verificar:
+        print("  Verificación de completitud SII — CLI")
+    else:
+        print("  Descarga masiva de facturas SII — CLI")
     print("=" * 70)
     print(f"  NIF titular  : {nif}")
     print(f"  Razón social : {razon}")
@@ -222,6 +282,8 @@ def main():
     print(f"  Mongo        : {db_name}@{mongo_url.split('@')[-1].split('/')[0]}")
     print(f"  facturas_sii : {docs_antes:,} docs (antes)")
     print(f"  Máx páginas  : {args.max_paginas or 'todas'}")
+    if verificar:
+        print("  Modo         : --verificar-completitud (sólo descarga lo nuevo)")
     if start_clave:
         print(f"  Reanudando   : desde página {start_pagina + 1} "
               f"({start_invoices:,} facturas previas)")
@@ -261,10 +323,27 @@ def main():
     elapsed = time.time() - t_start
     docs_despues = coll.count_documents({})
     print("=" * 70)
-    print("  DESCARGA COMPLETADA")
-    print("=" * 70)
-    print(f"  Facturas devueltas por el SII : {len(facturas):,}")
-    print(f"  Persistidas en esta ejecución : {persistidas_total[0]:,}")
+    if verificar:
+        # En modo verificación, lo importante es saber si el periodo está
+        # completo o no. `facturas` aquí incluye las que vienen DESPUÉS de la
+        # ClavePaginacion construida desde BD.
+        if len(facturas) == 0:
+            print("  VERIFICACIÓN: PERIODO COMPLETO ✓")
+            print("=" * 70)
+            print("  AEAT no devolvió ninguna factura adicional tras la última")
+            print(f"  factura que tenías en BD para {nif} / {ejercicio}-{periodo}.")
+            print("  La descarga local está al día.")
+        else:
+            print("  VERIFICACIÓN: FALTABAN FACTURAS ⚠")
+            print("=" * 70)
+            print(f"  AEAT devolvió {len(facturas):,} facturas posteriores a las")
+            print("  ya almacenadas. Se han persistido en `facturas_sii`.")
+        print(f"  Persistidas en esta verificación: {persistidas_total[0]:,}")
+    else:
+        print("  DESCARGA COMPLETADA")
+        print("=" * 70)
+        print(f"  Facturas devueltas por el SII : {len(facturas):,}")
+        print(f"  Persistidas en esta ejecución : {persistidas_total[0]:,}")
     print(f"  facturas_sii (antes / después): {docs_antes:,} / {docs_despues:,}")
     print(f"  Páginas procesadas            : {paginas[0]}")
     print(f"  Tiempo total                  : {elapsed/60:.1f} min "

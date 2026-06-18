@@ -122,6 +122,29 @@ aborta — en ese caso, relanza el comando y el script reanudará desde la
 página quedan persistidas en `facturas_sii` y el state file mantiene la
 posición exacta para que puedas reanudar después.
 
+## Verificar completitud del periodo
+
+¿Dudas de si el periodo está completo o le faltan facturas porque el script
+falló a mitad? Lanza:
+
+```bash
+python scripts/descargar_sii.py --config mi_descarga.txt --verificar-completitud
+```
+
+Funcionamiento:
+1. Si existe el `.state.json` de reanudación, usa esa `ClavePaginacion`.
+2. Si no, toma de la BD la factura del periodo con mayor
+   `num_serie_factura + fecha_expedicion` y construye la `ClavePaginacion`
+   a partir de ella.
+3. Lanza UNA llamada SOAP al SII con esa clave. AEAT devuelve sólo las
+   facturas que vienen **después** en su ordenación interna:
+   - Si devuelve **0 facturas** → `VERIFICACIÓN: PERIODO COMPLETO ✓`
+   - Si devuelve **N facturas** → las inserta y avisa
+     `VERIFICACIÓN: FALTABAN FACTURAS ⚠ (N nuevas)`.
+
+Es una operación **barata** (1 sola llamada SOAP si el periodo está
+completo) y te da certeza sin re-descargar 1M+ facturas.
+
 ## Notas
 
 - El certificado **nunca se escribe a disco** en el proceso del script
