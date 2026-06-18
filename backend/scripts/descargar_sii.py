@@ -117,7 +117,45 @@ def main():
 
     mongo = MongoClient(mongo_url)
     coll = mongo[db_name]["facturas_sii"]
-    coll.create_index("num_serie_factura", unique=True)
+    # Índice único por num_serie_factura. Si ya existen documentos duplicados
+    # (p.ej. la colección venía de una versión anterior sin índice unique),
+    # avisamos y seguimos sin él en lugar de abortar el script.
+    try:
+        coll.create_index("num_serie_factura", unique=True)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"AVISO: no se pudo crear el índice unique en num_serie_factura "
+            f"({type(exc).__name__}: {exc}).",
+            flush=True,
+        )
+        print(
+            "Posible causa: la colección ya contiene documentos duplicados. "
+            "Para resolverlo:",
+            flush=True,
+        )
+        print(
+            "  1) Conéctate con mongosh y ejecuta:",
+            flush=True,
+        )
+        print(
+            "       use " + db_name,
+            flush=True,
+        )
+        print(
+            "       db.facturas_sii.aggregate([{$group:{_id:'$num_serie_factura',"
+            "n:{$sum:1},ids:{$push:'$_id'}}},{$match:{n:{$gt:1}}}])"
+            ".forEach(d=>db.facturas_sii.deleteMany({_id:{$in:d.ids.slice(1)}}))",
+            flush=True,
+        )
+        print(
+            "  2) Vuelve a lanzar este script.",
+            flush=True,
+        )
+        print(
+            "Continuando SIN índice unique (los upserts seguirán funcionando "
+            "por num_serie_factura igualmente).",
+            flush=True,
+        )
     docs_antes = coll.count_documents({})
 
     # Cliente SII real con certificado
