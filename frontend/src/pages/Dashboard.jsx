@@ -61,6 +61,7 @@ export default function Dashboard() {
     api
       .get("/sii/stats")
       .then((r) => setStats(r.data))
+      .catch(() => setStats(null))
       .finally(() => setLoading(false));
   }, []);
 

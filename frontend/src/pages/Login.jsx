@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate, Link } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -19,11 +19,11 @@ export default function Login() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
-  // Si ya hay sesión, redirige
-  if (user) {
-    navigate(from, { replace: true });
-    return null;
-  }
+  // Si ya hay sesión, redirige. Lo hacemos en useEffect (NO en render) para
+  // evitar el warning "Cannot update during render" de React Router.
+  useEffect(() => {
+    if (user) navigate(from, { replace: true });
+  }, [user, from, navigate]);
 
   const submit = async (e) => {
     e.preventDefault();

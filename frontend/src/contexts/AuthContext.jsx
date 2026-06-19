@@ -29,20 +29,27 @@ export function AuthProvider({ children }) {
   useEffect(() => { refreshMe(); }, [refreshMe]);
 
   // Interceptor: ante 401, intentar refresh transparente UNA vez antes de
-  // redirigir a /login. Evita logouts molestos por access token expirado.
+  // marcar al usuario como no logueado. Evita logouts molestos por access
+  // token expirado. NO se aplica a las rutas /auth/* (login, refresh, etc.)
+  // para evitar bucles infinitos.
   useEffect(() => {
     const id = api.interceptors.response.use(
       (r) => r,
       async (err) => {
         const cfg = err?.config || {};
         const status = err?.response?.status;
-        if (status === 401 && !cfg.__retried && !String(cfg.url || "").includes("/auth/")) {
+        const url = String(cfg.url || "");
+        if (status === 401 && !cfg.__retried && !url.includes("/auth/")) {
           cfg.__retried = true;
           try {
             await api.post("/auth/refresh");
             return api(cfg);
           } catch {
+            // refresh falló → la sesión no es recuperable
             setUser(null);
+            // Devolvemos un error "silencioso" para que el componente que
+            // hizo la petición original no muestre el 401 como runtime error.
+            return Promise.reject({ __auth_required: true, status: 401 });
           }
         }
         return Promise.reject(err);
