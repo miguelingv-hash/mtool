@@ -1,0 +1,26 @@
+{
+  "_comentario_perfil": "Cambia 'mongo_url' según donde quieras ingerir. Ejemplos abajo en este mismo fichero.",
+
+  "csv": "facturas.csv",
+  "mongo_url": "mongodb://localhost:27017",
+  "db": "sii_db",
+  "coleccion": "facturas_sii",
+
+  "nif_titular": "B12345678",
+  "nombre_titular": "MI EMPRESA S.L.",
+
+  "batch_size": 2000,
+
+  "_ejemplos_mongo_url": {
+    "docker_local": "mongodb://localhost:27017",
+    "docker_local_con_auth": "mongodb://usuario:password@localhost:27017/?authSource=admin",
+    "emergent_cloud_preview": "mongodb+srv://usuario:password@cluster.xxxxx.mongodb.net/?retryWrites=true&w=majority"
+  },
+
+  "_notas": [
+    "1) Lanza con:   py ingestar_csv_a_mongo.py --config config_ingesta.json",
+    "2) Para no escribir nada en Mongo y sólo validar el mapeo:  añade --dry-run",
+    "3) Cualquier campo de este JSON se puede sobreescribir por flag CLI, p.ej. --csv otro.csv",
+    "4) El script usa la MISMA colección que la app web (facturas_sii) y la MISMA clave de upsert (num_serie_factura), así la Comparativa funciona idéntica."
+  ]
+}

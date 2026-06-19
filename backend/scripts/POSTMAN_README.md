@@ -168,9 +168,97 @@ sed -e 's/^CSVHEAD://' -e 's/^CSVROW://' -e 's/|/;/g' facturas.csv > facturas_ex
 | Persistencia             | Fichero CSV plano               | MongoDB con upsert + bulk_write   |
 | Retry transitorios       | Manual (relanzar)               | Automático con backoff            |
 | Reanudación tras fallo   | Manual (copiar clave\_pag)      | Automática vía `.state.json`      |
-| Mapeo a modelo canónico  | No (CSV crudo del XSD)          | Sí (`facturas_sii` con índices)   |
-| Filtro de campos `null`  | No                              | Sí (modelo Pydantic)              |
+| Mapeo a modelo canónico  | Sí, vía `ingestar_csv_a_mongo.py`     | Sí (`facturas_sii` con índices)   |
+| Filtro de campos `null`  | Sí, vía `ingestar_csv_a_mongo.py`     | Sí (modelo Pydantic)              |
+
+## Pipeline completo recomendado (Windows local)
+
+El flujo más rápido es separar **descarga** de **ingesta**: Newman saca el CSV
+a velocidad de red (sin Cloudflare en medio) y luego el script
+`ingestar_csv_a_mongo.py` hace `bulk_write` con `upsert` directo a tu Mongo
+(local o cloud).
+
+```text
+                          (mTLS local, ~2000 facturas/s)
+   ┌─────────────────────────────────────────────────────────────┐
+   │                       NEWMAN CLI                            │
+   │   newman run AEAT_SII_Loop.postman_collection.json          │
+   │      --ssl-client-cert-list ssl_certs.json                  │
+   │      > export.txt 2>&1                                      │
+   └─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+   ┌─────────────────────────────────────────────────────────────┐
+   │   py extraer_csv.py export.txt facturas.csv                 │
+   │   (reensambla líneas partidas + quita ANSI / bordes │ │ )   │
+   └─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+   ┌─────────────────────────────────────────────────────────────┐
+   │   py ingestar_csv_a_mongo.py --config config_ingesta.json   │
+   │   bulk_write con upsert por num_serie_factura (~2000 docs/s)│
+   └─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+   ┌─────────────────────────────────────────────────────────────┐
+   │       MongoDB → facturas_sii (idéntica al job web)          │
+   │       Comparativa y UI ya ven los datos sin cambios.        │
+   └─────────────────────────────────────────────────────────────┘
+```
+
+### Configuración (fichero JSON)
+
+Copia `config_ingesta.example.json` a `config_ingesta.json` y rellena.
+Soporta dos perfiles típicos cambiando `mongo_url`:
+
+```jsonc
+{
+  "csv": "facturas.csv",
+  "mongo_url": "mongodb://localhost:27017",      // Docker local
+  // "mongo_url": "mongodb+srv://user:pass@cluster.xxx.mongodb.net/...",  // Emergent cloud preview
+  "db": "sii_db",
+  "coleccion": "facturas_sii",
+  "nif_titular": "B12345678",
+  "nombre_titular": "MI EMPRESA S.L.",
+  "batch_size": 2000
+}
+```
+
+### Comandos
+
+```cmd
+:: 1) Validar el mapeo sin tocar Mongo (imprime 3 primeras filas)
+py ingestar_csv_a_mongo.py --config config_ingesta.json --dry-run
+
+:: 2) Ingestar de verdad
+py ingestar_csv_a_mongo.py --config config_ingesta.json
+
+:: 3) Sobreescribir cualquier campo del JSON por CLI si hace falta
+py ingestar_csv_a_mongo.py --config config_ingesta.json --csv otro.csv --db otra_bd
+```
+
+### Garantías de la ingesta
+
+- **Idempotente**: relanzarla con el mismo CSV no crea duplicados; reusa
+  el índice único `num_serie_factura`.
+- **Misma colección que la app web** (`facturas_sii`): la Comparativa
+  funciona idéntica con independencia de si la factura llegó por consulta
+  unitaria web, por job mensual o por este CSV.
+- **Marca de origen**: cada documento queda con `fuente_ultima: "newman_csv"`,
+  útil para auditoría.
+- **Tipos correctos**: importes parseados a `float` (acepta `1.234,56`,
+  `1234.56`, `1234,56`), cadenas strip-eadas, vacíos → `null`.
+
+### Sustituye al import via /api/comercial/csv?
+
+No. Aquel endpoint sube CSV **comercial** (SAP FI / SIGLO) a
+`facturas_comercial`. Éste pisa la colección **SII** (`facturas_sii`).
+Son las dos caras de la comparativa.
+
 
 Para auditoría puntual o exports rápidos, esta colección es ideal. Para
-descargas masivas recurrentes con persistencia y reanudación, sigue siendo
-mejor el `descargar_sii.py`.
+descargas masivas recurrentes con persistencia y reanudación nativa, sigue
+siendo mejor el `descargar_sii.py`. **Pero** si tu cuello de botella es la
+red contra el servicio web (Cloudflare 520, timeouts, etc.), el pipeline
+**Newman → extraer_csv.py → ingestar_csv_a_mongo.py** te da lo mejor de
+los dos mundos: velocidad de Newman + persistencia idéntica al backend.

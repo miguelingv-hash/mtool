@@ -106,6 +106,17 @@
 - **Helper `_build_filtros`**: centraliza la construcción de filtros Mongo y la restricción del universo SII a (ejercicio, periodo) presentes en comercial cuando no hay filtro explícito.
 - **Cambio sutil de semántica**: cuando filtras "Sólo con diferencias" (default), `total` ahora cuenta sólo *lo accionable* (discrepancias + solo_comercial = 168), NO los 1.28M `solo_sii` (que serían facturas correctamente reportadas y no requieren acción). El usuario puede ver el universo `solo_sii` seleccionando explícitamente ese filtro.
 
+### Feb 2026 — Pipeline ELT Newman + ingesta directa a MongoDB
+- **Problema**: el job web `/api/sii/consulta-mensual` se atraganta con 1.3M+ facturas por timeouts de Cloudflare/ingress.
+- **Pipeline alternativo (Newman → CSV → Mongo)** documentado en `/app/backend/scripts/POSTMAN_README.md`:
+  1. `AEAT_SII_Loop.postman_collection.json` con Newman saca las facturas a `export.txt`.
+  2. `extraer_csv.py` reensambla las líneas partidas por Newman (bordes `│`, ANSI, wrap) y produce un `facturas.csv` limpio.
+  3. **`ingestar_csv_a_mongo.py` (NUEVO)** carga el CSV a la colección `facturas_sii` con `bulk_write` + `upsert` por `num_serie_factura`. ~2000 docs/s en local. 100% idempotente.
+- **Config JSON** (`config_ingesta.example.json`) — destino configurable: Mongo Docker local vs Mongo de Emergent cloud preview. Cualquier campo del JSON puede sobreescribirse por flag CLI.
+- **Compatibilidad total**: misma colección destino que la app web (`facturas_sii`), mismo schema canónico, mismo índice único (`num_serie_factura`). Las facturas cargadas por este pipeline se marcan con `fuente_ultima: "newman_csv"` y la Comparativa las consume sin cambios.
+- **Validación**: dry-run + ingesta real + reingesta (idempotencia confirmada) + verificación de tipos `float` en importes.
+
+
 ## Backlog priorizado
 **P0 — Producción real**
 - ~~Integración del cliente SOAP real con `zeep`/`requests` + autenticación mTLS con certificado digital (PFX/P12)~~ ✅ Hecho. Falta probar end-to-end con certificado AEAT real.
