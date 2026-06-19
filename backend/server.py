@@ -42,7 +42,7 @@ import logging
 
 
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / ".env")
+load_dotenv(ROOT_DIR / ".env", override=True)
 
 mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
@@ -846,6 +846,28 @@ from router_facturas import router as facturas_router, init as facturas_init, cl
 facturas_init(db, logger)
 app.include_router(facturas_router)
 
+# Autenticación y administración
+from router_auth import router as auth_router  # noqa: E402
+from router_admin import router as admin_router  # noqa: E402
+from auth_seed import seed_auth  # noqa: E402
+
+# Los routers de auth/admin se montan también bajo /api
+auth_api = APIRouter(prefix="/api")
+auth_api.include_router(auth_router)
+auth_api.include_router(admin_router)
+app.include_router(auth_api)
+
+# Exponer la BD en app.state para los dependencies de auth
+app.state.mongo_db = db
+
+
+@app.on_event("startup")
+async def _startup_auth_seed():
+    try:
+        await seed_auth(db, logger)
+    except Exception:  # noqa: BLE001
+        logger.exception("seed_auth falló")
+
 
 @app.on_event("startup")
 async def _startup_cleanup_jobs():
@@ -855,13 +877,64 @@ async def _startup_cleanup_jobs():
     except Exception:  # noqa: BLE001
         logger.exception("cleanup_orphan_jobs falló")
 
+
+# CORS: el frontend manda cookies HTTP-only ⇒ `allow_credentials=True`, que
+# es incompatible con `origins=["*"]`. Aceptamos lista explícita del .env.
+_app_url = os.environ.get("APP_URL", "").strip()
+_cors_origins_env = os.environ.get("CORS_ORIGINS", "").strip()
+_allow_origins: list[str]
+if _cors_origins_env and _cors_origins_env != "*":
+    _allow_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+elif _app_url:
+    _allow_origins = [_app_url, "http://localhost:3000"]
+else:
+    _allow_origins = ["http://localhost:3000"]
+logger.info("CORS allow_origins=%s", _allow_origins)
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=_allow_origins,
+    allow_origin_regex=r"https?://([a-z0-9-]+\.)*emergentagent\.com|http://localhost(:\d+)?",
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# -----------------------------------------------------------------------------
+# Middleware: protege todas las rutas /api/* salvo las públicas de auth.
+# Devuelve 401 si no hay sesión válida en cookie/Bearer.
+# -----------------------------------------------------------------------------
+from auth import decode_token, _extract_token, COOKIE_ACCESS  # noqa: E402
+
+_AUTH_PUBLIC_PREFIXES = (
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/refresh",
+    "/api/auth/setup/",          # check + setup
+    "/api/auth/forgot-password",
+)
+
+
+@app.middleware("http")
+async def require_auth(request, call_next):  # noqa: ANN001
+    path = request.url.path or ""
+    # Pasarela libre para preflight CORS, docs y rutas no-API
+    if request.method == "OPTIONS" or not path.startswith("/api/"):
+        return await call_next(request)
+    if any(path.startswith(p) for p in _AUTH_PUBLIC_PREFIXES):
+        return await call_next(request)
+
+    token = _extract_token(request)
+    if not token:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "No autenticado"}, status_code=401)
+    try:
+        decode_token(token, "access")
+    except HTTPException as exc:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return await call_next(request)
 
 
 @app.on_event("shutdown")

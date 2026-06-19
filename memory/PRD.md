@@ -130,6 +130,23 @@
 ## Backlog priorizado
 **P0 — Producción real**
 - ~~Integración del cliente SOAP real con `zeep`/`requests` + autenticación mTLS con certificado digital (PFX/P12)~~ ✅ Hecho. Falta probar end-to-end con certificado AEAT real.
+
+### Feb 2026 — Sistema de Autenticación + RBAC dinámico (Fase 1)
+- **Auth JWT propio** (bcrypt + PyJWT, access 4h + refresh 7d, cookies HTTP-only `samesite=lax secure`). Login/Setup/Refresh/Logout + brute-force (5 intentos → lockout 15 min).
+- **Modelo "sólo por invitación"**: admin crea usuario en `/admin/usuarios` → backend genera token URL-safe + emite email vía **Resend** (`re_***`) con link `/activar/{token}` (48 h, un solo uso).
+- **RBAC con roles dinámicos**: colecciones `roles` (`{name, permissions:[str]}`) y `users` (`{email, name, role, status}`). Admin tiene wildcard `*`. Permisos editables en `/admin/roles` con catálogo central (`PERMISSIONS_CATALOG`).
+- **Seed startup**: roles `admin` y `usuario` + admin inicial (`ADMIN_EMAIL` → email de bootstrap con link de definición de password).
+- **Middleware FastAPI**: protege todas las rutas `/api/*` salvo `/api/auth/{login,logout,refresh,setup/*,forgot-password}`. Devuelve 401 si no hay cookie.
+- **Frontend**: `AuthContext` (estado `undefined|null|user`) + `ProtectedRoute` con `requires=perm`. Nuevas páginas `Login`, `SetupPassword`, `AdminUsuarios`, `AdminRoles`. `Layout` filtra el sidebar por permiso, muestra usuario + logout. Axios `withCredentials: true` + interceptor que reintenta una vez tras 401 vía `/auth/refresh`.
+- **CORS**: dado `allow_credentials=True`, ya no se permite `*`. Configurado por regex `https?://([a-z0-9-]+\.)*emergentagent\.com|http://localhost(:\d+)?`.
+- **Validado E2E**: setup admin, login, /me, endpoint protegido con sesión, invite, logout, login → todos OK con curl. Frontend renderizado con login real y sidebar filtrado por permisos. Email a `miguelingv@gmail.com` recibido (Resend ID confirmado).
+
+#### Backlog Fase 2/3 (no implementado todavía)
+- Toggle de menú "Olvidé mi contraseña" → ya creado endpoint backend; falta página `/olvide-password` (Link existe en Login).
+- Auditoría de acciones admin (quién invitó, quién deshabilitó).
+- Multi-admin (varios users con rol `admin`).
+- Verificación de dominio en Resend para enviar a usuarios externos al free tier.
+
 - Validación NIF/CIF con dígito de control oficial.
 
 **P1 — Calidad de servicio**

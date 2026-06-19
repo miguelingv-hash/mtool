@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
   FileSearch,
@@ -11,8 +11,12 @@ import {
   Stamp,
   Radio,
   ShieldCheck,
+  Users,
+  UserCog,
+  LogOut,
 } from "lucide-react";
 import { useEnv } from "@/contexts/EnvContext";
+import { useAuth } from "@/contexts/AuthContext";
 import { useSiiConfig } from "@/hooks/useSiiConfig";
 import {
   Select,
@@ -21,28 +25,40 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { to: "/", label: "Resumen", icon: LayoutDashboard, end: true, testId: "nav-dashboard" },
-  { to: "/comparativa", label: "Comparativa SII↔CSV", icon: GitCompareArrows, testId: "nav-comparativa" },
-  { to: "/consulta", label: "Consulta unitaria", icon: FileSearch, testId: "nav-unit" },
-  { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch" },
+  { to: "/comparativa", label: "Comparativa SII↔CSV", icon: GitCompareArrows, testId: "nav-comparativa", perm: "comparativa.view" },
+  { to: "/consulta", label: "Consulta unitaria", icon: FileSearch, testId: "nav-unit", perm: "consultas.unitaria" },
+  { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch", perm: "consultas.batch" },
   { to: "/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-history" },
-  { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs" },
-  { to: "/conciliacion", label: "Conciliación Newman", icon: ShieldCheck, testId: "nav-conciliacion" },
-  { to: "/configuracion", label: "Configuración", icon: Settings, testId: "nav-config" },
+  { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs", perm: "logs.view" },
+  { to: "/conciliacion", label: "Conciliación Newman", icon: ShieldCheck, testId: "nav-conciliacion", perm: "conciliacion.view" },
+  { to: "/configuracion", label: "Configuración", icon: Settings, testId: "nav-config", perm: "comparativa.edit_config" },
+  { to: "/admin/usuarios", label: "Usuarios", icon: Users, testId: "nav-admin-users", perm: "users.manage" },
+  { to: "/admin/roles", label: "Roles", icon: UserCog, testId: "nav-admin-roles", perm: "roles.manage" },
 ];
 
 export default function Layout() {
   const { entorno, setEntorno } = useEnv();
   const config = useSiiConfig();
+  const { user, logout, hasPermission } = useAuth();
+  const navigate = useNavigate();
   const mode = config?.default_mode || "mock";
   const isMock = mode === "mock";
   const isProd = entorno.startsWith("produccion");
   const envTriggerCls = isProd
     ? "h-8 w-[260px] rounded-none border-rose-500 bg-rose-50 text-rose-800 font-semibold text-sm focus:ring-rose-400"
     : "h-8 w-[260px] rounded-none border-amber-400 bg-amber-50 text-amber-900 font-semibold text-sm focus:ring-amber-400";
+
+  const items = NAV_ITEMS.filter((it) => !it.perm || hasPermission(it.perm));
+
+  const onLogout = async () => {
+    await logout();
+    navigate("/login", { replace: true });
+  };
   return (
     <div className="min-h-screen flex flex-col bg-white text-slate-900">
       <header className="border-b border-slate-200 bg-white">
@@ -120,6 +136,24 @@ export default function Layout() {
                 </SelectContent>
               </Select>
             </div>
+            {user ? (
+              <>
+                <div className="h-6 w-px bg-slate-200 hidden md:block" />
+                <div className="hidden md:flex flex-col items-end leading-tight text-right">
+                  <div className="text-xs font-medium text-slate-900">{user.name || user.email}</div>
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500">{user.role}</div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={onLogout}
+                  data-testid="logout-btn"
+                  title="Cerrar sesión"
+                >
+                  <LogOut className="h-4 w-4" />
+                </Button>
+              </>
+            ) : null}
           </div>
         </div>
       </header>
@@ -127,7 +161,7 @@ export default function Layout() {
       <div className="flex flex-1">
         <aside className="w-60 shrink-0 border-r border-slate-200 bg-slate-50/40">
           <nav className="p-3 space-y-0.5" data-testid="sidebar-nav">
-            {NAV_ITEMS.map((item) => (
+            {items.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
