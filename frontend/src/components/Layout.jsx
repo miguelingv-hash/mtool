@@ -10,6 +10,7 @@ import {
   Settings,
   Stamp,
   Radio,
+  ShieldCheck,
 } from "lucide-react";
 import { useEnv } from "@/contexts/EnvContext";
 import { useSiiConfig } from "@/hooks/useSiiConfig";
@@ -29,6 +30,7 @@ const NAV_ITEMS = [
   { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch" },
   { to: "/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-history" },
   { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs" },
+  { to: "/conciliacion", label: "Conciliación Newman", icon: ShieldCheck, testId: "nav-conciliacion" },
   { to: "/configuracion", label: "Configuración", icon: Settings, testId: "nav-config" },
 ];
 

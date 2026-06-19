@@ -612,6 +612,261 @@ def _extraer_iva_emitida(
     return base, cuota, tipo, detalle_iva
 
 
+# =============================================================================
+# Conciliación con CSV de Newman (R3)
+# =============================================================================
+# Newman se usa como fuente "verdad" alternativa porque su paginación
+# (collection JS) es independiente del worker Python del backend. Si el job
+# online ha perdido facturas, el CSV de Newman puede tener las que faltan.
+# Estos dos endpoints permiten al usuario subir su CSV, ver el diff con la BD
+# y opcionalmente insertar las faltantes.
+
+# Mapeo de cabeceras (XSD AEAT) -> campos canónicos. Idéntico al script CLI
+# `ingestar_csv_a_mongo.py`; lo replicamos aquí para no acoplar backend a
+# scripts/.
+_NEWMAN_COLUMN_MAP: dict[str, str] = {
+    "PeriodoEjercicio": "ejercicio",
+    "PeriodoPeriodo": "periodo",
+    "IDEmisorFacturaNIF": "nif_emisor",
+    "IDEmisorFacturaNombre": "nombre_emisor",
+    "NumSerieFacturaEmisor": "num_serie_factura",
+    "NumSerieFacturaEmisorFin": "num_serie_factura_fin",
+    "FechaExpedicionFacturaEmisor": "fecha_expedicion",
+    "TipoFactura": "tipo_factura",
+    "ClaveRegimenEspecial": "clave_regimen_especial",
+    "ImporteTotal": "importe_total",
+    "DescripcionOperacion": "descripcion_operacion",
+    "FechaOperacion": "fecha_operacion",
+    "BaseImponible": "base_imponible",
+    "TipoImpositivo": "tipo_impositivo",
+    "CuotaRepercutida": "cuota_repercutida",
+    "ContraparteNIF": "contraparte_nif",
+    "ContraparteNombre": "contraparte_nombre",
+    "EstadoFactura": "estado_factura",
+    "CSVAEAT": "csv_aeat",
+    "NumRegistroPresentacion": "num_registro_presentacion",
+    "TimestampPresentacion": "timestamp_presentacion",
+}
+
+_NEWMAN_NUMERIC = {
+    "importe_total", "base_imponible", "tipo_impositivo", "cuota_repercutida",
+}
+
+
+def _parse_amount_es(raw) -> Optional[float]:
+    """Acepta '1.234,56', '1234,56', '1234.56'. Vacío → None."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.count(",") == 1 and s.count(".") >= 1:
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str) -> tuple[list[dict], list[str]]:
+    """Parsea el CSV generado por extraer_csv.py. Devuelve (filas_validas, errores).
+
+    Detecta automáticamente el delimitador (`|` o `,`). Cada fila válida
+    se mapea a campos canónicos (mismo schema que facturas_sii).
+    """
+    try:
+        text = contenido.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = contenido.decode("latin-1", errors="replace")
+
+    primera_linea = text.split("\n", 1)[0] if text else ""
+    delim = "|" if "|" in primera_linea else ","
+
+    reader = csv.DictReader(io.StringIO(text), delimiter=delim)
+    if not reader.fieldnames:
+        return [], ["CSV vacío o sin cabecera"]
+
+    if "NumSerieFacturaEmisor" not in reader.fieldnames:
+        return [], [
+            "El CSV no contiene la columna 'NumSerieFacturaEmisor'. "
+            f"Cabeceras encontradas: {reader.fieldnames}"
+        ]
+
+    filas: list[dict] = []
+    errores: list[str] = []
+    for idx, row in enumerate(reader, start=2):  # idx=2 → primera fila de datos
+        doc: dict = {}
+        for csv_col, canon in _NEWMAN_COLUMN_MAP.items():
+            v = row.get(csv_col)
+            if v is None:
+                continue
+            v = str(v).strip()
+            if not v:
+                continue
+            doc[canon] = _parse_amount_es(v) if canon in _NEWMAN_NUMERIC else v
+
+        if not doc.get("num_serie_factura"):
+            errores.append(f"Fila {idx}: num_serie_factura vacío")
+            continue
+        doc["nif_titular"] = nif_titular
+        if nombre_titular:
+            doc["nombre_titular"] = nombre_titular
+        filas.append(doc)
+
+    return filas, errores
+
+
+@router.post("/sii/conciliar-newman")
+async def conciliar_newman(
+    file: UploadFile = File(...),
+    nif_titular: str = Form(...),
+    ejercicio: Optional[str] = Form(None),
+    periodo: Optional[str] = Form(None),
+):
+    """Sube un CSV (formato Newman extraído por extraer_csv.py) y lo compara
+    contra `facturas_sii` filtrado por `(nif_titular, ejercicio, periodo)`.
+
+    No escribe nada en BD. Devuelve un resumen con:
+      - total_csv:       filas válidas en el CSV
+      - total_bd:        facturas en BD que matchean el filtro
+      - faltantes_en_bd: en CSV pero NO en BD (las realmente perdidas)
+      - extra_en_bd:     en BD pero NO en CSV (pueden ser anuladas u otros periodos)
+      - coinciden:       están en ambos lados
+      - errores_csv:     errores de parseo del CSV
+      - faltantes_preview: primeras 100 faltantes (num_serie + importe_total)
+
+    Para insertar las faltantes, llama después a `/sii/conciliar-newman/importar-faltantes`.
+    """
+    contenido = await file.read()
+    if not contenido:
+        raise HTTPException(400, "El CSV está vacío")
+
+    filas, errores = _parsear_csv_newman(contenido, nif_titular, "")
+    if not filas and errores:
+        raise HTTPException(400, "; ".join(errores[:3]))
+
+    # Filtramos en memoria por ejercicio/periodo si vienen. El CSV de Newman
+    # ya suele venir filtrado por periodo pero por si acaso lo restringimos.
+    if ejercicio:
+        filas = [f for f in filas if str(f.get("ejercicio", "")) == str(ejercicio)]
+    if periodo:
+        filas = [f for f in filas if str(f.get("periodo", "")) == str(periodo)]
+
+    num_series_csv = {f["num_serie_factura"] for f in filas}
+
+    # Carga las facturas de BD para el (nif, ejercicio, periodo)
+    filtro_bd: dict = {"nif_titular": nif_titular}
+    if ejercicio:
+        filtro_bd["ejercicio"] = str(ejercicio)
+    if periodo:
+        filtro_bd["periodo"] = str(periodo)
+
+    cursor = _db.facturas_sii.find(
+        filtro_bd, {"_id": 0, "num_serie_factura": 1}
+    )
+    num_series_bd: set[str] = set()
+    async for d in cursor:
+        ns = d.get("num_serie_factura")
+        if ns:
+            num_series_bd.add(ns)
+
+    faltantes = num_series_csv - num_series_bd  # En CSV, no en BD = perdidas
+    extras = num_series_bd - num_series_csv     # En BD, no en CSV = sobran o de otro periodo
+    coinciden = num_series_csv & num_series_bd
+
+    filas_por_ns = {f["num_serie_factura"]: f for f in filas}
+    preview = []
+    for ns in sorted(faltantes)[:100]:
+        f = filas_por_ns.get(ns, {})
+        preview.append({
+            "num_serie_factura": ns,
+            "fecha_expedicion": f.get("fecha_expedicion"),
+            "base_imponible": f.get("base_imponible"),
+            "importe_total": f.get("importe_total"),
+            "estado_factura": f.get("estado_factura"),
+        })
+
+    return {
+        "filtro": {"nif_titular": nif_titular, "ejercicio": ejercicio, "periodo": periodo},
+        "total_csv": len(filas),
+        "total_bd": len(num_series_bd),
+        "faltantes_en_bd": len(faltantes),
+        "extra_en_bd": len(extras),
+        "coinciden": len(coinciden),
+        "errores_csv": errores[:50],
+        "faltantes_preview": preview,
+    }
+
+
+@router.post("/sii/conciliar-newman/importar-faltantes")
+async def conciliar_newman_importar(
+    file: UploadFile = File(...),
+    nif_titular: str = Form(...),
+    nombre_titular: str = Form(""),
+    ejercicio: Optional[str] = Form(None),
+    periodo: Optional[str] = Form(None),
+):
+    """Igual que `/sii/conciliar-newman` pero INSERTA en `facturas_sii` las
+    facturas del CSV que no estén ya en BD. Usa `upsert_facturas_bulk` con
+    `fuente: "conciliacion_newman"` para que sean trazables.
+
+    Idempotente: si todas las facturas del CSV ya están en BD, no inserta nada.
+    """
+    contenido = await file.read()
+    if not contenido:
+        raise HTTPException(400, "El CSV está vacío")
+
+    filas, errores = _parsear_csv_newman(contenido, nif_titular, nombre_titular or "")
+    if not filas:
+        raise HTTPException(
+            400, f"No se pudieron extraer filas válidas del CSV. Errores: {errores[:3]}"
+        )
+
+    if ejercicio:
+        filas = [f for f in filas if str(f.get("ejercicio", "")) == str(ejercicio)]
+    if periodo:
+        filas = [f for f in filas if str(f.get("periodo", "")) == str(periodo)]
+
+    num_series_csv = [f["num_serie_factura"] for f in filas]
+
+    filtro_bd: dict = {"nif_titular": nif_titular}
+    if ejercicio:
+        filtro_bd["ejercicio"] = str(ejercicio)
+    if periodo:
+        filtro_bd["periodo"] = str(periodo)
+    filtro_bd["num_serie_factura"] = {"$in": num_series_csv}
+
+    existentes: set[str] = set()
+    async for d in _db.facturas_sii.find(filtro_bd, {"_id": 0, "num_serie_factura": 1}):
+        existentes.add(d["num_serie_factura"])
+
+    faltantes = [f for f in filas if f["num_serie_factura"] not in existentes]
+
+    if faltantes:
+        # Insertamos por lotes de 2000 para no inflar memoria con CSVs grandes.
+        batch_size = 2000
+        insertadas = 0
+        for i in range(0, len(faltantes), batch_size):
+            chunk = faltantes[i : i + batch_size]
+            await upsert_facturas_bulk(
+                "facturas_sii", chunk, "conciliacion_newman"
+            )
+            insertadas += len(chunk)
+    else:
+        insertadas = 0
+
+    return {
+        "filtro": {"nif_titular": nif_titular, "ejercicio": ejercicio, "periodo": periodo},
+        "total_csv": len(filas),
+        "ya_en_bd": len(existentes),
+        "insertadas": insertadas,
+        "errores_csv": errores[:50],
+    }
+
+
+
 def _consultar_mensual_real(
     client, nif_titular, nombre_titular, ejercicio, periodo, entorno,
     progress_cb=None, max_paginas=None, start_clave=None,

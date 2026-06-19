@@ -117,6 +117,16 @@
 - **Validación**: dry-run + ingesta real + reingesta (idempotencia confirmada) + verificación de tipos `float` en importes.
 
 
+### Feb 2026 — Conciliación con CSV de Newman (R3)
+- **Problema detectado**: el job mensual online ha perdido al menos una factura (`1NSN260500000027`) que sí aparece en la descarga vía Newman. Causa raíz (pendiente fix R1): en `_update_and_check` si `upsert_facturas_bulk` falla, se loguea y se avanza `clave_paginacion` igual, perdiendo la página entera.
+- **Solución R3 implementada**: la app deja de depender exclusivamente del job online. Newman se promociona a "fuente verdad" para reconciliar.
+  - `POST /api/sii/conciliar-newman` (multipart: file + nif_titular + ejercicio + periodo) → devuelve `{total_csv, total_bd, faltantes_en_bd, extra_en_bd, coinciden, errores_csv, faltantes_preview}`. No escribe.
+  - `POST /api/sii/conciliar-newman/importar-faltantes` → hace `upsert_facturas_bulk` con `fuente_ultima: "conciliacion_newman"` para trazabilidad.
+- **Nueva página `/conciliacion`** (`ConciliacionNewman.jsx`): uploader, filtros (NIF + ejercicio + periodo), botón Analizar y, si hay faltantes, botón Importar con confirmación. Cinco contadores (Total CSV, Total BD, Coinciden, Faltantes, Sólo en BD) y tabla de las primeras 100 faltantes.
+- **Validación**: backend probado con 3 tests reales (analizar → faltantes=1, importar → insertadas=1, reanalizar → faltantes=0, idempotencia OK). Frontend renderiza y registra ruta + ítem sidebar.
+- **Próximo paso (R1)**: cerrar el agujero en el job mensual — no avanzar la `clave_paginacion` si el `bulk_write` falla; reintentar y abortar el job con `last_safe_clave` para que sea resumible.
+
+
 ## Backlog priorizado
 **P0 — Producción real**
 - ~~Integración del cliente SOAP real con `zeep`/`requests` + autenticación mTLS con certificado digital (PFX/P12)~~ ✅ Hecho. Falta probar end-to-end con certificado AEAT real.

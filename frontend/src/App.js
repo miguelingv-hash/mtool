@@ -10,6 +10,7 @@ import History from "@/pages/History";
 import Logs from "@/pages/Logs";
 import Comparativa from "@/pages/Comparativa";
 import Configuracion from "@/pages/Configuracion";
+import ConciliacionNewman from "@/pages/ConciliacionNewman";
 
 function App() {
   return (
@@ -23,6 +24,7 @@ function App() {
             <Route path="/batch" element={<BatchQuery />} />
             <Route path="/historico" element={<History />} />
             <Route path="/logs" element={<Logs />} />
+            <Route path="/conciliacion" element={<ConciliacionNewman />} />
             <Route path="/configuracion" element={<Configuracion />} />
           </Route>
         </Routes>
