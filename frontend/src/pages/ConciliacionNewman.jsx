@@ -231,6 +231,36 @@ export default function ConciliacionNewman() {
               </Alert>
             ) : null}
 
+            {reporte.total_csv === 0 && reporte.debug ? (
+              <Alert variant="destructive" data-testid="rec-debug-zero">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>
+                  <div className="font-medium mb-1">El CSV no produjo filas válidas tras aplicar los filtros. Diagnóstico:</div>
+                  <div className="text-xs space-y-1 font-mono">
+                    <div>Delimitador detectado: <strong>{reporte.debug.delimitador}</strong></div>
+                    <div>Filas brutas leídas: <strong>{reporte.debug.total_filas_brutas?.toLocaleString("es-ES")}</strong></div>
+                    <div>Headers detectadas: <strong>{(reporte.debug.headers_detectadas || []).join(" | ")}</strong></div>
+                    {reporte.debug.primera_fila_bruta ? (
+                      <div>Primera fila bruta (10 col.): <strong>{JSON.stringify(reporte.debug.primera_fila_bruta)}</strong></div>
+                    ) : null}
+                    {reporte.debug.primera_fila_mapeada ? (
+                      <div>Primera fila mapeada: <strong>{JSON.stringify(reporte.debug.primera_fila_mapeada)}</strong></div>
+                    ) : null}
+                  </div>
+                  <div className="text-xs mt-2 opacity-80">
+                    Causas habituales: (1) el filtro de Ejercicio/Periodo descarta todas las filas (revisa qué <code>ejercicio</code>/<code>periodo</code> tiene la primera fila mapeada); (2) las cabeceras no son las del XSD AEAT (la colección Postman emite <code>NumSerieFacturaEmisor</code>, <code>PeriodoPeriodo</code>, ...).
+                  </div>
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            {reporte.extra_preview?.length && reporte.faltantes_en_bd === 0 ? (
+              <div className="rounded-lg border bg-amber-50/30 px-4 py-3 text-xs" data-testid="rec-extra-preview">
+                <div className="font-medium mb-1 text-amber-900">Muestra de "Sólo en BD" (en BD pero no en CSV, hasta 20):</div>
+                <div className="font-mono text-amber-900/80 break-all">{reporte.extra_preview.join(" · ")}</div>
+              </div>
+            ) : null}
+
             {reporte.faltantes_preview?.length ? (
               <div className="rounded-lg border overflow-hidden" data-testid="rec-faltantes-tabla">
                 <div className="px-4 py-2 bg-slate-50 border-b text-sm font-medium">

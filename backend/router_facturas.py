@@ -670,8 +670,30 @@ def _parse_amount_es(raw) -> Optional[float]:
         return None
 
 
-def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str) -> tuple[list[dict], list[str]]:
-    """Parsea el CSV generado por extraer_csv.py. Devuelve (filas_validas, errores).
+def _norm_periodo(p) -> str:
+    """Normaliza un periodo SII: '5' ↔ '05', '1t' → '1T'.
+    Devuelve cadena vacía si es None/vacío."""
+    if p is None:
+        return ""
+    s = str(p).strip().upper()
+    if not s:
+        return ""
+    if s.isdigit():
+        # 1-12 → '01'..'12'; otros números (raros) también con padding-2
+        n = int(s)
+        if 1 <= n <= 12:
+            return f"{n:02d}"
+        return s
+    return s
+
+
+def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str) -> tuple[list[dict], list[str], dict]:
+    """Parsea el CSV generado por extraer_csv.py. Devuelve
+    (filas_validas, errores, debug_info).
+
+    `debug_info` incluye: delimitador detectado, cabeceras detectadas, total
+    filas brutas leídas y un ejemplo de la primera fila ya mapeada. Sirve para
+    diagnosticar visualmente cuando el resultado da 0 filas.
 
     Detecta automáticamente el delimitador (`|` o `,`). Cada fila válida
     se mapea a campos canónicos (mismo schema que facturas_sii).
@@ -685,18 +707,32 @@ def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str)
     delim = "|" if "|" in primera_linea else ","
 
     reader = csv.DictReader(io.StringIO(text), delimiter=delim)
+    debug: dict = {
+        "delimitador": delim,
+        "headers_detectadas": list(reader.fieldnames or []),
+        "total_filas_brutas": 0,
+        "primera_fila_mapeada": None,
+        "primera_fila_bruta": None,
+    }
+
     if not reader.fieldnames:
-        return [], ["CSV vacío o sin cabecera"]
+        return [], ["CSV vacío o sin cabecera"], debug
 
     if "NumSerieFacturaEmisor" not in reader.fieldnames:
         return [], [
             "El CSV no contiene la columna 'NumSerieFacturaEmisor'. "
             f"Cabeceras encontradas: {reader.fieldnames}"
-        ]
+        ], debug
 
     filas: list[dict] = []
     errores: list[str] = []
+    filas_brutas = 0
     for idx, row in enumerate(reader, start=2):  # idx=2 → primera fila de datos
+        filas_brutas = idx - 1
+        if debug["primera_fila_bruta"] is None:
+            # Guardamos un sample de la fila bruta para diagnóstico
+            debug["primera_fila_bruta"] = {k: row.get(k) for k in list(row.keys())[:10]}
+
         doc: dict = {}
         for csv_col, canon in _NEWMAN_COLUMN_MAP.items():
             v = row.get(csv_col)
@@ -710,12 +746,21 @@ def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str)
         if not doc.get("num_serie_factura"):
             errores.append(f"Fila {idx}: num_serie_factura vacío")
             continue
+        # Normaliza el periodo del CSV ya en el momento del parseo, para que
+        # comparaciones contra filtros del UI ('05') o contra la BD ('05')
+        # sean estables aunque AEAT/Newman emitan '5' sin zero-padding.
+        if doc.get("periodo"):
+            doc["periodo"] = _norm_periodo(doc["periodo"])
         doc["nif_titular"] = nif_titular
         if nombre_titular:
             doc["nombre_titular"] = nombre_titular
         filas.append(doc)
+        if debug["primera_fila_mapeada"] is None:
+            debug["primera_fila_mapeada"] = dict(doc)
 
-    return filas, errores
+    debug["total_filas_brutas"] = filas_brutas
+
+    return filas, errores, debug
 
 
 @router.post("/sii/conciliar-newman")
@@ -743,7 +788,7 @@ async def conciliar_newman(
     if not contenido:
         raise HTTPException(400, "El CSV está vacío")
 
-    filas, errores = _parsear_csv_newman(contenido, nif_titular, "")
+    filas, errores, debug = _parsear_csv_newman(contenido, nif_titular, "")
     if not filas and errores:
         raise HTTPException(400, "; ".join(errores[:3]))
 
@@ -752,7 +797,8 @@ async def conciliar_newman(
     if ejercicio:
         filas = [f for f in filas if str(f.get("ejercicio", "")) == str(ejercicio)]
     if periodo:
-        filas = [f for f in filas if str(f.get("periodo", "")) == str(periodo)]
+        periodo_norm = _norm_periodo(periodo)
+        filas = [f for f in filas if _norm_periodo(f.get("periodo")) == periodo_norm]
 
     num_series_csv = {f["num_serie_factura"] for f in filas}
 
@@ -761,7 +807,10 @@ async def conciliar_newman(
     if ejercicio:
         filtro_bd["ejercicio"] = str(ejercicio)
     if periodo:
-        filtro_bd["periodo"] = str(periodo)
+        # En BD el periodo se guarda como '05' (normalizado vía consulta SOAP).
+        # Pero por seguridad aceptamos ambos formatos.
+        periodo_norm = _norm_periodo(periodo)
+        filtro_bd["periodo"] = {"$in": [periodo_norm, str(int(periodo_norm)) if periodo_norm.isdigit() else periodo_norm]}
 
     cursor = _db.facturas_sii.find(
         filtro_bd, {"_id": 0, "num_serie_factura": 1}
@@ -788,6 +837,8 @@ async def conciliar_newman(
             "estado_factura": f.get("estado_factura"),
         })
 
+    extra_preview = sorted(extras)[:20]
+
     return {
         "filtro": {"nif_titular": nif_titular, "ejercicio": ejercicio, "periodo": periodo},
         "total_csv": len(filas),
@@ -797,6 +848,8 @@ async def conciliar_newman(
         "coinciden": len(coinciden),
         "errores_csv": errores[:50],
         "faltantes_preview": preview,
+        "extra_preview": extra_preview,
+        "debug": debug,
     }
 
 
@@ -818,7 +871,7 @@ async def conciliar_newman_importar(
     if not contenido:
         raise HTTPException(400, "El CSV está vacío")
 
-    filas, errores = _parsear_csv_newman(contenido, nif_titular, nombre_titular or "")
+    filas, errores, _debug = _parsear_csv_newman(contenido, nif_titular, nombre_titular or "")
     if not filas:
         raise HTTPException(
             400, f"No se pudieron extraer filas válidas del CSV. Errores: {errores[:3]}"
@@ -827,7 +880,8 @@ async def conciliar_newman_importar(
     if ejercicio:
         filas = [f for f in filas if str(f.get("ejercicio", "")) == str(ejercicio)]
     if periodo:
-        filas = [f for f in filas if str(f.get("periodo", "")) == str(periodo)]
+        periodo_norm = _norm_periodo(periodo)
+        filas = [f for f in filas if _norm_periodo(f.get("periodo")) == periodo_norm]
 
     num_series_csv = [f["num_serie_factura"] for f in filas]
 
@@ -835,7 +889,8 @@ async def conciliar_newman_importar(
     if ejercicio:
         filtro_bd["ejercicio"] = str(ejercicio)
     if periodo:
-        filtro_bd["periodo"] = str(periodo)
+        periodo_norm = _norm_periodo(periodo)
+        filtro_bd["periodo"] = {"$in": [periodo_norm, str(int(periodo_norm)) if periodo_norm.isdigit() else periodo_norm]}
     filtro_bd["num_serie_factura"] = {"$in": num_series_csv}
 
     existentes: set[str] = set()
