@@ -129,7 +129,7 @@
               "  const desglose = (datos.match(/<(?:[a-zA-Z0-9]+:)?DetalleIVA[^>]*>([\\s\\S]*?)<\\/(?:[a-zA-Z0-9]+:)?DetalleIVA>/) || [])[1] || '';",
               "",
               "  const fila = [",
-              "    tag(periodo,'Ejercicio'), tag(periodo,'Periodo'),",
+              "    pm.environment.get('ejercicio') || tag(periodo,'Ejercicio'), pm.environment.get('periodo') || tag(periodo,'Periodo'),",
               "    tag(idEmis,'NIF'), tag(idEmis,'NombreRazon'),",
               "    tag(idFact,'NumSerieFacturaEmisor'), tag(idFact,'NumSerieFacturaEmisorFin'),",
               "    tag(idFact,'FechaExpedicionFacturaEmisor'),",

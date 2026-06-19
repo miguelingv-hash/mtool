@@ -792,13 +792,24 @@ async def conciliar_newman(
     if not filas and errores:
         raise HTTPException(400, "; ".join(errores[:3]))
 
-    # Filtramos en memoria por ejercicio/periodo si vienen. El CSV de Newman
-    # ya suele venir filtrado por periodo pero por si acaso lo restringimos.
+    # Si el CSV no trae ejercicio/periodo (la colección Postman no los rellena
+    # porque la respuesta AEAT no los incluye por registro), heredamos los del
+    # filtro del UI: asumimos que el CSV cargado pertenece a ese periodo.
+    periodo_norm_in = _norm_periodo(periodo) if periodo else ""
+    relleno_aplicado = 0
+    for f in filas:
+        if ejercicio and not f.get("ejercicio"):
+            f["ejercicio"] = str(ejercicio)
+            relleno_aplicado += 1
+        if periodo_norm_in and not f.get("periodo"):
+            f["periodo"] = periodo_norm_in
+    debug["relleno_filtro_aplicado"] = relleno_aplicado
+
+    # Filtramos en memoria por ejercicio/periodo si vienen.
     if ejercicio:
         filas = [f for f in filas if str(f.get("ejercicio", "")) == str(ejercicio)]
     if periodo:
-        periodo_norm = _norm_periodo(periodo)
-        filas = [f for f in filas if _norm_periodo(f.get("periodo")) == periodo_norm]
+        filas = [f for f in filas if _norm_periodo(f.get("periodo")) == periodo_norm_in]
 
     num_series_csv = {f["num_serie_factura"] for f in filas}
 
@@ -877,11 +888,18 @@ async def conciliar_newman_importar(
             400, f"No se pudieron extraer filas válidas del CSV. Errores: {errores[:3]}"
         )
 
+    # Mismo relleno por herencia que en /sii/conciliar-newman.
+    periodo_norm_in = _norm_periodo(periodo) if periodo else ""
+    for f in filas:
+        if ejercicio and not f.get("ejercicio"):
+            f["ejercicio"] = str(ejercicio)
+        if periodo_norm_in and not f.get("periodo"):
+            f["periodo"] = periodo_norm_in
+
     if ejercicio:
         filas = [f for f in filas if str(f.get("ejercicio", "")) == str(ejercicio)]
     if periodo:
-        periodo_norm = _norm_periodo(periodo)
-        filas = [f for f in filas if _norm_periodo(f.get("periodo")) == periodo_norm]
+        filas = [f for f in filas if _norm_periodo(f.get("periodo")) == periodo_norm_in]
 
     num_series_csv = [f["num_serie_factura"] for f in filas]
 
