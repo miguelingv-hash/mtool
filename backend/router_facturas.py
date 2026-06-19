@@ -1401,7 +1401,13 @@ async def comparativa(
         filas_com.append(_build_row_from_docs(sii, com, ns, config))
 
     # 4) Contar SII fuera del comercial → estado solo_sii
-    solo_sii_filter = {**filtro_sii, "num_serie_factura": {"$nin": com_keys}}
+    #    OJO: hay que preservar otros operadores que ya tenga filtro_sii sobre
+    #    `num_serie_factura` (p.ej. el $regex de búsqueda del usuario). Mongo
+    #    permite combinar $regex + $nin en el mismo subdocumento.
+    solo_sii_filter = dict(filtro_sii)
+    ns_clause = dict(solo_sii_filter.get("num_serie_factura") or {})
+    ns_clause["$nin"] = com_keys
+    solo_sii_filter["num_serie_factura"] = ns_clause
     solo_sii_total = await _db.facturas_sii.count_documents(solo_sii_filter)
 
     # 5) Aplicar filtros only_diffs / estado para decidir total e items
