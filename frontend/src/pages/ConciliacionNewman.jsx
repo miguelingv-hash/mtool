@@ -6,6 +6,16 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 import { Loader2, Upload, FileSearch, Database, AlertTriangle, CheckCircle2, Import } from "lucide-react";
 import { PERIODOS } from "@/lib/api";
@@ -39,6 +49,8 @@ export default function ConciliacionNewman() {
   const [analyzing, setAnalyzing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [reporte, setReporte] = useState(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [importError, setImportError] = useState(null);
 
   const reset = () => { setReporte(null); };
 
@@ -84,8 +96,21 @@ export default function ConciliacionNewman() {
     }
   };
 
-  const importar = async () => {
-    if (!reporte || reporte.faltantes_en_bd === 0) {
+  const onClickImportar = () => {
+    // eslint-disable-next-line no-console
+    console.log("[Conciliacion] Click Importar. Estado:", {
+      hasReporte: !!reporte,
+      faltantes_en_bd: reporte?.faltantes_en_bd,
+      faltantes_completas_len: reporte?.faltantes_completas?.length,
+      faltantes_truncado: reporte?.faltantes_truncado,
+      nifTitular: nifTitular,
+      importing, analyzing,
+    });
+    if (!reporte) {
+      toast.error("Pulsa Analizar primero");
+      return;
+    }
+    if (reporte.faltantes_en_bd === 0) {
       toast.info("No hay faltantes que importar");
       return;
     }
@@ -95,14 +120,26 @@ export default function ConciliacionNewman() {
     }
     const lote = reporte.faltantes_completas || [];
     if (lote.length === 0) {
-      toast.error("El reporte no trae el detalle de faltantes. Pulsa Analizar de nuevo.");
+      toast.error(
+        "El reporte no trae el detalle de faltantes. Pulsa Analizar de nuevo después de recargar la página (Ctrl+F5).",
+        { duration: 8000 },
+      );
       return;
     }
-    if (!window.confirm(
-      `Vas a insertar ${lote.length.toLocaleString("es-ES")} facturas en BD (de ${reporte.faltantes_en_bd.toLocaleString("es-ES")} faltantes${reporte.faltantes_truncado ? ", el resto requiere otra pasada por límite de payload" : ""}). ¿Continuar?`
-    )) return;
+    setImportError(null);
+    setConfirmOpen(true);
+  };
+
+  const importarConfirmado = async () => {
+    setConfirmOpen(false);
+    const lote = reporte?.faltantes_completas || [];
+    if (lote.length === 0) return;
     setImporting(true);
+    setImportError(null);
+    // eslint-disable-next-line no-console
+    console.log(`[Conciliacion] Enviando lote de ${lote.length} facturas a /api/sii/conciliar-newman/importar-lote ...`);
     try {
+      const t0 = performance.now();
       const { data } = await api.post(
         "/sii/conciliar-newman/importar-lote",
         {
@@ -113,19 +150,24 @@ export default function ConciliacionNewman() {
           facturas: lote,
         },
         {
-          // El JSON de 100K facturas puede pesar ~10-15MB; axios por defecto
-          // se queda corto. Subimos los límites.
           maxBodyLength: 256 * 1024 * 1024,
           maxContentLength: 256 * 1024 * 1024,
-          timeout: 300_000,  // 5 min por si Mongo va a ritmo lento
+          timeout: 300_000,
         },
       );
-      toast.success(`Importadas ${data.insertadas.toLocaleString("es-ES")} facturas`);
-      // Re-analizar para refrescar contadores. Aquí SÍ vuelve a subir el CSV
-      // pero ya sabemos que la operación importadora fue exitosa.
+      const ms = Math.round(performance.now() - t0);
+      // eslint-disable-next-line no-console
+      console.log(`[Conciliacion] OK en ${ms}ms ·`, data);
+      toast.success(`Importadas ${data.insertadas.toLocaleString("es-ES")} facturas en ${(ms/1000).toFixed(1)} s`);
       await analizar();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || e?.message || "Error al importar");
+      // eslint-disable-next-line no-console
+      console.error("[Conciliacion] Error en import:", e);
+      const detalle = e?.response?.data?.detail || e?.response?.statusText || e?.message || "Error desconocido";
+      const status = e?.response?.status;
+      const msg = status ? `HTTP ${status} · ${detalle}` : detalle;
+      setImportError(msg);
+      toast.error(`Error al importar: ${msg}`, { duration: 10000 });
     } finally {
       setImporting(false);
     }
@@ -216,7 +258,7 @@ export default function ConciliacionNewman() {
             </Button>
             {reporte && reporte.faltantes_en_bd > 0 ? (
               <Button
-                onClick={importar}
+                onClick={onClickImportar}
                 disabled={importing || analyzing}
                 variant="default"
                 data-testid="rec-importar-btn"
@@ -226,6 +268,16 @@ export default function ConciliacionNewman() {
               </Button>
             ) : null}
           </div>
+
+          {importError ? (
+            <Alert variant="destructive" data-testid="rec-import-error">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertDescription>
+                <div className="font-medium">Fallo al importar:</div>
+                <div className="text-xs font-mono break-all mt-1">{importError}</div>
+              </AlertDescription>
+            </Alert>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -329,6 +381,36 @@ export default function ConciliacionNewman() {
           </CardContent>
         </Card>
       ) : null}
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent data-testid="rec-confirm-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirmar importación</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <div>
+                  Vas a insertar <strong>{(reporte?.faltantes_completas?.length || 0).toLocaleString("es-ES")}</strong> facturas en la colección <code>facturas_sii</code>.
+                </div>
+                {reporte?.faltantes_truncado ? (
+                  <div className="text-amber-700">
+                    ⚠️ El reporte está truncado a 100.000 faltantes; tras esta importación deberás
+                    volver a analizar para procesar el resto.
+                  </div>
+                ) : null}
+                <div className="text-xs text-muted-foreground">
+                  La operación es idempotente: si alguna factura ya existiera, se actualizará sin duplicarse.
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="rec-confirm-cancel">Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={importarConfirmado} data-testid="rec-confirm-ok">
+              Sí, importar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
