@@ -80,7 +80,7 @@ def _layout(titulo: str, cuerpo_html: str) -> str:
     <tr><td align="center">
       <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;overflow:hidden;">
         <tr><td style="padding:24px 32px;border-bottom:1px solid #e2e8f0;background:#0f172a;color:#fff;">
-          <div style="font-size:18px;font-weight:600;letter-spacing:.3px;">Monitor SII</div>
+          <div style="font-size:18px;font-weight:600;letter-spacing:.3px;">Corporate App</div>
           <div style="font-size:13px;opacity:.7;margin-top:2px;">Conciliación SII ↔ Comercial</div>
         </td></tr>
         <tr><td style="padding:28px 32px;font-size:14px;line-height:1.55;">
@@ -106,10 +106,10 @@ async def enviar_email_setup_password(
     """
     link = f"{_app_url()}/activar/{token}"
     intro = {
-        "alta": "Se ha creado una cuenta para ti en Monitor SII.",
-        "reset": "Has solicitado restablecer tu contraseña en Monitor SII.",
-        "bootstrap": "Se ha creado la cuenta de administrador inicial de Monitor SII.",
-    }.get(motivo, "Se ha creado una cuenta para ti en Monitor SII.")
+        "alta": "Se ha creado una cuenta para ti en Corporate App.",
+        "reset": "Has solicitado restablecer tu contraseña en Corporate App.",
+        "bootstrap": "Se ha creado la cuenta de administrador inicial de Corporate App.",
+    }.get(motivo, "Se ha creado una cuenta para ti en Corporate App.")
 
     cta = "Activar cuenta" if motivo != "reset" else "Restablecer contraseña"
     cuerpo = f"""
@@ -123,6 +123,6 @@ async def enviar_email_setup_password(
 """
     return await send_email(
         to=to,
-        subject="Activa tu cuenta · Monitor SII",
+        subject="Activa tu cuenta · Corporate App",
         html=_layout("Activación de cuenta", cuerpo),
     )

@@ -1,18 +1,22 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useMemo, useState } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
-  LayoutDashboard,
+  Building2,
+  ChevronDown,
+  ChevronRight,
   FileSearch,
   FileSpreadsheet,
   GitCompareArrows,
   History as HistoryIcon,
+  LayoutDashboard,
+  LogOut,
+  Radio,
   ScrollText,
   Settings,
-  Stamp,
-  Radio,
   ShieldCheck,
-  Users,
   UserCog,
-  LogOut,
+  Users,
+  Activity,
 } from "lucide-react";
 import { useEnv } from "@/contexts/EnvContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -27,49 +31,135 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-const NAV_ITEMS = [
+/**
+ * Árbol del menú. Cada nodo puede ser:
+ *   - item: { to, label, icon, end?, perm?, testId }
+ *   - grupo: { id, label, icon, perm?, testId, children: [items|grupos] }
+ *
+ * El grupo se considera visible si tiene al menos un hijo accesible.
+ */
+const NAV_TREE = [
   { to: "/", label: "Resumen", icon: LayoutDashboard, end: true, testId: "nav-dashboard" },
-  { to: "/comparativa", label: "Comparativa SII↔CSV", icon: GitCompareArrows, testId: "nav-comparativa", perm: "comparativa.view" },
-  { to: "/consulta", label: "Consulta unitaria", icon: FileSearch, testId: "nav-unit", perm: "consultas.unitaria" },
-  { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch", perm: "consultas.batch" },
-  { to: "/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-history" },
-  { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs", perm: "logs.view" },
-  { to: "/conciliacion", label: "Conciliación Newman", icon: ShieldCheck, testId: "nav-conciliacion", perm: "conciliacion.view" },
-  { to: "/configuracion", label: "Configuración", icon: Settings, testId: "nav-config", perm: "comparativa.edit_config" },
+  {
+    id: "monitor-sii",
+    label: "Monitor SII",
+    icon: Activity,
+    testId: "nav-group-monitor-sii",
+    children: [
+      { to: "/comparativa", label: "Comparativa SII↔CSV", icon: GitCompareArrows, testId: "nav-comparativa", perm: "comparativa.view" },
+      { to: "/consulta", label: "Consulta unitaria", icon: FileSearch, testId: "nav-unit", perm: "consultas.unitaria" },
+      { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch", perm: "consultas.batch" },
+      { to: "/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-history" },
+      { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs", perm: "logs.view" },
+      { to: "/conciliacion", label: "Conciliación Newman", icon: ShieldCheck, testId: "nav-conciliacion", perm: "conciliacion.view" },
+      { to: "/configuracion", label: "Configuración", icon: Settings, testId: "nav-config", perm: "comparativa.edit_config" },
+    ],
+  },
   { to: "/admin/usuarios", label: "Usuarios", icon: Users, testId: "nav-admin-users", perm: "users.manage" },
   { to: "/admin/roles", label: "Roles", icon: UserCog, testId: "nav-admin-roles", perm: "roles.manage" },
 ];
+
+function isItemAccessible(node, hasPermission) {
+  if (node.children) {
+    return node.children.some((c) => isItemAccessible(c, hasPermission));
+  }
+  return !node.perm || hasPermission(node.perm);
+}
+
+function filterTree(tree, hasPermission) {
+  return tree
+    .filter((n) => isItemAccessible(n, hasPermission))
+    .map((n) => (n.children ? { ...n, children: filterTree(n.children, hasPermission) } : n));
+}
+
+function NavItem({ item }) {
+  return (
+    <NavLink
+      to={item.to}
+      end={item.end}
+      data-testid={item.testId}
+      className={({ isActive }) =>
+        cn(
+          "flex items-center gap-3 px-3 py-2 text-sm transition-colors border-l-2",
+          isActive
+            ? "bg-white border-blue-600 text-slate-900 font-medium"
+            : "border-transparent text-slate-600 hover:bg-white hover:text-slate-900",
+        )
+      }
+    >
+      <item.icon className="h-4 w-4" strokeWidth={1.75} />
+      <span className="truncate">{item.label}</span>
+    </NavLink>
+  );
+}
+
+function NavGroup({ group, defaultOpen }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const Icon = group.icon;
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        data-testid={group.testId}
+        className={cn(
+          "w-full flex items-center gap-3 px-3 py-2 text-sm transition-colors border-l-2 border-transparent text-slate-700 hover:bg-white hover:text-slate-900",
+          open && "text-slate-900 font-medium",
+        )}
+        aria-expanded={open}
+      >
+        <Icon className="h-4 w-4" strokeWidth={1.75} />
+        <span className="flex-1 text-left truncate">{group.label}</span>
+        <Chevron className="h-3.5 w-3.5 opacity-70" />
+      </button>
+      {open ? (
+        <div className="ml-3 border-l border-slate-200 pl-2 py-0.5 space-y-0.5">
+          {group.children.map((child) => (
+            <NavItem key={child.to} item={child} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 export default function Layout() {
   const { entorno, setEntorno } = useEnv();
   const config = useSiiConfig();
   const { user, logout, hasPermission } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const isProd = entorno.startsWith("produccion");
   const envTriggerCls = isProd
     ? "h-8 w-[260px] rounded-none border-rose-500 bg-rose-50 text-rose-800 font-semibold text-sm focus:ring-rose-400"
     : "h-8 w-[260px] rounded-none border-amber-400 bg-amber-50 text-amber-900 font-semibold text-sm focus:ring-amber-400";
 
-  const items = NAV_ITEMS.filter((it) => !it.perm || hasPermission(it.perm));
+  const tree = useMemo(() => filterTree(NAV_TREE, hasPermission), [hasPermission]);
 
   const onLogout = async () => {
     await logout();
     navigate("/login", { replace: true });
   };
+
+  // Auto-expandir el grupo cuya ruta actual coincida con algún hijo
+  const isPathInside = (group) =>
+    group.children?.some((c) => location.pathname === c.to || location.pathname.startsWith(c.to + "/"));
+
   return (
     <div className="min-h-screen flex flex-col bg-white text-slate-900">
       <header className="border-b border-slate-200 bg-white">
         <div className="flex items-center justify-between px-6 py-3">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center bg-slate-900 text-white">
-              <Stamp className="h-5 w-5" strokeWidth={1.75} />
+              <Building2 className="h-5 w-5" strokeWidth={1.75} />
             </div>
             <div className="leading-tight">
               <div className="font-display text-base font-bold tracking-tight text-slate-900">
-                Monitor SII
+                Corporate App
               </div>
               <div className="text-[11px] uppercase tracking-wider text-slate-500">
-                Facturas Emitidas · AEAT
+                Plataforma corporativa
               </div>
             </div>
           </div>
@@ -81,43 +171,28 @@ export default function Layout() {
               title={`WSDL: ${config?.wsdl || ""}`}
             >
               <Radio className="h-3.5 w-3.5" />
-              <span>WSDL v1.1 · mTLS</span>
+              <span>SII · WSDL v1.1 · mTLS</span>
             </div>
             <div className="h-6 w-px bg-slate-200 hidden md:block" />
             <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-500 hidden sm:block">
+              <span className="text-xs text-slate-500 hidden lg:inline">
                 Entorno
               </span>
               <Select value={entorno} onValueChange={setEntorno}>
-                <SelectTrigger
-                  className={envTriggerCls}
-                  data-testid="env-selector-trigger"
-                >
-                  <span
-                    className={`inline-block h-2 w-2 rounded-full mr-2 ${
-                      isProd ? "bg-rose-500" : "bg-amber-500"
-                    }`}
-                    aria-hidden
-                  />
+                <SelectTrigger className={envTriggerCls} data-testid="env-select">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="preproduccion" data-testid="env-preprod">
                     Pre-producción · cert. normal
                   </SelectItem>
-                  <SelectItem
-                    value="preproduccion_sello"
-                    data-testid="env-preprod-sello"
-                  >
+                  <SelectItem value="preproduccion_sello" data-testid="env-preprod-sello">
                     Pre-producción · cert. de sello
                   </SelectItem>
                   <SelectItem value="produccion" data-testid="env-prod">
                     Producción · cert. normal
                   </SelectItem>
-                  <SelectItem
-                    value="produccion_sello"
-                    data-testid="env-prod-sello"
-                  >
+                  <SelectItem value="produccion_sello" data-testid="env-prod-sello">
                     Producción · cert. de sello
                   </SelectItem>
                 </SelectContent>
@@ -146,40 +221,16 @@ export default function Layout() {
       </header>
 
       <div className="flex flex-1">
-        <aside className="w-60 shrink-0 border-r border-slate-200 bg-slate-50/40">
+        <aside className="w-64 shrink-0 border-r border-slate-200 bg-slate-50/40">
           <nav className="p-3 space-y-0.5" data-testid="sidebar-nav">
-            {items.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                data-testid={item.testId}
-                className={({ isActive }) =>
-                  cn(
-                    "flex items-center gap-3 px-3 py-2 text-sm transition-colors border-l-2",
-                    isActive
-                      ? "bg-white border-blue-600 text-slate-900 font-medium"
-                      : "border-transparent text-slate-600 hover:bg-white hover:text-slate-900",
-                  )
-                }
-              >
-                <item.icon className="h-4 w-4" strokeWidth={1.75} />
-                {item.label}
-              </NavLink>
-            ))}
+            {tree.map((node) =>
+              node.children ? (
+                <NavGroup key={node.id} group={node} defaultOpen={isPathInside(node)} />
+              ) : (
+                <NavItem key={node.to} item={node} />
+              ),
+            )}
           </nav>
-
-          <div className="mt-6 mx-3 p-3 border border-slate-200 bg-white text-[11px] leading-relaxed text-slate-500">
-            <div className="font-semibold text-slate-700 mb-1 uppercase tracking-wider">
-              WSDL
-            </div>
-            <div className="font-mono break-all">
-              SuministroFactEmitidas.wsdl v1.1
-            </div>
-            <div className="mt-2 text-slate-400">
-              ConsultaLRFactEmitidas · Agencia Tributaria Española
-            </div>
-          </div>
         </aside>
 
         <main className="flex-1 min-w-0 bg-white">

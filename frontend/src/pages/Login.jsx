@@ -45,7 +45,7 @@ export default function Login() {
           <div className="mx-auto h-10 w-10 rounded-full bg-slate-900 text-white flex items-center justify-center">
             <ShieldCheck className="h-5 w-5" />
           </div>
-          <CardTitle className="text-xl text-center">Monitor SII</CardTitle>
+          <CardTitle className="text-xl text-center">Corporate App</CardTitle>
           <p className="text-center text-sm text-muted-foreground">Inicia sesión para continuar</p>
         </CardHeader>
         <CardContent>

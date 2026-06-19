@@ -46,7 +46,7 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
-app = FastAPI(title="Monitor SII API", version="1.1.0")
+app = FastAPI(title="Corporate App API", version="1.1.0")
 api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(
@@ -288,7 +288,7 @@ async def _invoke_sii(
 @api_router.get("/")
 async def root():
     return {
-        "service": "Monitor SII API",
+        "service": "Corporate App API",
         "wsdl": WSDL_URL,
         "endpoints": ENDPOINTS,
     }
