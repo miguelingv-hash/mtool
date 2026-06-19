@@ -101,17 +101,18 @@ def decode_token(token: str, expected_type: str) -> dict:
 # Cookies
 # -----------------------------------------------------------------------------
 def set_auth_cookies(response: Response, access: str, refresh: str) -> None:
-    common = {"httponly": True, "samesite": "lax", "secure": True, "path": "/"}
+    # SameSite=None+Secure es imprescindible cuando el frontend corre dentro
+    # de un iframe cross-site (editor de Emergent). `lax` no envía la cookie
+    # en peticiones AJAX cross-site y provoca un bucle login → 401 → login.
+    common = {"httponly": True, "samesite": "none", "secure": True, "path": "/"}
     response.set_cookie(COOKIE_ACCESS, access, max_age=ACCESS_TOKEN_MIN * 60, **common)
     response.set_cookie(COOKIE_REFRESH, refresh, max_age=REFRESH_TOKEN_DAYS * 86400, **common)
 
 
 def clear_auth_cookies(response: Response) -> None:
-    # Importante: para que el navegador/curl invalide la cookie hay que llamar
-    # a set_cookie con los MISMOS atributos (samesite, secure, path, httponly)
-    # y valor vacío + max_age=0. `delete_cookie` por defecto no los manda y
-    # algunos clientes mantienen la cookie viva.
-    common = {"httponly": True, "samesite": "lax", "secure": True, "path": "/"}
+    # Mismo trío de atributos que en set_auth_cookies para que el navegador
+    # invalide correctamente la cookie.
+    common = {"httponly": True, "samesite": "none", "secure": True, "path": "/"}
     response.set_cookie(COOKIE_ACCESS, "", max_age=0, **common)
     response.set_cookie(COOKIE_REFRESH, "", max_age=0, **common)
 
