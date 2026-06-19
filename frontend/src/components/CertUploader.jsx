@@ -6,11 +6,12 @@ import { Label } from "@/components/ui/label";
 
 /**
  * Componente para que el usuario aporte un certificado PKCS#12 (.pfx/.p12)
- * en cada llamada. Cuando se activa el modo real:
+ * en cada llamada. Cuando se activa la subida en cliente:
  *   - debe subirse un archivo y opcionalmente su contraseña;
  *   - el componente notifica al padre vía `onChange({ file, password, enabled })`.
  *
- * En modo mock el componente devuelve `enabled=false` y no aporta certificado.
+ * Cuando está desactivado, se usará el certificado configurado en el servidor
+ * (`SII_CERT_PATH`).
  */
 export default function CertUploader({ value, onChange, testIdPrefix = "cert" }) {
   const [showPwd, setShowPwd] = useState(false);
@@ -41,17 +42,17 @@ export default function CertUploader({ value, onChange, testIdPrefix = "cert" })
           )}
           <div>
             <div className="text-sm font-medium text-slate-900">
-              {enabled ? "Modo real · certificado AEAT" : "Modo simulado (mock)"}
+              {enabled ? "Certificado propio" : "Certificado del servidor"}
             </div>
             <div className="text-[11px] text-slate-500">
               {enabled
                 ? "Cada consulta se firmará con tu certificado PKCS#12."
-                : "Activa el modo real para invocar el SOAP de la AEAT."}
+                : "Se usará el certificado configurado en el servidor (SII_CERT_PATH)."}
             </div>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-500 hidden sm:inline">Real</span>
+          <span className="text-xs text-slate-500 hidden sm:inline">Subir mío</span>
           <Switch
             checked={enabled}
             onCheckedChange={(v) => set({ enabled: v, file: v ? file : null })}

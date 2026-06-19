@@ -163,3 +163,10 @@
 1. Conectar cliente SOAP real cuando esté disponible el certificado.
 2. Añadir gestión de usuarios y multi-empresa.
 3. Programador de consultas batch + notificaciones.
+
+
+### Feb 2026 — Eliminado modo MOCK por completo
+- **Backend**: borrada clase `MockSIIClient`, función `get_default_mode`, helper `_resolve_mode`, función `_mock_factura_mensual` y todas las ramas `if effective_mode == "mock"`. Eliminado parámetro `mode` en todos los endpoints (`/sii/consulta-unitaria-cert`, `/sii/consulta-batch`, `/sii/consulta-mensual`, `/sii/verificar-completitud`). Quitado `sii_mode` de los modelos. Borrado `SII_MODE` de `backend/.env`.
+- **Backend**: `build_client()` simplificada — sólo construye `ZeepSIIClient`. Si no hay certificado (ni en petición ni en servidor) lanza 400 con mensaje claro.
+- **Frontend**: badge pasa de "Modo Mock/Real" a "WSDL v1.1 · mTLS" (verde). Filtro/columna `Modo` eliminados de `/logs`. Eliminada referencia `(real/mock)` en botones. `CertUploader` ahora distingue "Certificado propio" vs "Certificado del servidor". Dashboard quita "modo simulado" del texto descriptivo.
+- **Validado**: lint OK, backend arranca, `/sii/config` ya no expone `default_mode`/`real_mode_available`. Frontend renderizado: badge correcto, 0 errores JS, sin texto "mock" en la UI.

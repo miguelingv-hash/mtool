@@ -252,7 +252,7 @@ export default function UnitQuery() {
               ) : (
                 <Send className="h-4 w-4 mr-2" />
               )}
-              {cert.enabled ? "Consultar SII (real)" : "Consultar SII (mock)"}
+              {cert.enabled ? "Consultar SII (cert propio)" : "Consultar SII"}
             </Button>
             <Button
               type="button"

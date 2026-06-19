@@ -58,10 +58,6 @@ export default function QueryDetailSheet({ open, onOpenChange, record }) {
           <Row label="NIF titular" value={e.nif_titular} mono />
           <Row label="Nombre titular" value={e.nombre_titular} />
           <Row label="Entorno" value={e.entorno} />
-          <Row
-            label="Modo invocación"
-            value={record.sii_mode === "real" ? "real (mTLS)" : "mock"}
-          />
         </div>
 
         <div className="mt-4">

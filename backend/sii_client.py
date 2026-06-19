@@ -1,22 +1,19 @@
 """
-SII SOAP clients.
+SII SOAP client.
 
-Define una interfaz común `SIIClient` con dos implementaciones:
-  - MockSIIClient: respuesta determinista para desarrollo (sin certificado).
-  - ZeepSIIClient: invocación real al WS ConsultaLRFactEmitidas de la AEAT
-    con autenticación mTLS usando un certificado PKCS#12 (.pfx/.p12).
+Implementación única `ZeepSIIClient`: invocación real al WS
+ConsultaLRFactEmitidas de la AEAT con autenticación mTLS usando un
+certificado PKCS#12 (.pfx/.p12).
 
-La fábrica `build_client()` elige la implementación según el modo solicitado
-y la disponibilidad de certificado (subido en la petición o configurado por
-variable de entorno).
+La fábrica `build_client()` carga el certificado de la petición o, en su
+defecto, del configurado en el servidor por variables de entorno.
 """
 
 from __future__ import annotations
 
-import hashlib
+import hashlib  # noqa: F401  — usado por código auxiliar
 import logging
 import os
-import random
 import tempfile
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -235,108 +232,6 @@ def _extraer_factura_canonica(primer, entrada) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Mock determinista
-# ---------------------------------------------------------------------------
-
-
-class MockSIIClient(SIIClient):
-    """Cliente simulado que no realiza llamadas HTTP.
-
-    El estado de cada factura se calcula con SHA-256 sobre los identificadores
-    de la factura, por lo que es estable entre peticiones (misma factura ⇒
-    mismo estado), igual que el comportamiento del SII real.
-    """
-
-    mode = "mock"
-
-    def consultar(self, entrada):
-        from server import RespuestaSII
-
-        seed = (
-            f"{entrada.nif_emisor}|{entrada.num_serie_factura}"
-            f"|{entrada.fecha_expedicion}"
-        )
-        digest = hashlib.sha256(seed.encode()).hexdigest()
-        bucket = int(digest[:4], 16) % 100
-        if bucket < 65:
-            estado_factura = "Correcta"
-        elif bucket < 85:
-            estado_factura = "AceptadaConErrores"
-        elif bucket < 93:
-            estado_factura = "Anulada"
-        else:
-            estado_factura = "NoRegistrada"
-
-        cod, desc = CODIGOS_ERROR[estado_factura]
-        presentado = estado_factura != "NoRegistrada"
-        rnd = random.Random(f"{entrada.nif_emisor}{entrada.num_serie_factura}")
-
-        respuesta = RespuestaSII(
-            estado_envio=(
-                "Correcto" if presentado else "ParcialmenteCorrecto"
-            ),
-            estado_factura=estado_factura,
-            codigo_error_registro=cod,
-            descripcion_error_registro=desc,
-            timestamp_presentacion=(
-                datetime.now(timezone.utc).isoformat() if presentado else None
-            ),
-            num_registro_presentacion=(
-                f"16{rnd.randint(10**13, 10**14 - 1)}" if presentado else None
-            ),
-            csv=(
-                "".join(
-                    rnd.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=16)
-                )
-                if presentado
-                else None
-            ),
-            endpoint=ENDPOINTS[entrada.entorno],
-            wsdl=WSDL_URL,
-        )
-        # Datos canónicos mock (deterministas) para que la unitaria también
-        # alimente `facturas_sii` y la comparativa funcione contra ella.
-        datos_factura = None
-        if estado_factura != "NoRegistrada":
-            base = round(rnd.uniform(50, 5000), 2)
-            tipo = rnd.choice([4.0, 10.0, 21.0])
-            cuota = round(base * tipo / 100, 2)
-            datos_factura = {
-                "num_serie_factura": entrada.num_serie_factura,
-                "fecha_expedicion": entrada.fecha_expedicion,
-                "nif_emisor": entrada.nif_emisor,
-                "nombre_emisor": entrada.nombre_emisor,
-                "ejercicio": entrada.ejercicio,
-                "periodo": entrada.periodo,
-                "nif_titular": entrada.nif_titular,
-                "contraparte_nif": f"B{rnd.randint(10**7, 10**8 - 1)}",
-                "contraparte_nombre": f"Cliente mock #{bucket}",
-                "tipo_factura": "F1",
-                "clave_regimen_especial": "01",
-                "descripcion_operacion": "Operación mock",
-                "fecha_operacion": entrada.fecha_expedicion,
-                "base_imponible": base,
-                "tipo_impositivo": tipo,
-                "cuota_repercutida": cuota,
-                "importe_total": round(base + cuota, 2),
-                "detalle_iva": [
-                    {
-                        "origen": "DesgloseFactura",
-                        "tipo_impositivo": tipo,
-                        "base_imponible": base,
-                        "cuota_repercutida": cuota,
-                    }
-                ],
-            }
-        return (
-            respuesta,
-            build_soap_request_xml(entrada),
-            build_soap_response_xml(entrada, respuesta),
-            datos_factura,
-        )
-
-
-# ---------------------------------------------------------------------------
 # Cliente real con zeep + mTLS
 # ---------------------------------------------------------------------------
 
@@ -350,7 +245,7 @@ class ZeepSIIClient(SIIClient):
 
     NOTA: este cliente está completamente cableado contra el WSDL oficial
     pero requiere un certificado válido y conectividad con los endpoints de
-    la AEAT para ser ejercitado. En desarrollo se utiliza `MockSIIClient`.
+    la AEAT para ser ejercitado.
     """
 
     mode = "real"
@@ -582,9 +477,33 @@ class ZeepSIIClient(SIIClient):
 # ---------------------------------------------------------------------------
 
 
-def get_default_mode() -> str:
-    """Modo por defecto del servidor (env `SII_MODE`)."""
-    return os.environ.get("SII_MODE", "mock").lower()
+def server_cert_configured() -> bool:
+    path = os.environ.get("SII_CERT_PATH")
+    return bool(path and os.path.exists(path))
+
+
+def build_client(
+    cert_bytes: Optional[bytes] = None,
+    cert_password: Optional[str] = None,
+) -> SIIClient:
+    """Construye un cliente SII (real, vía zeep + mTLS).
+
+    - Si se aporta `cert_bytes` se usa ese certificado para la mTLS.
+    - Si no, se intenta usar el certificado configurado en el servidor
+      (`SII_CERT_PATH` / `SII_CERT_PASSWORD`).
+    """
+    if cert_bytes:
+        return ZeepSIIClient(cert_bytes, cert_password or "")
+
+    path = os.environ.get("SII_CERT_PATH")
+    if not path or not os.path.exists(path):
+        raise ValueError(
+            "Sin certificado: aporta el PKCS#12 en la petición o configura "
+            "SII_CERT_PATH en el servidor."
+        )
+    with open(path, "rb") as fh:
+        data = fh.read()
+    return ZeepSIIClient(data, os.environ.get("SII_CERT_PASSWORD", ""))
 
 
 def _interpretar_html_aeat(body: str) -> str:
@@ -617,42 +536,3 @@ def _interpretar_html_aeat(body: str) -> str:
         if m:
             return f"AEAT respondió con la página HTML: «{m.group(1).strip()[:200]}»"
     return "La AEAT devolvió una página HTML en lugar de una respuesta SOAP."
-
-
-def server_cert_configured() -> bool:
-    path = os.environ.get("SII_CERT_PATH")
-    return bool(path and os.path.exists(path))
-
-
-def build_client(
-    mode: Optional[str] = None,
-    cert_bytes: Optional[bytes] = None,
-    cert_password: Optional[str] = None,
-) -> SIIClient:
-    """Construye un cliente SII.
-
-    - Si se aporta `cert_bytes` se fuerza el modo `real` con ese certificado.
-    - Si no se aporta certificado y el modo es `real`, se intenta usar el
-      certificado configurado en el servidor (`SII_CERT_PATH` /
-      `SII_CERT_PASSWORD`).
-    - En `mock` (por defecto) se usa el cliente simulado.
-    """
-    if cert_bytes:
-        return ZeepSIIClient(cert_bytes, cert_password or "")
-
-    effective = (mode or get_default_mode()).lower()
-    if effective == "mock":
-        return MockSIIClient()
-    if effective == "real":
-        path = os.environ.get("SII_CERT_PATH")
-        if not path or not os.path.exists(path):
-            raise ValueError(
-                "Modo 'real' solicitado pero no hay certificado. Aporta el "
-                "PKCS#12 en la petición o configura SII_CERT_PATH en el "
-                "servidor."
-            )
-        with open(path, "rb") as fh:
-            data = fh.read()
-        return ZeepSIIClient(data, os.environ.get("SII_CERT_PASSWORD", ""))
-
-    raise ValueError(f"Modo SII inválido: {mode!r}. Usa 'mock' o 'real'.")

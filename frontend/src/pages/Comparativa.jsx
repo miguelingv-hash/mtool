@@ -335,7 +335,7 @@ export default function Comparativa() {
         headers: { "Content-Type": "multipart/form-data" },
       });
       toast.success(
-        `Consulta mensual (${data.sii_mode}) · ${data.total} facturas actualizadas`,
+        `Consulta mensual · ${data.total} facturas actualizadas`,
       );
       load();
     } catch (e) {
@@ -434,13 +434,7 @@ export default function Comparativa() {
     }
   };
 
-  const reanudarJob = async (id, jobSiiMode) => {
-    if (jobSiiMode === "real" && !resumeForm.file) {
-      toast.error("Falta el certificado", {
-        description: "Sube el .pfx en el bloque de reanudación de este job.",
-      });
-      return;
-    }
+  const reanudarJob = async (id) => {
     try {
       const fd = new FormData();
       if (resumeForm.file) {
@@ -635,7 +629,7 @@ export default function Comparativa() {
             ) : (
               <CalendarRange className="h-4 w-4 mr-2" />
             )}
-            Consultar mes online ({entorno} · {cert.enabled ? "real" : "mock"})
+            Consultar mes online ({entorno})
           </Button>
           <Button
             onClick={lanzarMensualAsync}
@@ -1400,7 +1394,7 @@ export default function Comparativa() {
                   </div>
                   <div className="mt-1 text-slate-600 font-mono text-[11px] tabular-nums">
                     {j.params?.ejercicio}/{j.params?.periodo} ·{" "}
-                    {j.params?.entorno} · {j.params?.sii_mode}
+                    {j.params?.entorno}
                     {j.params?.max_paginas != null
                       ? ` · máx ${j.params.max_paginas} pág`
                       : " · todas las pág"}
@@ -1431,45 +1425,42 @@ export default function Comparativa() {
                       <div className="text-[11px] text-emerald-900 font-semibold">
                         Reanudar desde página {(j.progress?.page ?? 0) + 1}
                       </div>
-                      {j.params?.sii_mode === "real" && (
-                        <>
-                          <label className="block text-[11px] text-slate-600">
-                            Certificado .pfx
-                            <input
-                              type="file"
-                              accept=".pfx,.p12"
-                              className="block mt-1 text-[11px] w-full file:rounded-none file:border file:border-slate-300 file:bg-white file:px-2 file:py-0.5 file:mr-2 file:text-[11px]"
-                              onChange={(e) =>
-                                setResumeForm({ ...resumeForm, file: e.target.files?.[0] || null })
-                              }
-                              data-testid={`jobs-resume-cert-${j.id}`}
-                            />
-                          </label>
-                          <label className="block text-[11px] text-slate-600">
-                            Contraseña
-                            <input
-                              type="password"
-                              value={resumeForm.password}
-                              onChange={(e) =>
-                                setResumeForm({ ...resumeForm, password: e.target.value })
-                              }
-                              placeholder="(opcional si el .pfx no la tiene)"
-                              className="block mt-1 w-full rounded-none border border-slate-300 px-2 py-1 text-[11px] font-mono"
-                              data-testid={`jobs-resume-pwd-${j.id}`}
-                            />
-                          </label>
-                          {resumeForm.file && (
-                            <div className="text-[10px] text-emerald-700 font-mono truncate">
-                              ✓ {resumeForm.file.name} ({(resumeForm.file.size / 1024).toFixed(1)} KB)
-                            </div>
-                          )}
-                        </>
-                      )}
+                      <>
+                        <label className="block text-[11px] text-slate-600">
+                          Certificado .pfx <span className="text-slate-400">(opcional si está configurado en el servidor)</span>
+                          <input
+                            type="file"
+                            accept=".pfx,.p12"
+                            className="block mt-1 text-[11px] w-full file:rounded-none file:border file:border-slate-300 file:bg-white file:px-2 file:py-0.5 file:mr-2 file:text-[11px]"
+                            onChange={(e) =>
+                              setResumeForm({ ...resumeForm, file: e.target.files?.[0] || null })
+                            }
+                            data-testid={`jobs-resume-cert-${j.id}`}
+                          />
+                        </label>
+                        <label className="block text-[11px] text-slate-600">
+                          Contraseña
+                          <input
+                            type="password"
+                            value={resumeForm.password}
+                            onChange={(e) =>
+                              setResumeForm({ ...resumeForm, password: e.target.value })
+                            }
+                            placeholder="(opcional si el .pfx no la tiene)"
+                            className="block mt-1 w-full rounded-none border border-slate-300 px-2 py-1 text-[11px] font-mono"
+                            data-testid={`jobs-resume-pwd-${j.id}`}
+                          />
+                        </label>
+                        {resumeForm.file && (
+                          <div className="text-[10px] text-emerald-700 font-mono truncate">
+                            ✓ {resumeForm.file.name} ({(resumeForm.file.size / 1024).toFixed(1)} KB)
+                          </div>
+                        )}
+                      </>
                       <Button
                         size="sm"
                         className="rounded-none w-full h-7 text-[11px] bg-emerald-700 hover:bg-emerald-800 text-white"
-                        onClick={() => reanudarJob(j.id, j.params?.sii_mode)}
-                        disabled={j.params?.sii_mode === "real" && !resumeForm.file}
+                        onClick={() => reanudarJob(j.id)}
                         data-testid={`jobs-resume-confirm-${j.id}`}
                       >
                         Lanzar reanudación

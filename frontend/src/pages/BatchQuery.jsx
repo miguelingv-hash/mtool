@@ -181,7 +181,7 @@ export default function BatchQuery() {
               ) : (
                 <Upload className="h-4 w-4 mr-2" />
               )}
-              Procesar batch ({entorno} · {cert.enabled ? "real" : "mock"})
+              Procesar batch ({entorno})
             </Button>
             {file && (
               <Button

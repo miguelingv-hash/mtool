@@ -23,8 +23,6 @@ from datetime import datetime, timezone
 import asyncio
 import csv
 import io
-import random
-import hashlib
 import time
 import uuid
 
@@ -37,7 +35,7 @@ from factura_model import (
     diff_facturas,
     normalize_factura_row,
 )
-from sii_client import ENDPOINTS, WSDL_URL, build_client, get_default_mode
+from sii_client import ENDPOINTS, WSDL_URL, build_client
 
 
 router = APIRouter(prefix="/api")
@@ -189,42 +187,6 @@ async def upsert_facturas_bulk(coleccion: str, datos_list: list, fuente: str):
         await _db[coleccion].bulk_write(ops, ordered=False)
 
 
-def _mock_factura_mensual(
-    nif_titular: str,
-    nombre_titular: str,
-    ejercicio: str,
-    periodo: str,
-    idx: int,
-) -> dict:
-    """Genera datos deterministas de una factura para mock mensual."""
-    seed = f"{nif_titular}|{ejercicio}|{periodo}|{idx}"
-    rnd = random.Random(int(hashlib.md5(seed.encode()).hexdigest()[:8], 16))
-    base = round(50 + rnd.random() * 950, 2)
-    tipo = rnd.choice([4.0, 10.0, 21.0])
-    cuota = round(base * tipo / 100, 2)
-    total = round(base + cuota, 2)
-    dia = rnd.randint(1, 28)
-    return {
-        "num_serie_factura": f"F{ejercicio}-{periodo}-{idx:04d}",
-        "fecha_expedicion": f"{dia:02d}-{periodo}-{ejercicio}",
-        "nif_emisor": nif_titular,
-        "nombre_emisor": nombre_titular,
-        "ejercicio": ejercicio,
-        "periodo": periodo,
-        "nif_titular": nif_titular,
-        "contraparte_nif": f"B{rnd.randint(10**7, 10**8 - 1)}",
-        "contraparte_nombre": f"Cliente {idx}",
-        "tipo_factura": "F1",
-        "clave_regimen_especial": "01",
-        "descripcion_operacion": f"Servicios prestados {periodo}/{ejercicio}",
-        "fecha_operacion": f"{dia:02d}-{periodo}-{ejercicio}",
-        "base_imponible": base,
-        "tipo_impositivo": tipo,
-        "cuota_repercutida": cuota,
-        "importe_total": total,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -237,13 +199,12 @@ async def consulta_mensual(
     ejercicio: str = Form(...),
     periodo: str = Form(...),
     entorno: str = Form("preproduccion"),
-    mode: Optional[str] = Form(None),
     cert_password: Optional[str] = Form(None),
     certificate: Optional[UploadFile] = File(None),
     max_paginas: Optional[int] = Form(None),
 ):
-    """Consulta mensual al SII. Si se aporta certificado se invoca el SOAP
-    real; si no, se usa mock determinista.
+    """Consulta mensual al SII vía SOAP real con mTLS. El certificado se
+    aporta en la petición o se usa el configurado en el servidor.
 
     El certificado NO se guarda en el servidor.
     """
@@ -252,8 +213,6 @@ async def consulta_mensual(
         cert_bytes = await certificate.read()
         if not cert_bytes:
             cert_bytes = None
-    effective_mode = "real" if cert_bytes else (mode or get_default_mode())
-
     facturas: list[dict] = []
     start_ts = datetime.now(timezone.utc)
     log_entry = {
@@ -262,7 +221,6 @@ async def consulta_mensual(
         "operation": "ConsultaLRFacturasEmitidas.Mensual",
         "endpoint": ENDPOINTS.get(entorno, ""),
         "entorno": entorno,
-        "sii_mode": effective_mode,
         "status": "ok",
         "http_status": None,
         "error_message": None,
@@ -277,55 +235,37 @@ async def consulta_mensual(
     }
 
     try:
-        if effective_mode == "real":
-            try:
-                client = build_client(
-                    "real", cert_bytes=cert_bytes, cert_password=cert_password
-                )
-            except ValueError as exc:
-                raise HTTPException(400, str(exc))
-            try:
-                facturas, req_xml, resp_xml = _consultar_mensual_real(
-                    client,
-                    nif_titular,
-                    nombre_titular,
-                    ejercicio,
-                    periodo,
-                    entorno,
-                    max_paginas=max_paginas,
-                )
-                log_entry["request_xml"] = _truncar_xml(req_xml)
-                log_entry["response_xml"] = _truncar_xml(resp_xml)
-                log_entry["http_status"] = 200
-            except Exception as exc:  # noqa: BLE001
-                log_entry["status"] = "error"
-                log_entry["error_message"] = str(exc)[:2000]
-                log_entry["request_xml"] = _truncar_xml(
-                    getattr(exc, "request_xml", "") or ""
-                )
-                log_entry["response_xml"] = _truncar_xml(
-                    getattr(exc, "response_xml", "") or ""
-                )
-                log_entry["http_status"] = 502
-                _logger.exception("Fallo SOAP en consulta mensual real")
-                raise HTTPException(502, str(exc)[:1500])
-        else:
-            seed = f"{nif_titular}|{ejercicio}|{periodo}"
-            n_facts = (
-                int(hashlib.md5(seed.encode()).hexdigest()[:2], 16) % 8 + 3
+        try:
+            client = build_client(
+                cert_bytes=cert_bytes, cert_password=cert_password
             )
-            facturas = [
-                _mock_factura_mensual(
-                    nif_titular, nombre_titular, ejercicio, periodo, i
-                )
-                for i in range(1, n_facts + 1)
-            ]
-            log_entry["request_xml"] = (
-                f"<!-- mock consulta mensual {nif_titular} {ejercicio}/{periodo} -->"
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        try:
+            facturas, req_xml, resp_xml = _consultar_mensual_real(
+                client,
+                nif_titular,
+                nombre_titular,
+                ejercicio,
+                periodo,
+                entorno,
+                max_paginas=max_paginas,
             )
-            log_entry["response_xml"] = (
-                f"<!-- mock: {n_facts} facturas generadas deterministicamente -->"
+            log_entry["request_xml"] = _truncar_xml(req_xml)
+            log_entry["response_xml"] = _truncar_xml(resp_xml)
+            log_entry["http_status"] = 200
+        except Exception as exc:  # noqa: BLE001
+            log_entry["status"] = "error"
+            log_entry["error_message"] = str(exc)[:2000]
+            log_entry["request_xml"] = _truncar_xml(
+                getattr(exc, "request_xml", "") or ""
             )
+            log_entry["response_xml"] = _truncar_xml(
+                getattr(exc, "response_xml", "") or ""
+            )
+            log_entry["http_status"] = 502
+            _logger.exception("Fallo SOAP en consulta mensual real")
+            raise HTTPException(502, str(exc)[:1500])
 
         for f in facturas:
             await upsert_factura("facturas_sii", f, "consulta_mensual")
@@ -346,7 +286,6 @@ async def consulta_mensual(
         "total": len(facturas),
         "ejercicio": ejercicio,
         "periodo": periodo,
-        "sii_mode": effective_mode,
         "facturas": facturas,
     }
 
@@ -358,7 +297,6 @@ async def verificar_completitud(
     ejercicio: str = Form(...),
     periodo: str = Form(...),
     entorno: str = Form("preproduccion"),
-    mode: Optional[str] = Form(None),
     cert_password: Optional[str] = Form(None),
     certificate: Optional[UploadFile] = File(None),
 ):
@@ -373,8 +311,6 @@ async def verificar_completitud(
         cert_bytes = await certificate.read()
         if not cert_bytes:
             cert_bytes = None
-    effective_mode = "real" if cert_bytes else (mode or get_default_mode())
-
     # 1) Buscar la última factura de BD para construir ClavePaginacion
     ult = await _db.facturas_sii.find_one(
         {
@@ -411,30 +347,24 @@ async def verificar_completitud(
     facturas: list[dict] = []
     error_msg: Optional[str] = None
     try:
-        if effective_mode == "real":
-            try:
-                client = build_client(
-                    "real", cert_bytes=cert_bytes, cert_password=cert_password
-                )
-            except ValueError as exc:
-                raise HTTPException(400, str(exc))
-            facturas, _req_xml, _resp_xml = await asyncio.to_thread(
-                _consultar_mensual_real,
-                client,
-                nif_titular,
-                nombre_titular or nif_titular,
-                str(ejercicio),
-                str(periodo),
-                entorno,
-                None,           # progress_cb
-                1,              # max_paginas: SÓLO 1 página para no timeout
-                start_clave,    # start_clave
+        try:
+            client = build_client(
+                cert_bytes=cert_bytes, cert_password=cert_password
             )
-        else:
-            # Mock: tras la primera "página" simulada, AEAT devolvería 0
-            # facturas adicionales con la ClavePaginacion construida desde la
-            # última real. Aquí devolvemos 0 deterministicamente.
-            facturas = []
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        facturas, _req_xml, _resp_xml = await asyncio.to_thread(
+            _consultar_mensual_real,
+            client,
+            nif_titular,
+            nombre_titular or nif_titular,
+            str(ejercicio),
+            str(periodo),
+            entorno,
+            None,           # progress_cb
+            1,              # max_paginas: SÓLO 1 página para no timeout
+            start_clave,    # start_clave
+        )
 
         # 3) Persistir nuevas (idempotente: upsert por num_serie_factura)
         if facturas:
@@ -462,7 +392,6 @@ async def verificar_completitud(
             "operation": "ConsultaLRFacturasEmitidas.VerificarCompletitud",
             "endpoint": ENDPOINTS.get(entorno, ""),
             "entorno": entorno,
-            "sii_mode": effective_mode,
             "status": "error" if error_msg else "ok",
             "http_status": 502 if error_msg else 200,
             "error_message": error_msg,
@@ -504,7 +433,6 @@ async def verificar_completitud(
         "ultima_factura_bd": ult,
         "ejercicio": str(ejercicio),
         "periodo": str(periodo),
-        "sii_mode": effective_mode,
     }
 
 
@@ -2118,7 +2046,6 @@ async def _ejecutar_consulta_mensual_job(
     ejercicio: str,
     periodo: str,
     entorno: str,
-    effective_mode: str,
     max_paginas: Optional[int] = None,
     start_clave: Optional[dict] = None,
     start_pagina: int = 0,
@@ -2177,7 +2104,6 @@ async def _ejecutar_consulta_mensual_job(
         "operation": "ConsultaLRFacturasEmitidas.Mensual",
         "endpoint": ENDPOINTS.get(entorno, ""),
         "entorno": entorno,
-        "sii_mode": effective_mode,
         "status": "ok", "http_status": None, "error_message": None,
         "duration_ms": 0, "request_xml": "", "response_xml": "",
         "nif_titular": nif_titular, "nif_emisor": nif_titular,
@@ -2186,75 +2112,43 @@ async def _ejecutar_consulta_mensual_job(
     }
 
     try:
-        if effective_mode == "real":
-            try:
-                client = build_client(
-                    "real", cert_bytes=cert_bytes, cert_password=cert_password
-                )
-            except ValueError as exc:
-                raise RuntimeError(f"Certificado inválido: {exc}") from exc
-
-            def _run():
-                return _consultar_mensual_real(
-                    client, nif_titular, nombre_titular, ejercicio, periodo,
-                    entorno, progress_cb=_update_progress,
-                    max_paginas=max_paginas,
-                    start_clave=start_clave,
-                    start_pagina=start_pagina,
-                    start_invoices=start_invoices,
-                )
-            try:
-                facturas, req_xml, resp_xml = await asyncio.to_thread(_run)
-                log_entry["request_xml"] = _truncar_xml(req_xml)
-                log_entry["response_xml"] = _truncar_xml(resp_xml)
-                log_entry["http_status"] = 200
-            except Exception as exc:  # noqa: BLE001
-                log_entry["status"] = "error"
-                log_entry["error_message"] = str(exc)[:2000]
-                log_entry["request_xml"] = _truncar_xml(
-                    getattr(exc, "request_xml", "") or ""
-                )
-                log_entry["response_xml"] = _truncar_xml(
-                    getattr(exc, "response_xml", "") or ""
-                )
-                log_entry["http_status"] = 502
-                _logger.exception("Fallo SOAP en consulta mensual job")
-                raise
-        else:
-            # Mock: simulamos progreso simple
-            seed = f"{nif_titular}|{ejercicio}|{periodo}"
-            n_facts = int(hashlib.md5(seed.encode()).hexdigest()[:2], 16) % 8 + 3
-            facturas = []
-            for i in range(1, n_facts + 1):
-                facturas.append(
-                    _mock_factura_mensual(
-                        nif_titular, nombre_titular, ejercicio, periodo, i
-                    )
-                )
-                # Reporta progreso por cada factura simulada (con pausa)
-                await _db.jobs.update_one(
-                    {"id": job_id},
-                    {"$set": {
-                        "progress.page": 1,
-                        "progress.invoices": i,
-                        "updated_at": _now_iso(),
-                    }},
-                )
-                await asyncio.sleep(0.05)
-            log_entry["request_xml"] = (
-                f"<!-- mock job consulta mensual {nif_titular} "
-                f"{ejercicio}/{periodo} -->"
+        try:
+            client = build_client(
+                cert_bytes=cert_bytes, cert_password=cert_password
             )
-            log_entry["response_xml"] = (
-                f"<!-- mock: {n_facts} facturas generadas -->"
-            )
+        except ValueError as exc:
+            raise RuntimeError(f"Certificado inválido: {exc}") from exc
 
-        # Persiste facturas en BD: en modo real ya se guardaron página a
-        # página via `progress_cb`. En mock no había callback con facturas
-        # de página, así que persistimos aquí.
-        if effective_mode != "real":
-            for f in facturas:
-                await upsert_factura("facturas_sii", f, "consulta_mensual")
+        def _run():
+            return _consultar_mensual_real(
+                client, nif_titular, nombre_titular, ejercicio, periodo,
+                entorno, progress_cb=_update_progress,
+                max_paginas=max_paginas,
+                start_clave=start_clave,
+                start_pagina=start_pagina,
+                start_invoices=start_invoices,
+            )
+        try:
+            facturas, req_xml, resp_xml = await asyncio.to_thread(_run)
+            log_entry["request_xml"] = _truncar_xml(req_xml)
+            log_entry["response_xml"] = _truncar_xml(resp_xml)
+            log_entry["http_status"] = 200
+        except Exception as exc:  # noqa: BLE001
+            log_entry["status"] = "error"
+            log_entry["error_message"] = str(exc)[:2000]
+            log_entry["request_xml"] = _truncar_xml(
+                getattr(exc, "request_xml", "") or ""
+            )
+            log_entry["response_xml"] = _truncar_xml(
+                getattr(exc, "response_xml", "") or ""
+            )
+            log_entry["http_status"] = 502
+            _logger.exception("Fallo SOAP en consulta mensual job")
+            raise
+
+        # Las facturas se guardan página a página via `progress_cb` durante
+        # la ejecución de `_consultar_mensual_real`. No hay que persistirlas
+        # aquí (eso provocaría dobles upserts).
 
         # ¿Se solicitó cancelar a mitad del job?
         doc = await _db.jobs.find_one({"id": job_id}, {"cancel_requested": 1})
@@ -2299,7 +2193,6 @@ async def consulta_mensual_async(
     ejercicio: str = Form(...),
     periodo: str = Form(...),
     entorno: str = Form("preproduccion"),
-    mode: Optional[str] = Form(None),
     cert_password: Optional[str] = Form(None),
     certificate: Optional[UploadFile] = File(None),
     max_paginas: Optional[int] = Form(None),
@@ -2315,8 +2208,6 @@ async def consulta_mensual_async(
         cert_bytes = await certificate.read()
         if not cert_bytes:
             cert_bytes = None
-    effective_mode = "real" if cert_bytes else (mode or get_default_mode())
-
     job_id = uuid.uuid4().hex
     job_doc = {
         "id": job_id,
@@ -2329,7 +2220,6 @@ async def consulta_mensual_async(
             "ejercicio": ejercicio,
             "periodo": periodo,
             "entorno": entorno,
-            "sii_mode": effective_mode,
             "max_paginas": max_paginas,
         },
         "result": None,
@@ -2345,7 +2235,7 @@ async def consulta_mensual_async(
     asyncio.create_task(
         _ejecutar_consulta_mensual_job(
             job_id, cert_bytes, cert_password, nif_titular, nombre_titular,
-            ejercicio, periodo, entorno, effective_mode, max_paginas,
+            ejercicio, periodo, entorno, max_paginas,
         )
     )
     return {"job_id": job_id, "status": "queued"}
@@ -2391,14 +2281,12 @@ async def reanudar_job(
         if not cert_bytes:
             cert_bytes = None
     p = doc.get("params") or {}
-    if p.get("sii_mode") == "real" and not cert_bytes:
+    if not cert_bytes:
         raise HTTPException(
             400,
             "El job original era en modo real: vuelve a aportar el "
             "certificado (.pfx) para reanudar.",
         )
-    effective_mode = "real" if cert_bytes else p.get("sii_mode", "mock")
-
     new_id = uuid.uuid4().hex
     job_doc = {
         "id": new_id,
@@ -2409,7 +2297,7 @@ async def reanudar_job(
             "invoices": doc.get("progress", {}).get("invoices", 0),
             "clave_paginacion": clave,
         },
-        "params": {**p, "sii_mode": effective_mode},
+        "params": {**p},
         "result": None,
         "error_message": None,
         "created_at": _now_iso(),
@@ -2424,7 +2312,7 @@ async def reanudar_job(
             new_id, cert_bytes, cert_password,
             p["nif_titular"], p["nombre_titular"],
             p["ejercicio"], p["periodo"], p["entorno"],
-            effective_mode, p.get("max_paginas"), start_clave=clave,
+            p.get("max_paginas"), start_clave=clave,
             start_pagina=doc.get("progress", {}).get("page", 0),
             start_invoices=doc.get("progress", {}).get("invoices", 0),
         )

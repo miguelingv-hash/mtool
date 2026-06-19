@@ -4,15 +4,13 @@ SII Consulta API
 Servicio FastAPI que consulta el estado de facturas emitidas en el SII de la
 Agencia Tributaria Española (servicio SOAP ConsultaLRFactEmitidas, WSDL v1.1).
 
-Soporta dos modos:
-  - ``mock``  → respuestas simuladas deterministas (desarrollo).
-  - ``real``  → invocación SOAP real con autenticación mTLS por certificado
-                PKCS#12 (.pfx/.p12), implementada con `zeep`.
+La invocación se realiza siempre contra el WS real de la AEAT con
+autenticación mTLS por certificado PKCS#12 (.pfx/.p12), implementada con
+`zeep`.
 
-El modo activo se decide en este orden de prioridad:
-  1. Certificado aportado en la petición (campo ``certificate``) ⇒ ``real``.
-  2. Cabecera/parámetro ``mode`` explícito en la petición.
-  3. Variable de entorno ``SII_MODE`` (por defecto ``mock``).
+El certificado se aporta por dos vías (en orden de prioridad):
+  1. Subida en la petición (campo ``certificate``).
+  2. Configurado en el servidor vía ``SII_CERT_PATH`` / ``SII_CERT_PASSWORD``.
 
 WSDL:
 https://sede.agenciatributaria.gob.es/static_files/Sede/Procedimiento_ayuda/G417/FicherosSuministros/V_1_1/WSDL/SuministroFactEmitidas.wsdl
@@ -104,7 +102,6 @@ class ConsultaRecord(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     modo: Literal["unitaria", "batch"] = "unitaria"
-    sii_mode: Literal["mock", "real"] = "mock"
     batch_id: Optional[str] = None
     entrada: ConsultaInput
     respuesta: RespuestaSII
@@ -120,7 +117,6 @@ class ErrorFila(BaseModel):
 
 class BatchResumen(BaseModel):
     batch_id: str
-    sii_mode: str
     total: int
     correctas: int
     aceptadas_con_errores: int
@@ -141,9 +137,7 @@ class StatsResponse(BaseModel):
 
 
 class SIIConfigResponse(BaseModel):
-    default_mode: Literal["mock", "real"]
     server_cert_configured: bool
-    real_mode_available: bool
     wsdl: str
     endpoints: dict
 
@@ -160,7 +154,6 @@ class WsLog(BaseModel):
     operation: str = "ConsultaLRFacturasEmitidas"
     endpoint: str = ""
     entorno: str = ""
-    sii_mode: str = "mock"
     status: Literal["ok", "error"] = "ok"
     http_status: Optional[int] = None
     error_message: Optional[str] = None
@@ -185,7 +178,6 @@ from sii_client import (  # noqa: E402
     ENDPOINTS,
     WSDL_URL,
     build_client,
-    get_default_mode,
     server_cert_configured,
 )
 
@@ -202,12 +194,6 @@ async def _read_cert(certificate: Optional[UploadFile]) -> Optional[bytes]:
     if not data:
         return None
     return data
-
-
-def _resolve_mode(mode: Optional[str], has_cert: bool) -> str:
-    if has_cert:
-        return "real"
-    return (mode or get_default_mode()).lower()
 
 
 async def _log_ws_call(log: WsLog) -> WsLog:
@@ -227,7 +213,6 @@ async def _log_ws_call(log: WsLog) -> WsLog:
 async def _execute_and_log(
     client_impl,
     entrada: ConsultaInput,
-    effective_mode: str,
     batch_id: Optional[str] = None,
 ) -> tuple["RespuestaSII", str, str, WsLog, dict | None]:
     """Ejecuta una consulta SII y guarda un WsLog (success o error).
@@ -242,7 +227,6 @@ async def _execute_and_log(
         operation="ConsultaLRFacturasEmitidas",
         endpoint=ENDPOINTS.get(entrada.entorno, ""),
         entorno=entrada.entorno,
-        sii_mode=effective_mode,
         nif_titular=entrada.nif_titular,
         nif_emisor=entrada.nif_emisor,
         num_serie_factura=entrada.num_serie_factura,
@@ -275,27 +259,25 @@ async def _invoke_sii(
     entrada: ConsultaInput,
     cert_bytes: Optional[bytes],
     cert_password: Optional[str],
-    mode_override: Optional[str],
 ):
-    effective_mode = _resolve_mode(mode_override, bool(cert_bytes))
     try:
         client_impl = build_client(
-            effective_mode, cert_bytes=cert_bytes, cert_password=cert_password
+            cert_bytes=cert_bytes, cert_password=cert_password
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
     try:
         respuesta, req_xml, resp_xml, _, datos_factura = await _execute_and_log(
-            client_impl, entrada, effective_mode
+            client_impl, entrada
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Error invocando SII (%s)", effective_mode)
+        logger.exception("Error invocando SII")
         raise HTTPException(502, f"Error en servicio SII: {exc}")
 
-    return respuesta, req_xml, resp_xml, effective_mode, datos_factura
+    return respuesta, req_xml, resp_xml, datos_factura
 
 
 # ---------------------------------------------------------------------------
@@ -308,20 +290,14 @@ async def root():
     return {
         "service": "Monitor SII API",
         "wsdl": WSDL_URL,
-        "modo": get_default_mode(),
         "endpoints": ENDPOINTS,
     }
 
 
 @api_router.get("/sii/config", response_model=SIIConfigResponse)
 async def sii_config():
-    default = get_default_mode()
-    cert_ok = server_cert_configured()
     return SIIConfigResponse(
-        default_mode=default if default in ("mock", "real") else "mock",
-        server_cert_configured=cert_ok,
-        # En real-mode siempre es posible: la UI puede subir el certificado
-        real_mode_available=True,
+        server_cert_configured=server_cert_configured(),
         wsdl=WSDL_URL,
         endpoints=ENDPOINTS,
     )
@@ -332,24 +308,20 @@ async def sii_config():
 
 @api_router.post("/sii/consulta-unitaria", response_model=ConsultaRecord)
 async def consulta_unitaria(entrada: ConsultaInput):
-    """Consulta unitaria por JSON. Usa el modo configurado en el servidor
-    (`SII_MODE`). Para invocación real con certificado aportado en cliente,
-    usar ``POST /api/sii/consulta-unitaria-cert``."""
-    respuesta, req_xml, resp_xml, effective_mode, datos_factura = await _invoke_sii(
-        entrada, cert_bytes=None, cert_password=None, mode_override=None
+    """Consulta unitaria por JSON. Usa el certificado configurado en el
+    servidor. Para invocación con certificado aportado en cliente, usar
+    ``POST /api/sii/consulta-unitaria-cert``."""
+    respuesta, req_xml, resp_xml, datos_factura = await _invoke_sii(
+        entrada, cert_bytes=None, cert_password=None
     )
     record = ConsultaRecord(
         modo="unitaria",
-        sii_mode=effective_mode,
         entrada=entrada,
         respuesta=respuesta,
         soap_request_xml=req_xml,
         soap_response_xml=resp_xml,
     )
     await db.consultas.insert_one(record.model_dump())
-    # Upsert de la factura en `facturas_sii` con los datos canónicos extraídos
-    # del XML de respuesta (importe, IVA, contraparte, etc.). De este modo la
-    # vista Comparativa puede contrastar la unitaria contra el CSV comercial.
     if datos_factura:
         from router_facturas import upsert_factura  # import diferido
         await upsert_factura(
@@ -374,14 +346,13 @@ async def consulta_unitaria_cert(
         "produccion_sello",
     ] = Form("preproduccion"),
     nombre_emisor: Optional[str] = Form(None),
-    mode: Optional[Literal["mock", "real"]] = Form(None),
     cert_password: Optional[str] = Form(None),
     certificate: Optional[UploadFile] = File(None),
 ):
     """Consulta unitaria multipart con certificado opcional.
 
-    - Si ``certificate`` (PKCS#12) está presente, se fuerza modo ``real``.
-    - En otro caso se usa ``mode`` o el modo por defecto del servidor.
+    Si ``certificate`` (PKCS#12) está presente, se usa para la mTLS.
+    En otro caso se usa el certificado configurado en el servidor.
     """
     try:
         entrada = ConsultaInput(
@@ -399,15 +370,13 @@ async def consulta_unitaria_cert(
         raise HTTPException(422, exc.errors())
 
     cert_bytes = await _read_cert(certificate)
-    respuesta, req_xml, resp_xml, effective_mode, datos_factura = await _invoke_sii(
+    respuesta, req_xml, resp_xml, datos_factura = await _invoke_sii(
         entrada,
         cert_bytes=cert_bytes,
         cert_password=cert_password,
-        mode_override=mode,
     )
     record = ConsultaRecord(
         modo="unitaria",
-        sii_mode=effective_mode,
         entrada=entrada,
         respuesta=respuesta,
         soap_request_xml=req_xml,
@@ -487,7 +456,6 @@ async def consulta_batch(
         "produccion",
         "produccion_sello",
     ] = Form("preproduccion"),
-    mode: Optional[Literal["mock", "real"]] = Form(None),
     cert_password: Optional[str] = Form(None),
     certificate: Optional[UploadFile] = File(None),
 ):
@@ -533,13 +501,11 @@ async def consulta_batch(
         )
 
     cert_bytes = await _read_cert(certificate)
-    effective_mode = _resolve_mode(mode, bool(cert_bytes))
 
-    # Construir cliente una vez para todo el lote (importante en real:
-    # reutilizamos la sesión TLS si zeep lo permite)
+    # Construir cliente una vez para todo el lote (importante: reutilizamos
+    # la sesión TLS si zeep lo permite)
     try:
         client_impl = build_client(
-            effective_mode,
             cert_bytes=cert_bytes,
             cert_password=cert_password,
         )
@@ -568,7 +534,7 @@ async def consulta_batch(
 
         try:
             respuesta, req_xml, resp_xml, _, datos_factura = await _execute_and_log(
-                client_impl, entrada, effective_mode, batch_id=batch_id
+                client_impl, entrada, batch_id=batch_id
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fila %s falló contra el SII", idx)
@@ -586,7 +552,6 @@ async def consulta_batch(
 
         record = ConsultaRecord(
             modo="batch",
-            sii_mode=effective_mode,
             batch_id=batch_id,
             entrada=entrada,
             respuesta=respuesta,
@@ -603,7 +568,6 @@ async def consulta_batch(
 
     return BatchResumen(
         batch_id=batch_id,
-        sii_mode=effective_mode,
         total=len(registros),
         correctas=contadores["Correcta"],
         aceptadas_con_errores=contadores["AceptadaConErrores"],
@@ -626,7 +590,6 @@ async def listar_wslogs(
     date_to: Optional[str] = None,
     endpoint: Optional[str] = None,
     operation: Optional[str] = None,
-    sii_mode: Optional[Literal["mock", "real"]] = None,
     entorno: Optional[str] = None,
     status: Optional[Literal["ok", "error"]] = None,
     nif_titular: Optional[str] = None,
@@ -650,8 +613,6 @@ async def listar_wslogs(
         filtro["endpoint"] = {"$regex": endpoint, "$options": "i"}
     if operation:
         filtro["operation"] = operation
-    if sii_mode:
-        filtro["sii_mode"] = sii_mode
     if entorno:
         filtro["entorno"] = entorno
     if status:
@@ -803,7 +764,6 @@ async def exportar_batch(batch_id: str):
             "num_registro_presentacion",
             "csv_aeat",
             "timestamp_presentacion",
-            "sii_mode",
         ]
     )
     for r in registros:
@@ -825,7 +785,6 @@ async def exportar_batch(batch_id: str):
                 rs.get("num_registro_presentacion") or "",
                 rs.get("csv") or "",
                 rs.get("timestamp_presentacion") or "",
-                r.get("sii_mode", "mock"),
             ]
         )
     output.seek(0)

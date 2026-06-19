@@ -49,7 +49,6 @@ const INITIAL_FILTERS = {
   date_from: "",
   date_to: "",
   endpoint: "",
-  sii_mode: "all",
   entorno: "all",
   status: "all",
   nif_titular: "",
@@ -72,14 +71,6 @@ const StatusPill = ({ status }) => {
     </span>
   );
 };
-
-const ModePill = ({ mode }) => (
-  <span
-    className={`pill ${mode === "real" ? "pill-warning" : "pill-neutral"}`}
-  >
-    {mode}
-  </span>
-);
 
 export default function Logs() {
   const [items, setItems] = useState([]);
@@ -203,24 +194,6 @@ export default function Logs() {
           </div>
           <div>
             <Label className="text-[11px] uppercase tracking-wider text-slate-500 mb-1">
-              Modo
-            </Label>
-            <Select
-              value={filters.sii_mode}
-              onValueChange={(v) => updateFilter("sii_mode", v)}
-            >
-              <SelectTrigger className="rounded-none h-9 text-xs" data-testid="filter-mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Todos</SelectItem>
-                <SelectItem value="mock">mock</SelectItem>
-                <SelectItem value="real">real</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label className="text-[11px] uppercase tracking-wider text-slate-500 mb-1">
               Estado
             </Label>
             <Select
@@ -271,9 +244,6 @@ export default function Logs() {
                 NIF · Nº fact.
               </TableHead>
               <TableHead className="text-xs uppercase tracking-wider">
-                Modo
-              </TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">
                 Estado
               </TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">
@@ -285,13 +255,13 @@ export default function Logs() {
           <TableBody>
             {loading ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center py-12 text-slate-500">
+                <TableCell colSpan={7} className="text-center py-12 text-slate-500">
                   Cargando…
                 </TableCell>
               </TableRow>
             ) : items.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center py-12 text-slate-500">
+                <TableCell colSpan={7} className="text-center py-12 text-slate-500">
                   Sin logs registrados con esos filtros
                 </TableCell>
               </TableRow>
@@ -314,9 +284,6 @@ export default function Logs() {
                     <div className="text-slate-400">
                       {l.num_serie_factura || "—"}
                     </div>
-                  </TableCell>
-                  <TableCell>
-                    <ModePill mode={l.sii_mode} />
                   </TableCell>
                   <TableCell>
                     <StatusPill status={l.status} />
@@ -404,10 +371,8 @@ export default function Logs() {
                   </div>
                 </div>
                 <div className="grid grid-cols-[140px_1fr] gap-2">
-                  <div className="text-xs uppercase text-slate-500">Modo</div>
-                  <div>
-                    <ModePill mode={detail.sii_mode} /> · {detail.entorno}
-                  </div>
+                  <div className="text-xs uppercase text-slate-500">Entorno</div>
+                  <div className="font-mono text-xs">{detail.entorno}</div>
                 </div>
                 <div className="grid grid-cols-[140px_1fr] gap-2">
                   <div className="text-xs uppercase text-slate-500">

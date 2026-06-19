@@ -84,9 +84,9 @@ export default function Dashboard() {
             Estado del SII
           </h1>
           <p className="text-sm text-slate-600 mt-2 max-w-xl">
-            Resumen de las consultas realizadas al servicio de la Agencia
-            Tributaria sobre facturas emitidas. Los datos se generan en modo
-            simulado a partir del WSDL oficial.
+            Resumen de las consultas realizadas al servicio SOAP de la
+            Agencia Tributaria (SII) sobre facturas emitidas, con
+            autenticación mTLS por certificado.
           </p>
         </div>
         <div className="flex gap-2">

@@ -6,7 +6,6 @@ import {
   GitCompareArrows,
   History as HistoryIcon,
   ScrollText,
-  ServerCog,
   Settings,
   Stamp,
   Radio,
@@ -46,8 +45,6 @@ export default function Layout() {
   const config = useSiiConfig();
   const { user, logout, hasPermission } = useAuth();
   const navigate = useNavigate();
-  const mode = config?.default_mode || "mock";
-  const isMock = mode === "mock";
   const isProd = entorno.startsWith("produccion");
   const envTriggerCls = isProd
     ? "h-8 w-[260px] rounded-none border-rose-500 bg-rose-50 text-rose-800 font-semibold text-sm focus:ring-rose-400"
@@ -79,22 +76,12 @@ export default function Layout() {
 
           <div className="flex items-center gap-3">
             <div
-              className={`hidden md:inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider px-2 py-1 border ${
-                isMock
-                  ? "border-slate-300 text-slate-600 bg-slate-50"
-                  : "border-emerald-300 text-emerald-700 bg-emerald-50"
-              }`}
+              className="hidden md:inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider px-2 py-1 border border-emerald-300 text-emerald-700 bg-emerald-50"
               data-testid="sii-mode-badge"
               title={`WSDL: ${config?.wsdl || ""}`}
             >
-              {isMock ? (
-                <ServerCog className="h-3.5 w-3.5" />
-              ) : (
-                <Radio className="h-3.5 w-3.5" />
-              )}
-              <span>
-                {isMock ? "Modo Mock" : "Modo Real"} · WSDL v1.1
-              </span>
+              <Radio className="h-3.5 w-3.5" />
+              <span>WSDL v1.1 · mTLS</span>
             </div>
             <div className="h-6 w-px bg-slate-200 hidden md:block" />
             <div className="flex items-center gap-2">
