@@ -52,6 +52,16 @@ CAMPOS_NUMERICOS: list[str] = [
     "importe_total",
 ]
 
+# Campos donde TIENE sentido invertir el signo (importes monetarios).
+# `tipo_impositivo` queda fuera adrede: el % IVA es siempre positivo por
+# convención contable, aunque la base/cuota lleguen del comercial en negativo
+# (notas de abono, salidas).
+CAMPOS_INVERTIBLES_SIGNO: set[str] = {
+    "base_imponible",
+    "cuota_repercutida",
+    "importe_total",
+}
+
 
 # Campos comparados por defecto. Excluye los que típicamente no aparecen en
 # los ficheros comerciales (razón social, descripción operación...). El
@@ -177,7 +187,7 @@ def diff_facturas(
         if campo in CAMPOS_NUMERICOS:
             va = _parse_amount(va) if va is not None else None
             vb = _parse_amount(vb) if vb is not None else None
-            if invertir and vb is not None:
+            if invertir and vb is not None and campo in CAMPOS_INVERTIBLES_SIGNO:
                 vb = -vb
         if va != vb:
             diffs[campo] = {"sii": va, "comercial": vb}
