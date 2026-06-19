@@ -85,22 +85,47 @@ export default function ConciliacionNewman() {
   };
 
   const importar = async () => {
-    if (!validar()) return;
     if (!reporte || reporte.faltantes_en_bd === 0) {
       toast.info("No hay faltantes que importar");
       return;
     }
-    if (!window.confirm(`Vas a insertar ${reporte.faltantes_en_bd} facturas en BD. ¿Continuar?`)) return;
+    if (!nifTitular.trim()) {
+      toast.error("Indica el NIF titular");
+      return;
+    }
+    const lote = reporte.faltantes_completas || [];
+    if (lote.length === 0) {
+      toast.error("El reporte no trae el detalle de faltantes. Pulsa Analizar de nuevo.");
+      return;
+    }
+    if (!window.confirm(
+      `Vas a insertar ${lote.length.toLocaleString("es-ES")} facturas en BD (de ${reporte.faltantes_en_bd.toLocaleString("es-ES")} faltantes${reporte.faltantes_truncado ? ", el resto requiere otra pasada por límite de payload" : ""}). ¿Continuar?`
+    )) return;
     setImporting(true);
     try {
-      const { data } = await api.post("/sii/conciliar-newman/importar-faltantes", buildForm(true), {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      toast.success(`Importadas ${data.insertadas} facturas`);
-      // Re-analizar para refrescar el reporte
+      const { data } = await api.post(
+        "/sii/conciliar-newman/importar-lote",
+        {
+          nif_titular: nifTitular.trim(),
+          nombre_titular: nombreTitular.trim() || undefined,
+          ejercicio: ejercicio || undefined,
+          periodo: periodo || undefined,
+          facturas: lote,
+        },
+        {
+          // El JSON de 100K facturas puede pesar ~10-15MB; axios por defecto
+          // se queda corto. Subimos los límites.
+          maxBodyLength: 256 * 1024 * 1024,
+          maxContentLength: 256 * 1024 * 1024,
+          timeout: 300_000,  // 5 min por si Mongo va a ritmo lento
+        },
+      );
+      toast.success(`Importadas ${data.insertadas.toLocaleString("es-ES")} facturas`);
+      // Re-analizar para refrescar contadores. Aquí SÍ vuelve a subir el CSV
+      // pero ya sabemos que la operación importadora fue exitosa.
       await analizar();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Error al importar");
+      toast.error(e?.response?.data?.detail || e?.message || "Error al importar");
     } finally {
       setImporting(false);
     }

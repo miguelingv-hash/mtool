@@ -848,6 +848,13 @@ async def conciliar_newman(
             "estado_factura": f.get("estado_factura"),
         })
 
+    # Lista completa de faltantes con todos los campos canónicos, capada por
+    # seguridad para no devolver megapayloads. El frontend la usará para
+    # importar en bloque sin volver a subir el CSV gigante.
+    MAX_FALTANTES_PAYLOAD = 100000
+    faltantes_completas = [filas_por_ns[ns] for ns in sorted(faltantes)[:MAX_FALTANTES_PAYLOAD]]
+    faltantes_truncado = len(faltantes) > MAX_FALTANTES_PAYLOAD
+
     extra_preview = sorted(extras)[:20]
 
     return {
@@ -859,6 +866,8 @@ async def conciliar_newman(
         "coinciden": len(coinciden),
         "errores_csv": errores[:50],
         "faltantes_preview": preview,
+        "faltantes_completas": faltantes_completas,
+        "faltantes_truncado": faltantes_truncado,
         "extra_preview": extra_preview,
         "debug": debug,
     }
@@ -937,6 +946,70 @@ async def conciliar_newman_importar(
         "insertadas": insertadas,
         "errores_csv": errores[:50],
     }
+
+
+@router.post("/sii/conciliar-newman/importar-lote")
+async def conciliar_newman_importar_lote(payload: dict):
+    """Variante ligera del importador: recibe un JSON con la lista de facturas
+    YA filtradas y mapeadas por el frontend (a partir de `faltantes_completas`
+    de `/sii/conciliar-newman`). Evita re-subir el CSV gigante.
+
+    Body esperado:
+    {
+      "nif_titular": "A95000295",
+      "nombre_titular": "MI EMPRESA SL",     // opcional
+      "ejercicio": "2026", "periodo": "05",  // opcionales (sólo informativo)
+      "facturas": [ { "num_serie_factura": "...", "base_imponible": ..., ... }, ... ]
+    }
+
+    Hace `upsert_facturas_bulk` con `fuente_ultima: "conciliacion_newman"`.
+    Idempotente: si la factura ya existe, se actualiza in-place (no duplica).
+    """
+    nif_titular = (payload or {}).get("nif_titular", "").strip()
+    if not nif_titular:
+        raise HTTPException(400, "Falta `nif_titular`")
+    nombre_titular = (payload or {}).get("nombre_titular", "").strip()
+    facturas = (payload or {}).get("facturas") or []
+    if not isinstance(facturas, list) or not facturas:
+        raise HTTPException(400, "Falta `facturas` (lista no vacía)")
+
+    # Asegura que cada doc tiene num_serie_factura y nif_titular coherente.
+    docs: list[dict] = []
+    for f in facturas:
+        if not isinstance(f, dict):
+            continue
+        ns = (f.get("num_serie_factura") or "").strip()
+        if not ns:
+            continue
+        doc = dict(f)
+        doc["num_serie_factura"] = ns
+        doc["nif_titular"] = nif_titular
+        if nombre_titular:
+            doc["nombre_titular"] = nombre_titular
+        docs.append(doc)
+
+    if not docs:
+        raise HTTPException(400, "Ninguna factura del lote tiene num_serie_factura válido")
+
+    # Inserción por chunks de 2000 (igual que el endpoint con CSV).
+    batch_size = 2000
+    insertadas = 0
+    for i in range(0, len(docs), batch_size):
+        chunk = docs[i : i + batch_size]
+        await upsert_facturas_bulk("facturas_sii", chunk, "conciliacion_newman")
+        insertadas += len(chunk)
+
+    return {
+        "filtro": {
+            "nif_titular": nif_titular,
+            "ejercicio": (payload or {}).get("ejercicio"),
+            "periodo": (payload or {}).get("periodo"),
+        },
+        "recibidas": len(facturas),
+        "insertadas": insertadas,
+    }
+
+
 
 
 
