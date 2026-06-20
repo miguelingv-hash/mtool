@@ -155,6 +155,10 @@ def _extract_token(request: Request) -> Optional[str]:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
+    # Fallback para iframes/<a href> que no pueden enviar cookies (PDF preview, descargas)
+    qtoken = request.query_params.get("token")
+    if qtoken:
+        return qtoken
     return None
 
 

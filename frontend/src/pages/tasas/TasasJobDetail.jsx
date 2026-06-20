@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, API  } from "@/lib/api";
 import { Download, ArrowLeft, FileText as FilePdf, AlertCircle as WarningCircle, CheckCircle2 as CheckCircle, Eye, X } from "lucide-react";
@@ -15,44 +15,30 @@ export default function JobDetail() {
   const { jobId: id } = useParams();
   const [job, setJob] = useState(null);
   const [previewing, setPreviewing] = useState(null); // filename
-  const [previewBlobUrl, setPreviewBlobUrl] = useState("");
+  const [previewUrl, setPreviewUrl] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
-  const blobUrlRef = useRef("");
+  const [downloadToken, setDownloadToken] = useState("");
 
   useEffect(() => {
     (async () => {
-      const { data } = await api.get(`/tasas-municipales/jobs/${id}`);
-      setJob(data);
-      if (data.files && data.files.length > 0) setPreviewing(data.files[0]);
+      const [jobRes, tokRes] = await Promise.all([
+        api.get(`/tasas-municipales/jobs/${id}`),
+        api.get(`/tasas-municipales/jobs/auth/download-token`),
+      ]);
+      setJob(jobRes.data);
+      setDownloadToken(tokRes.data.token);
+      if (jobRes.data.files && jobRes.data.files.length > 0) setPreviewing(jobRes.data.files[0]);
     })();
-    return () => {
-      if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
-    };
   }, [id]);
 
-  // Load PDF as blob to avoid ad-blockers blocking the URL pattern
+  // Build a direct URL with download-token to bypass Chrome blob/iframe blocks
   useEffect(() => {
-    if (!previewing) return;
+    if (!previewing || !downloadToken) { setPreviewUrl(""); return; }
     setPreviewLoading(true);
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await api.get(`/tasas-municipales/jobs/${id}/files/${encodeURIComponent(previewing)}`, {
-          responseType: "blob",
-        });
-        if (cancelled) return;
-        const url = URL.createObjectURL(r.data);
-        if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = url;
-        setPreviewBlobUrl(url);
-      } catch (e) {
-        console.error("preview load error", e);
-      } finally {
-        if (!cancelled) setPreviewLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [previewing, id]);
+    const url = `${API}/tasas-municipales/jobs/${id}/files/${encodeURIComponent(previewing)}?token=${downloadToken}`;
+    setPreviewUrl(url);
+    setPreviewLoading(false);
+  }, [previewing, downloadToken, id]);
 
   const downloadFile = async (filename) => {
     try {
@@ -87,10 +73,10 @@ export default function JobDetail() {
   };
 
   const openInNewTab = () => {
-    if (!previewBlobUrl) return;
+    if (!previewUrl) return;
     // Use anchor element to bypass strict popup-blockers and ad-blocker URL filters.
     const a = document.createElement("a");
-    a.href = previewBlobUrl;
+    a.href = previewUrl;
     a.target = "_blank";
     a.rel = "noopener noreferrer";
     document.body.appendChild(a);
@@ -161,7 +147,7 @@ export default function JobDetail() {
             <div className="flex gap-2 flex-wrap">
               <button
                 onClick={openInNewTab}
-                disabled={!previewBlobUrl}
+                disabled={!previewUrl}
                 className="btn-ghost text-xs flex items-center gap-2"
                 data-testid="preview-open-tab"
               >
@@ -181,7 +167,7 @@ export default function JobDetail() {
                 Cargando PDF…
               </div>
             )}
-            {previewBlobUrl && <PdfViewer src={previewBlobUrl} />}
+            {previewUrl && <PdfViewer src={previewUrl} />}
           </div>
         </section>
       )}
