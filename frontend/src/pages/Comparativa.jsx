@@ -64,6 +64,10 @@ const ESTADO_PILL = {
 
 const PERIODOS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
 
+// Etiqueta visible del origen comercial. Internamente se almacena "SAP" pero
+// en UI debe mostrarse como "SAP FI" para reflejar el módulo de origen.
+const labelOrigenComercial = (origen) => (origen === "SAP" ? "SAP FI" : origen);
+
 function DetalleIvaTable({ label, lineas, testIdSuffix }) {
   const totalBase = lineas.reduce((a, li) => a + (li.base_imponible || 0), 0);
   const totalCuota = lineas.reduce((a, li) => a + (li.cuota_repercutida || 0), 0);
@@ -801,7 +805,7 @@ export default function Comparativa() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <span className="text-xs uppercase tracking-wider font-semibold text-slate-700 font-mono">
-                      {o.origen}
+                      {labelOrigenComercial(o.origen)}
                     </span>
                     <span className="text-xs text-slate-400">comercial</span>
                   </div>
@@ -1063,7 +1067,7 @@ export default function Comparativa() {
                             className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 bg-slate-100 text-slate-600 font-sans"
                             data-testid={`origen-${r.num_serie_factura}`}
                           >
-                            {r.comercial.origen_comercial}
+                            {labelOrigenComercial(r.comercial.origen_comercial)}
                           </span>
                         ) : null}
                         <span>
@@ -1199,7 +1203,7 @@ export default function Comparativa() {
                       className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 bg-slate-100 text-slate-700"
                       data-testid="detail-origen-comercial"
                     >
-                      Comercial · {detail.comercial.origen_comercial}
+                      Comercial · {labelOrigenComercial(detail.comercial.origen_comercial)}
                     </span>
                   )}
                 </div>
