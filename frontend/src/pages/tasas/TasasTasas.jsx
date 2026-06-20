@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, formatApiError  } from "@/lib/api";
 import { motion, AnimatePresence } from "framer-motion";
-import { Upload as UploadSimple, Zap as Lightning, ArrowRight, CheckSquare, Square, Search as MagnifyingGlass, Download as CloudArrowDown, Upload as CloudArrowUp, FileCsv } from "lucide-react";
+import { Upload as UploadSimple, Zap as Lightning, ArrowRight, CheckSquare, Square, Search as MagnifyingGlass, Download as CloudArrowDown, Upload as CloudArrowUp, FileSpreadsheet as FileCsv } from "lucide-react";
 
 export default function Tasas() {
   const navigate = useNavigate();

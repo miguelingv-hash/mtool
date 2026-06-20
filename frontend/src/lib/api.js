@@ -10,6 +10,7 @@ export const api = axios.create({
 });
 
 /** Formatea `detail` de errores FastAPI (string, array de objetos, o {msg}). */
+export const formatApiError = formatApiErrorDetail;
 export function formatApiErrorDetail(detail) {
   if (detail == null) return "";
   if (typeof detail === "string") return detail;

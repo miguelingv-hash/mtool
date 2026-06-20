@@ -8,29 +8,22 @@ import { Save as FloppyDisk, Upload as CloudArrowUp, Download as CloudArrowDown,
 export default function Settings() {
   const { user } = useAuth();
   const [form, setForm] = useState(null);
-  const [refactForm, setRefactForm] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [savingRefact, setSavingRefact] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
-  const [savedRefact, setSavedRefact] = useState(false);
 
   useEffect(() => {
     if (user && user.role === "admin") {
-      Promise.all([
-        api.get("/tasas-municipales/settings"),
-        api.get("/settings/refacturacion"),
-      ]).then(([sp, rf]) => {
+      api.get("/tasas-municipales/settings").then((sp) => {
         setForm(sp.data);
-        setRefactForm(rf.data);
         setLoading(false);
       });
     }
   }, [user]);
 
   if (user && user.role !== "admin") return <Navigate to="/tasas-municipales" replace />;
-  if (loading || !form || !refactForm) return <div className="text-sm text-zinc-500">Cargando…</div>;
+  if (loading || !form) return <div className="text-sm text-zinc-500">Cargando…</div>;
 
   const save = async (e) => {
     e.preventDefault();
@@ -45,21 +38,7 @@ export default function Settings() {
     } finally { setSaving(false); }
   };
 
-  const saveRefact = async (e) => {
-    e.preventDefault();
-    setSavingRefact(true); setError(""); setSavedRefact(false);
-    try {
-      const { data } = await api.put("/settings/refacturacion", refactForm);
-      setRefactForm(data);
-      setSavedRefact(true);
-      setTimeout(() => setSavedRefact(false), 3000);
-    } catch (e) {
-      setError(formatApiError(e.response?.data?.detail));
-    } finally { setSavingRefact(false); }
-  };
-
   const onField = (k, v) => setForm({ ...form, [k]: v });
-  const onRefactField = (k, v) => setRefactForm({ ...refactForm, [k]: v });
 
   return (
     <div className="space-y-10">
@@ -216,152 +195,6 @@ export default function Settings() {
         </div>
       </motion.form>
 
-      {/* === Refacturación / API externa === */}
-      <motion.form
-        onSubmit={saveRefact}
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="grid grid-cols-1 gap-6 pt-10 border-t border-finapp-border"
-        data-testid="settings-refact-form"
-      >
-        <div>
-          <div className="label-track mb-2">Facturación histórica</div>
-          <h2 className="font-heading font-black text-3xl tracking-tighter leading-none">
-            API externa de refacturación.
-          </h2>
-          <p className="text-finapp-muted mt-2 max-w-2xl text-sm">
-            Configura el endpoint destino y la autenticación. Si lo dejas vacío, el módulo
-            funcionará en modo previsualización (genera el JSON pero no lo envía).
-          </p>
-        </div>
-
-        <fieldset className="border border-finapp-border p-6 rounded-lg">
-          <legend className="label-track px-2">Endpoints</legend>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            <div className="md:col-span-2">
-              <label className="label-track block mb-2">URL destino (POST)</label>
-              <input
-                className="field-input"
-                value={refactForm.target_url || ""}
-                onChange={(e) => onRefactField("target_url", e.target.value)}
-                placeholder="https://api.proveedor.com/transactions"
-                data-testid="refact-target-url"
-              />
-            </div>
-            <div>
-              <label className="label-track block mb-2">Modo de autenticación</label>
-              <select
-                className="field-input"
-                value={refactForm.auth_mode || "manual_token"}
-                onChange={(e) => onRefactField("auth_mode", e.target.value)}
-                data-testid="refact-auth-mode"
-              >
-                <option value="manual_token">Bearer manual (pegar en pantalla)</option>
-                <option value="oauth_client_credentials">OAuth2 client_credentials</option>
-                <option value="static_bearer">Bearer estático</option>
-                <option value="api_key_header">API Key (header)</option>
-              </select>
-            </div>
-            <div>
-              <label className="label-track block mb-2">URL de autenticación</label>
-              <input
-                className="field-input"
-                value={refactForm.auth_url || ""}
-                onChange={(e) => onRefactField("auth_url", e.target.value)}
-                placeholder="https://auth.proveedor.com/oauth/token"
-                data-testid="refact-auth-url"
-              />
-            </div>
-            <div>
-              <label className="label-track block mb-2">Client ID</label>
-              <input
-                className="field-input"
-                value={refactForm.client_id || ""}
-                onChange={(e) => onRefactField("client_id", e.target.value)}
-                data-testid="refact-cid"
-              />
-            </div>
-            <div>
-              <label className="label-track block mb-2">Client secret</label>
-              <input
-                type="password"
-                className="field-input"
-                value={refactForm.client_secret || ""}
-                onChange={(e) => onRefactField("client_secret", e.target.value)}
-                data-testid="refact-csec"
-              />
-            </div>
-            <div className="md:col-span-2">
-              <label className="label-track block mb-2">
-                Token estático / API Key (según modo)
-              </label>
-              <input
-                type="password"
-                className="field-input"
-                value={refactForm.static_token || ""}
-                onChange={(e) => onRefactField("static_token", e.target.value)}
-                data-testid="refact-token"
-                placeholder="Sólo si auth = Bearer estático o API Key"
-              />
-            </div>
-            <div>
-              <label className="label-track block mb-2">Nombre header API Key</label>
-              <input
-                className="field-input"
-                value={refactForm.api_key_header_name || ""}
-                onChange={(e) => onRefactField("api_key_header_name", e.target.value)}
-                placeholder="X-API-Key"
-                data-testid="refact-key-header"
-              />
-            </div>
-          </div>
-        </fieldset>
-
-        <fieldset className="border border-finapp-border p-6 rounded-lg">
-          <legend className="label-track px-2">Valores por defecto</legend>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-            <div>
-              <label className="label-track block mb-2">Import supplier</label>
-              <input
-                className="field-input"
-                value={refactForm.default_supplier || ""}
-                onChange={(e) => onRefactField("default_supplier", e.target.value)}
-                data-testid="refact-default-supplier"
-              />
-            </div>
-            <div>
-              <label className="label-track block mb-2">Indicador IVA</label>
-              <select
-                className="field-input"
-                value={refactForm.default_iva_indicador || "T6"}
-                onChange={(e) => onRefactField("default_iva_indicador", e.target.value)}
-                data-testid="refact-default-iva-ind"
-              >
-                <option value="T6">T6</option>
-                <option value="T7">T7</option>
-              </select>
-            </div>
-            <div>
-              <label className="label-track block mb-2">% IVA</label>
-              <input
-                type="number" step="0.01"
-                className="field-input"
-                value={refactForm.default_iva_porcentaje ?? 10}
-                onChange={(e) => onRefactField("default_iva_porcentaje", Number(e.target.value))}
-                data-testid="refact-default-iva-pct"
-              />
-            </div>
-          </div>
-        </fieldset>
-
-        {savedRefact && <div className="border border-[#008A27] text-[#008A27] text-sm px-3 py-2 rounded">Ajustes de refacturación guardados.</div>}
-
-        <div className="flex justify-end">
-          <button type="submit" disabled={savingRefact} className="btn-primary flex items-center gap-2" data-testid="settings-refact-save">
-            <FloppyDisk size={16} /> {savingRefact ? "Guardando…" : "Guardar refacturación"}
-          </button>
-        </div>
-      </motion.form>
     </div>
   );
 }

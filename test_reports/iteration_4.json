@@ -1,0 +1,47 @@
+{
+  "summary": "End-to-end test of Tasas Municipales module. Backend 17/17 pytest tests PASS (municipios CRUD, upload, generate, jobs list/detail, ZIP/PDF download, download-token, settings GET/PUT/public, RBAC 403). Frontend: login, sidebar group expansion, Panel KPIs, Tasas upload, Municipios listing, and Settings page (without refacturación section) all render correctly. Found ONE CRITICAL frontend bug: the Panel 'VER' link routes to /trabajo/<id> (legacy migtool route) instead of /tasas-municipales/jobs/<id>, so the job detail page renders empty.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "RBAC seed", "issue": "Seed `usuario` role only has [consultas.*, comparativa.view, conciliacion.view, logs.view] — it lacks `tasas.view`/`tasas.manage`, so a non-admin gets 403 on ALL tasas pages (Panel/Tasas/Municipios), not only on Ajustes as the spec expected. Confirmed by backend test test_usuario_cannot_view_tasas (returned 403). To meet the spec ('usuario can access Panel/Tasas/Municipios but NOT Ajustes'), add tasas.view + tasas.manage to the usuario seed role and keep tasas.admin admin-only."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "TasasPanel.jsx 'VER' link", "issue": "Clicking VER on a job row navigates to /trabajo/<jobId> (legacy migtool route). The Corporate App has the route at /tasas-municipales/jobs/:jobId (defined in App.js + TasasJobDetail.jsx). Result: white/empty page on job detail. Frontend body has no 'PDF', 'Descargar' or 'ZIP' text after click.", "selector": "a:has-text('VER') in TasasPanel jobs table", "priority": "HIGH"},
+      {"component": "Logout button", "issue": "No data-testid on the logout icon in the top-right header. Hard to target with automation and inconsistent with the data-testid policy.", "selector": "header power/logout icon", "priority": "LOW"},
+      {"component": "TasasMunicipios.jsx 'Nuevo municipio' modal", "issue": "Modal inputs lack name=\"codigo\"/name=\"nombre\" attributes (or accessible labels mapped to inputs). Playwright cannot fill them via name=… selector even though backend CRUD works. Add name/data-testid on these inputs to make the UI testable.", "selector": "[data-testid='municipio-codigo'] / [data-testid='municipio-nombre']", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_tasas_api.py",
+    "/app/test_reports/pytest/pytest_tasas_results.xml"
+  ],
+  "action_items": [
+    "FRONTEND (HIGH): Fix the job link in /app/frontend/src/pages/tasas/TasasPanel.jsx. Replace href/to=`/trabajo/${id}` with `/tasas-municipales/jobs/${id}` so it matches the route declared in App.js and rendered by TasasJobDetail.jsx.",
+    "BACKEND (LOW): Update auth_seed.py — add 'tasas.view' and 'tasas.manage' to the seed `usuario` role so non-admin users can use the module (currently they get 403 on every tasas endpoint, contradicting the stated RBAC intent).",
+    "FRONTEND (MEDIUM): Add data-testid + name attributes on the 'Nuevo municipio' modal inputs (codigo, nombre, calle, etc.) and on the header logout button.",
+    "FRONTEND (INFO): The Tasas upload UI requires the user to click 'Procesar CSV' after dropping the file — only after that the detected municipios + 'Generar Tasas' button appear. Not a bug, but worth documenting (the prior agent's note implied the list appears immediately)."
+  ],
+  "critical_code_review_comments": [
+    "router_tasas.py: route ordering is correct (`/jobs/auth/download-token` is declared BEFORE `/jobs/{job_id}`), no collision risk. Good.",
+    "router_tasas.py download_file does a path-traversal check via resolve().startswith(JOBS_DIR.resolve()) — good defensive coding.",
+    "router_tasas.py /generate persists a 'fallido' job when files=[] but still writes an empty _all.zip; consider skipping zip creation when no files were generated.",
+    "router_tasas.py /settings PUT masks client_secret with '***' on response — good; also preserves the previous value when an empty/masked value is sent. Good.",
+    "Seed `usuario` role in auth_seed.py is the root cause of the RBAC mismatch — adding tasas.* permissions there fixes the spec contradiction.",
+    "Panel 'VER' link uses the legacy `/trabajo/:id` path (carry-over from the migtool port) but App.js routes it under `/tasas-municipales/jobs/:id`. Easy fix.",
+    "Modal inputs in TasasMunicipios.jsx should expose name/data-testid for accessibility and testability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_tasas_api.py (new — 17 pytest tests covering municipios CRUD, upload/generate flow, jobs, downloads, settings, RBAC for usuario role)"
+  ],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "~80% (login/sidebar/Panel KPIs/Tasas upload/Municipios list/Ajustes OK; job detail link broken)"},
+  "test_credentials": "Admin: miguelingv@gmail.com / MiguelAdmin2026! (used). A TEST_rbac_<uuid>@example.com usuario was created and cleaned up during RBAC tests.",
+  "seed_data_creation": "Backend pytest produced: 2 tasas_jobs (one with 4 PDFs total), 2 auto-created municipios (28001, 28002) under the admin user, and several short-lived TST<rand> municipios used in CRUD tests (deleted afterwards).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend is fully working. Only frontend bug: TasasPanel 'VER' link points to /trabajo/<id> (404/empty) — must use /tasas-municipales/jobs/<id>. Once fixed, retest by going to /tasas-municipales, clicking VER on any job, and confirming the page shows the PDF list + 'Descargar ZIP' / per-file download links. Backend pytest suite is /app/backend/tests/test_tasas_api.py (17 tests). RBAC: usuario seed role currently denies all tasas endpoints with 403; if the spec requires usuario to access Panel/Tasas/Municipios, update auth_seed.py to add tasas.view + tasas.manage.",
+  "rca of the issue": "1) Job-detail 404: TasasPanel.jsx was ported from migtool which uses /trabajo/:id; the new App.js routes it under /tasas-municipales/jobs/:id. The component was not updated when the routes were rewired. 2) RBAC mismatch: auth_seed.py defines `usuario`: [consultas.unitaria, consultas.batch, comparativa.view, conciliacion.view, logs.view] with no tasas.* permissions, while router_tasas.py guards all endpoints with require_permission('tasas.view'|'tasas.manage'|'tasas.admin'). Result: usuario → 403 on every tasas endpoint, not just Ajustes."
+}
