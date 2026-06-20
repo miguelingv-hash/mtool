@@ -43,13 +43,13 @@ import { cn } from "@/lib/utils";
  * El grupo se considera visible si tiene al menos un hijo accesible.
  */
 const NAV_TREE = [
-  { to: "/", label: "Resumen", icon: LayoutDashboard, end: true, testId: "nav-dashboard" },
   {
     id: "monitor-sii",
     label: "Monitor SII",
     icon: Activity,
     testId: "nav-group-monitor-sii",
     children: [
+      { to: "/", label: "Resumen", icon: LayoutDashboard, end: true, testId: "nav-dashboard" },
       { to: "/comparativa", label: "Comparativa SII↔CSV", icon: GitCompareArrows, testId: "nav-comparativa", perm: "comparativa.view" },
       { to: "/consulta", label: "Consulta unitaria", icon: FileSearch, testId: "nav-unit", perm: "consultas.unitaria" },
       { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch", perm: "consultas.batch" },
