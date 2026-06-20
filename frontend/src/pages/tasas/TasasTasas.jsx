@@ -39,7 +39,9 @@ export default function Tasas() {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const { data } = await api.post("/tasas-municipales/upload", fd);
+      const { data } = await api.post("/tasas-municipales/upload", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
       setUpload(data);
       setSelected(new Set(data.municipios.map((m) => m.codigo)));
     } catch (e) {
