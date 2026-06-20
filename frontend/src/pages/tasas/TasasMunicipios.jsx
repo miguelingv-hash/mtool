@@ -244,12 +244,12 @@ export default function Municipios() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
                 <label className="label-track block mb-2">Código *</label>
-                <input className="field-input" required disabled={!!editing.codigo}
+                <input className="field-input" required disabled={!!editing.codigo} name="codigo"
                   value={form.codigo} onChange={(e) => setForm({ ...form, codigo: e.target.value })} data-testid="muni-codigo" />
               </div>
               <div>
                 <label className="label-track block mb-2">Nombre *</label>
-                <input className="field-input" required value={form.nombre}
+                <input className="field-input" required value={form.nombre} name="nombre"
                   onChange={(e) => setForm({ ...form, nombre: e.target.value })} data-testid="muni-nombre" placeholder="Ayuntamiento de …" />
               </div>
               <div>

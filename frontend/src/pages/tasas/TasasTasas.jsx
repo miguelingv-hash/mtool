@@ -82,7 +82,7 @@ export default function Tasas() {
         codigos: [...selected],
         upload_to_sharepoint: uploadToSp && config.enabled_output,
       });
-      navigate(`/trabajo/${data.id}`);
+      navigate(`/tasas-municipales/jobs/${data.id}`);
     } catch (e) {
       setError(formatApiError(e.response?.data?.detail));
     } finally { setGenerating(false); }

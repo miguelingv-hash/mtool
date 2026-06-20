@@ -43,6 +43,7 @@ ROLES_DEFAULT = [
             "conciliacion.view",
             "logs.view",
             "tasas.view",
+            "tasas.manage",
         ],
     },
 ]
@@ -57,11 +58,18 @@ async def seed_auth(db: AsyncIOMotorDatabase, logger) -> None:
     # No usamos TTL automático sobre expires_at porque guardamos ISO string
     # (TTL exige BSON Date). Limpieza ad-hoc se hace al usar el token.
 
-    # 1) Roles
+    # 1) Roles — siempre refresca permisos canónicos
     for r in ROLES_DEFAULT:
         await db.roles.update_one(
             {"_id": r["_id"]},
-            {"$setOnInsert": {**r, "created_at": datetime.now(timezone.utc).isoformat()}},
+            {
+                "$set": {
+                    "name": r["name"],
+                    "description": r["description"],
+                    "permissions": r["permissions"],
+                },
+                "$setOnInsert": {"created_at": datetime.now(timezone.utc).isoformat()},
+            },
             upsert=True,
         )
 

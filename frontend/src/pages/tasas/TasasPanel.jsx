@@ -132,7 +132,7 @@ export default function Dashboard() {
                     </td>
                     <td className="px-5 py-4 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <Link to={`/trabajo/${j.id}`} className="text-finapp-primary font-semibold text-xs uppercase tracking-wider underline-offset-4 hover:underline" data-testid={`view-job-${j.id}`}>Ver</Link>
+                        <Link to={`/tasas-municipales/jobs/${j.id}`} className="text-finapp-primary font-semibold text-xs uppercase tracking-wider underline-offset-4 hover:underline" data-testid={`view-job-${j.id}`}>Ver</Link>
                         {j.generated_count > 0 && token && (
                           <a
                             href={`${API}/tasas-municipales/jobs/${j.id}/download?token=${token}`}

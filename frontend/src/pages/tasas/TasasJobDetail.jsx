@@ -12,7 +12,7 @@ const statusColor = {
 };
 
 export default function JobDetail() {
-  const { id } = useParams();
+  const { jobId: id } = useParams();
   const [job, setJob] = useState(null);
   const [previewing, setPreviewing] = useState(null); // filename
   const [previewBlobUrl, setPreviewBlobUrl] = useState("");

@@ -170,3 +170,25 @@
 - **Backend**: `build_client()` simplificada — sólo construye `ZeepSIIClient`. Si no hay certificado (ni en petición ni en servidor) lanza 400 con mensaje claro.
 - **Frontend**: badge pasa de "Modo Mock/Real" a "WSDL v1.1 · mTLS" (verde). Filtro/columna `Modo` eliminados de `/logs`. Eliminada referencia `(real/mock)` en botones. `CertUploader` ahora distingue "Certificado propio" vs "Certificado del servidor". Dashboard quita "modo simulado" del texto descriptivo.
 - **Validado**: lint OK, backend arranca, `/sii/config` ya no expone `default_mode`/`real_mode_available`. Frontend renderizado: badge correcto, 0 errores JS, sin texto "mock" en la UI.
+
+
+### Feb 2026 — Módulo "Tasas Municipales" portado y validado E2E
+- **Origen**: portado desde el repo externo `pdf-from-template` (rama main, GitHub del usuario).
+- **Backend**: nuevo `router_tasas.py` con prefijo `/tasas-municipales` (CRUD municipios, upload CSV, generate PDFs, jobs list/detail, ZIP/PDF download, download-token JWT corto, settings SharePoint). `tasas_pdf.py` (ReportLab) y `sharepoint_client.py` (Microsoft Graph / mock local). Colecciones Mongo: `tasas_jobs`, `tasas_municipios`, `tasas_settings` (`_id="sharepoint"`), `tasas_uploads`.
+- **Frontend**: nuevas páginas `/tasas-municipales/{panel,tasas,municipios,ajustes,jobs/:jobId}`. Sidebar grupo "Tasas Municipales" colapsable. Pages: `TasasPanel`, `TasasTasas` (upload+generate), `TasasMunicipios` (CRUD), `TasasSettings` (admin only, sólo SharePoint settings — eliminada la sección "Refacturación" del repo original al no aplicar), `TasasJobDetail` (preview + descarga PDF/ZIP).
+- **Auth/RBAC**: permisos `tasas.view` (Panel/Municipios), `tasas.manage` (Tasas + crear/editar municipios), `tasas.admin` (Ajustes). Seed `usuario` actualizado con `tasas.view` + `tasas.manage` para encajar con la especificación. Seed ahora hace `$set` de permisos (antes `$setOnInsert`) para refrescar permisos canónicos en cada arranque.
+- **Bugs arreglados en este port**:
+  - `FileCsv` (Phosphor) → `FileSpreadsheet` (lucide-react).
+  - Falta `formatApiError` en `lib/api.js`: añadido alias `formatApiError = formatApiErrorDetail`.
+  - Sección "Refacturación / API externa" eliminada de `TasasSettings.jsx` (endpoint `/settings/refacturacion` inexistente, no formaba parte del scope).
+  - `TasasPanel` y `TasasTasas` enlazaban a `/trabajo/:id` (legacy migtool) → corregido a `/tasas-municipales/jobs/:id`.
+  - `TasasJobDetail` leía `useParams().id` pero la ruta es `:jobId` → corregido a `const { jobId: id } = useParams()`.
+  - `TasasMunicipios`: añadidos `name="codigo"` / `name="nombre"` para accesibilidad.
+- **Testing**: pytest backend `/app/backend/tests/test_tasas_api.py` con 17 tests (CRUD municipios, upload, generate, jobs, downloads, settings, RBAC) → 17/17 PASS. Frontend validado por testing agent + smoke tests propios: login, sidebar, Panel KPIs, Tasas upload+generate (CSV → 2 PDFs), Municipios listing, Ajustes (sólo admin), Job Detail (preview, descarga).
+
+### Backlog tras port Tasas Municipales
+- **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
+- **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.
+- **P2** Componetizar `Comparativa.jsx` (archivo enorme).
+- **P2** Alinear estilos de páginas Tasas con patrón Shadcn UI del resto.
+- **P2** Verificación de dominio en Resend para invitaciones a usuarios externos.
