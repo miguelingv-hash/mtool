@@ -17,6 +17,11 @@ import Login from "@/pages/Login";
 import SetupPassword from "@/pages/SetupPassword";
 import AdminUsuarios from "@/pages/AdminUsuarios";
 import AdminRoles from "@/pages/AdminRoles";
+import TasasPanel from "@/pages/tasas/TasasPanel";
+import TasasTasas from "@/pages/tasas/TasasTasas";
+import TasasMunicipios from "@/pages/tasas/TasasMunicipios";
+import TasasSettings from "@/pages/tasas/TasasSettings";
+import TasasJobDetail from "@/pages/tasas/TasasJobDetail";
 
 function App() {
   return (
@@ -38,6 +43,11 @@ function App() {
               <Route path="/logs" element={<ProtectedRoute requires="logs.view"><Logs /></ProtectedRoute>} />
               <Route path="/conciliacion" element={<ProtectedRoute requires="conciliacion.view"><ConciliacionNewman /></ProtectedRoute>} />
               <Route path="/configuracion" element={<ProtectedRoute requires="comparativa.edit_config"><Configuracion /></ProtectedRoute>} />
+              <Route path="/tasas-municipales" element={<ProtectedRoute requires="tasas.view"><TasasPanel /></ProtectedRoute>} />
+              <Route path="/tasas-municipales/tasas" element={<ProtectedRoute requires="tasas.manage"><TasasTasas /></ProtectedRoute>} />
+              <Route path="/tasas-municipales/municipios" element={<ProtectedRoute requires="tasas.view"><TasasMunicipios /></ProtectedRoute>} />
+              <Route path="/tasas-municipales/ajustes" element={<ProtectedRoute requires="tasas.admin"><TasasSettings /></ProtectedRoute>} />
+              <Route path="/tasas-municipales/jobs/:jobId" element={<ProtectedRoute requires="tasas.view"><TasasJobDetail /></ProtectedRoute>} />
               <Route path="/admin/usuarios" element={<ProtectedRoute requires="users.manage"><AdminUsuarios /></ProtectedRoute>} />
               <Route path="/admin/roles" element={<ProtectedRoute requires="roles.manage"><AdminRoles /></ProtectedRoute>} />
             </Route>

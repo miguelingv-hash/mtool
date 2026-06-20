@@ -51,6 +51,9 @@ PERMISSIONS_CATALOG = [
     {"key": "conciliacion.view", "label": "Ver/usar conciliación Newman"},
     {"key": "conciliacion.import", "label": "Importar faltantes en BD"},
     {"key": "logs.view", "label": "Ver log de Web Services"},
+    {"key": "tasas.view", "label": "Ver Tasas Municipales (panel + jobs + municipios)"},
+    {"key": "tasas.manage", "label": "Generar PDFs de Tasas + gestionar municipios"},
+    {"key": "tasas.admin", "label": "Ajustes globales de Tasas (SharePoint, etc.)"},
     {"key": "users.manage", "label": "Gestionar usuarios"},
     {"key": "roles.manage", "label": "Gestionar roles y permisos"},
 ]

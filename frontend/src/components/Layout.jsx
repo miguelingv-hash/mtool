@@ -17,6 +17,10 @@ import {
   UserCog,
   Users,
   Activity,
+  Coins,
+  LayoutGrid,
+  Building,
+  Sliders,
 } from "lucide-react";
 import { useEnv } from "@/contexts/EnvContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -53,6 +57,18 @@ const NAV_TREE = [
       { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs", perm: "logs.view" },
       { to: "/conciliacion", label: "Conciliación Newman", icon: ShieldCheck, testId: "nav-conciliacion", perm: "conciliacion.view" },
       { to: "/configuracion", label: "Configuración", icon: Settings, testId: "nav-config", perm: "comparativa.edit_config" },
+    ],
+  },
+  {
+    id: "tasas-municipales",
+    label: "Tasas Municipales",
+    icon: Coins,
+    testId: "nav-group-tasas",
+    children: [
+      { to: "/tasas-municipales", label: "Panel", icon: LayoutGrid, end: true, testId: "nav-tasas-panel", perm: "tasas.view" },
+      { to: "/tasas-municipales/tasas", label: "Tasas", icon: FileSpreadsheet, testId: "nav-tasas-tasas", perm: "tasas.manage" },
+      { to: "/tasas-municipales/municipios", label: "Municipios", icon: Building, testId: "nav-tasas-municipios", perm: "tasas.view" },
+      { to: "/tasas-municipales/ajustes", label: "Ajustes", icon: Sliders, testId: "nav-tasas-ajustes", perm: "tasas.admin" },
     ],
   },
   { to: "/admin/usuarios", label: "Usuarios", icon: Users, testId: "nav-admin-users", perm: "users.manage" },

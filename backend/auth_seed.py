@@ -42,6 +42,7 @@ ROLES_DEFAULT = [
             "comparativa.view",
             "conciliacion.view",
             "logs.view",
+            "tasas.view",
         ],
     },
 ]
