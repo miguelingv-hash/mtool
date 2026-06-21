@@ -126,3 +126,21 @@ async def enviar_email_setup_password(
         subject="Activa tu cuenta · Corporate App",
         html=_layout("Activación de cuenta", cuerpo),
     )
+
+
+async def enviar_email_codigo_mfa(*, to: str, nombre: str, codigo: str, minutos: int = 5) -> dict:
+    """Envía el OTP de 6 dígitos para verificar el login (MFA por email)."""
+    cuerpo = f"""
+<p>Hola <strong>{nombre or to}</strong>,</p>
+<p>Tu código de acceso para iniciar sesión en <strong>Corporate App</strong> es:</p>
+<p style="text-align:center;margin:28px 0;">
+  <span style="display:inline-block;padding:16px 28px;background:#0f172a;color:#fff;font-size:28px;font-weight:700;letter-spacing:10px;border-radius:8px;font-family:'Courier New',monospace;">{codigo}</span>
+</p>
+<p style="font-size:12px;color:#64748b;">Este código caduca en <strong>{minutos} minutos</strong> y solo puede usarse una vez. Si no has iniciado sesión, ignora este mensaje y cambia tu contraseña inmediatamente.</p>
+"""
+    return await send_email(
+        to=to,
+        subject=f"Tu código de acceso: {codigo} · Corporate App",
+        html=_layout("Código de verificación", cuerpo),
+    )
+

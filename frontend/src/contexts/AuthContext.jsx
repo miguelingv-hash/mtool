@@ -61,8 +61,31 @@ export function AuthProvider({ children }) {
   const login = useCallback(async (email, password) => {
     try {
       const { data } = await api.post("/auth/login", { email, password });
+      // Si el backend devuelve un challenge MFA, NO actualizamos `user`.
+      if (data?.mfa_required) {
+        return { ok: true, mfaRequired: true, challenge: data };
+      }
       setUser(data);
       return { ok: true, user: data };
+    } catch (e) {
+      return { ok: false, error: formatApiErrorDetail(e?.response?.data?.detail) || e.message };
+    }
+  }, []);
+
+  const verifyMfa = useCallback(async (challengeId, code) => {
+    try {
+      const { data } = await api.post("/auth/mfa/verify", { challenge_id: challengeId, code });
+      setUser(data);
+      return { ok: true, user: data };
+    } catch (e) {
+      return { ok: false, error: formatApiErrorDetail(e?.response?.data?.detail) || e.message };
+    }
+  }, []);
+
+  const resendMfa = useCallback(async (challengeId) => {
+    try {
+      const { data } = await api.post("/auth/mfa/resend", { challenge_id: challengeId });
+      return { ok: true, ...data };
     } catch (e) {
       return { ok: false, error: formatApiErrorDetail(e?.response?.data?.detail) || e.message };
     }
@@ -80,7 +103,7 @@ export function AuthProvider({ children }) {
   }, [user]);
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, refreshMe, setUser, hasPermission }}>
+    <AuthContext.Provider value={{ user, login, verifyMfa, resendMfa, logout, refreshMe, setUser, hasPermission }}>
       {children}
     </AuthContext.Provider>
   );

@@ -876,6 +876,8 @@ _AUTH_PUBLIC_PREFIXES = (
     "/api/auth/refresh",
     "/api/auth/setup/",          # check + setup
     "/api/auth/forgot-password",
+    "/api/auth/mfa/verify",
+    "/api/auth/mfa/resend",
 )
 
 

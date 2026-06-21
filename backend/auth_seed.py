@@ -57,6 +57,8 @@ async def seed_auth(db: AsyncIOMotorDatabase, logger) -> None:
     await db.roles.create_index("name", unique=True)
     await db.activation_tokens.create_index("token", unique=True)
     await db.activation_tokens.create_index("user_id")
+    # MFA challenges: TTL automático sobre `expires_at` (BSON Date).
+    await db.auth_mfa_challenges.create_index("expires_at", expireAfterSeconds=0)
     # No usamos TTL automático sobre expires_at porque guardamos ISO string
     # (TTL exige BSON Date). Limpieza ad-hoc se hace al usar el token.
 

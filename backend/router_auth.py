@@ -39,7 +39,17 @@ from auth import (
     setup_token_expiry,
     verify_password,
 )
-from email_service import enviar_email_setup_password
+from email_service import enviar_email_setup_password, enviar_email_codigo_mfa
+import hmac
+import hashlib
+import secrets
+import uuid
+from datetime import timedelta
+
+# MFA config
+MFA_CODE_TTL_MIN = 5
+MFA_MAX_ATTEMPTS = 3
+MFA_RESEND_THROTTLE_SEC = 60
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -50,6 +60,15 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class LoginIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1)
+
+
+class MfaVerifyIn(BaseModel):
+    challenge_id: str
+    code: str = Field(min_length=4, max_length=10)
+
+
+class MfaResendIn(BaseModel):
+    challenge_id: str
 
 
 class SetupPasswordIn(BaseModel):
@@ -86,8 +105,63 @@ def _client_ip(request: Request) -> str:
 # -----------------------------------------------------------------------------
 # Endpoints
 # -----------------------------------------------------------------------------
+def _hash_otp(code: str) -> str:
+    """HMAC-SHA256 del OTP con JWT_SECRET como clave. Tiempo-constante en comparación."""
+    key = os.environ.get("JWT_SECRET", "").encode("utf-8")
+    return hmac.new(key, code.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _generate_otp() -> str:
+    """Genera un código numérico de 6 dígitos criptográficamente seguro."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+async def _create_mfa_challenge(db, user: dict) -> dict:
+    """Crea un challenge MFA, lo guarda en MongoDB y envía el OTP por email."""
+    challenge_id = str(uuid.uuid4())
+    code = _generate_otp()
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=MFA_CODE_TTL_MIN)
+    await db.auth_mfa_challenges.insert_one({
+        "_id": challenge_id,
+        "user_id": user["_id"],
+        "email": user["email"],
+        "code_hash": _hash_otp(code),
+        "attempts": 0,
+        "created_at": now.isoformat(),
+        "expires_at": expires_at,  # datetime para TTL index
+        "last_sent_at": now.isoformat(),
+    })
+    await enviar_email_codigo_mfa(
+        to=user["email"], nombre=user.get("nombre") or user.get("name") or "",
+        codigo=code, minutos=MFA_CODE_TTL_MIN,
+    )
+    return {
+        "challenge_id": challenge_id,
+        "expires_at": expires_at.isoformat(),
+        "ttl_minutes": MFA_CODE_TTL_MIN,
+        "email_hint": _mask_email(user["email"]),
+    }
+
+
+def _mask_email(email: str) -> str:
+    """Devuelve un hint de email enmascarado: jo**@gmail.com."""
+    try:
+        local, domain = email.split("@", 1)
+        if len(local) <= 2:
+            return f"{local[0]}*@{domain}"
+        return f"{local[:2]}{'*' * max(1, len(local) - 2)}@{domain}"
+    except Exception:
+        return "***"
+
+
 @router.post("/login")
-async def login(payload: LoginIn, request: Request, response: Response):
+async def login(payload: LoginIn, request: Request):
+    """Paso 1 del login: valida credenciales y dispara el OTP por email.
+
+    NO emite cookies de sesión aquí — el cliente debe llamar a /auth/mfa/verify
+    con el código recibido para completar el login.
+    """
     db = _db(request)
     email = payload.email.lower().strip()
     identifier = f"{_client_ip(request)}:{email}"
@@ -111,20 +185,112 @@ async def login(payload: LoginIn, request: Request, response: Response):
         )
 
     await reset_attempts(db, identifier)
+
+    # Generamos el challenge MFA y enviamos OTP
+    challenge = await _create_mfa_challenge(db, user)
+    return {"mfa_required": True, **challenge}
+
+
+@router.post("/mfa/verify")
+async def mfa_verify(payload: MfaVerifyIn, request: Request, response: Response):
+    """Paso 2 del login: verifica el OTP y emite las cookies de sesión."""
+    db = _db(request)
+    rec = await db.auth_mfa_challenges.find_one({"_id": payload.challenge_id})
+    if not rec:
+        raise HTTPException(404, "El código ha caducado o no es válido. Inicia sesión de nuevo.")
+
+    expires_at = rec.get("expires_at")
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            expires_at = None
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if not expires_at or expires_at < datetime.now(timezone.utc):
+        await db.auth_mfa_challenges.delete_one({"_id": payload.challenge_id})
+        raise HTTPException(410, "El código ha caducado. Inicia sesión de nuevo.")
+
+    if rec.get("attempts", 0) >= MFA_MAX_ATTEMPTS:
+        await db.auth_mfa_challenges.delete_one({"_id": payload.challenge_id})
+        raise HTTPException(429, "Demasiados intentos fallidos. Inicia sesión de nuevo.")
+
+    submitted = payload.code.strip()
+    if not hmac.compare_digest(_hash_otp(submitted), rec.get("code_hash") or ""):
+        await db.auth_mfa_challenges.update_one(
+            {"_id": payload.challenge_id}, {"$inc": {"attempts": 1}}
+        )
+        remaining = MFA_MAX_ATTEMPTS - rec.get("attempts", 0) - 1
+        raise HTTPException(
+            401, f"Código incorrecto. Te quedan {max(0, remaining)} intentos."
+        )
+
+    # OK — borramos el challenge y emitimos cookies
+    await db.auth_mfa_challenges.delete_one({"_id": payload.challenge_id})
+
+    user = await db.users.find_one({"_id": rec["user_id"]})
+    if not user or user.get("status") != "active":
+        raise HTTPException(401, "Usuario no válido")
+
     await db.users.update_one(
         {"_id": user["_id"]},
         {"$set": {"last_login": datetime.now(timezone.utc).isoformat()}},
     )
-
-    access = create_access_token(user["_id"], email)
+    access = create_access_token(user["_id"], user["email"])
     refresh = create_refresh_token(user["_id"])
     set_auth_cookies(response, access, refresh)
 
-    # Cargamos permisos del rol para devolverlos en la respuesta
     role = await db.roles.find_one({"name": user.get("role")}) if user.get("role") else None
     user_out = _to_safe(user)
     user_out["permisos"] = sorted((role or {}).get("permissions", []))
     return user_out
+
+
+@router.post("/mfa/resend")
+async def mfa_resend(payload: MfaResendIn, request: Request):
+    """Reenvía el OTP del mismo challenge (con throttle de 60s)."""
+    db = _db(request)
+    rec = await db.auth_mfa_challenges.find_one({"_id": payload.challenge_id})
+    if not rec:
+        raise HTTPException(404, "Sesión no encontrada. Inicia sesión de nuevo.")
+
+    last_sent = rec.get("last_sent_at")
+    if isinstance(last_sent, str):
+        try:
+            last_sent_dt = datetime.fromisoformat(last_sent.replace("Z", "+00:00"))
+        except ValueError:
+            last_sent_dt = None
+    else:
+        last_sent_dt = last_sent
+    if last_sent_dt and last_sent_dt.tzinfo is None:
+        last_sent_dt = last_sent_dt.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    if last_sent_dt and (now - last_sent_dt).total_seconds() < MFA_RESEND_THROTTLE_SEC:
+        wait = MFA_RESEND_THROTTLE_SEC - int((now - last_sent_dt).total_seconds())
+        raise HTTPException(429, f"Espera {wait}s antes de reenviar el código.")
+
+    # Nuevo código + reinicia intentos + extiende caducidad
+    code = _generate_otp()
+    expires_at = now + timedelta(minutes=MFA_CODE_TTL_MIN)
+    await db.auth_mfa_challenges.update_one(
+        {"_id": payload.challenge_id},
+        {"$set": {
+            "code_hash": _hash_otp(code),
+            "attempts": 0,
+            "expires_at": expires_at,
+            "last_sent_at": now.isoformat(),
+        }},
+    )
+    user = await db.users.find_one({"_id": rec["user_id"]})
+    if not user:
+        raise HTTPException(404, "Usuario no encontrado")
+    await enviar_email_codigo_mfa(
+        to=user["email"], nombre=user.get("nombre") or user.get("name") or "",
+        codigo=code, minutos=MFA_CODE_TTL_MIN,
+    )
+    return {"ok": True, "expires_at": expires_at.isoformat(),
+            "email_hint": _mask_email(user["email"])}
 
 
 @router.post("/logout")
