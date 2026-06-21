@@ -487,7 +487,9 @@ def build_pdf(row: Dict[str, Any], logos_by_sociedad: Optional[Dict[str, bytes]]
     # Ancho ~ columna derecha, alto razonable
     bc_w = (geom.width - geom.margin_x) - right_x
     bc_h = 40
-    bc_y = rc - 14  # debajo de la última fila del resguardo derecho
+    # bc_y es la base. Top del barcode debe quedar 12pt POR DEBAJO del último
+    # campo del resguardo derecho (rc ya apunta a la línea siguiente al último kv).
+    bc_y = rc - 12 - bc_h
     if bc_y < geom.margin_y + 8:
         bc_y = geom.margin_y + 8  # no se sale del pie
     c.drawImage(bc_img, right_x, bc_y, bc_w, bc_h, mask="auto", preserveAspectRatio=False)
