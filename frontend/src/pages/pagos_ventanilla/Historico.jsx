@@ -11,6 +11,7 @@ import {
   SheetContent,
   SheetHeader,
   SheetTitle,
+  SheetDescription,
 } from "@/components/ui/sheet";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { History, Search, X, FileText, Download } from "lucide-react";
@@ -43,24 +44,25 @@ export default function PagosVentanillaHistorico() {
     api.get("/pagos-ventanilla/jobs/auth/download-token").then((r) => setDownloadToken(r.data.token));
   }, []);
 
-  const buildParams = () => {
-    const p = { page, limit };
-    if (filters.sociedad !== "ALL") p.sociedad = filters.sociedad;
-    if (filters.estado !== "ALL") p.estado = filters.estado;
-    if (filters.fecha_desde) p.fecha_desde = filters.fecha_desde;
-    if (filters.fecha_hasta) p.fecha_hasta = filters.fecha_hasta;
-    if (filters.importe_min) p.importe_min = filters.importe_min;
-    if (filters.importe_max) p.importe_max = filters.importe_max;
-    if (filters.cif_nif) p.cif_nif = filters.cif_nif;
-    if (filters.numero_factura) p.numero_factura = filters.numero_factura;
-    if (filters.referencia) p.referencia = filters.referencia;
-    return p;
+  const buildParams = (f = filters, p = page) => {
+    const out = { page: p, limit };
+    if (f.sociedad !== "ALL") out.sociedad = f.sociedad;
+    if (f.estado !== "ALL") out.estado = f.estado;
+    if (f.fecha_desde) out.fecha_desde = f.fecha_desde;
+    if (f.fecha_hasta) out.fecha_hasta = f.fecha_hasta;
+    if (f.importe_min) out.importe_min = f.importe_min;
+    if (f.importe_max) out.importe_max = f.importe_max;
+    if (f.cif_nif) out.cif_nif = f.cif_nif;
+    if (f.numero_factura) out.numero_factura = f.numero_factura;
+    if (f.referencia) out.referencia = f.referencia;
+    return out;
   };
 
-  const load = async () => {
+  const load = async (paramsOverride) => {
     setLoading(true);
     try {
-      const { data } = await api.get("/pagos-ventanilla/pagos/search", { params: buildParams() });
+      const { data } = await api.get("/pagos-ventanilla/pagos/search",
+        { params: paramsOverride || buildParams() });
       setItems(data.items);
       setTotal(data.total);
     } catch (e) {
@@ -76,17 +78,17 @@ export default function PagosVentanillaHistorico() {
   }, [page]);
 
   const onSearch = () => {
-    setPage(1);
-    load();
+    if (page !== 1) setPage(1); else load();
   };
 
   const clearFilters = () => {
-    setFilters({
+    const empty = {
       sociedad: "ALL", fecha_desde: "", fecha_hasta: "", importe_min: "",
       importe_max: "", cif_nif: "", numero_factura: "", referencia: "", estado: "ALL",
-    });
+    };
+    setFilters(empty);
     setPage(1);
-    setTimeout(load, 50);
+    load(buildParams(empty, 1));
   };
 
   const pdfUrl = (item) =>
@@ -255,6 +257,9 @@ export default function PagosVentanillaHistorico() {
                 </span>
               )}
             </SheetTitle>
+            <SheetDescription className="sr-only">
+              Vista previa del documento de pago por ventanilla en PDF.
+            </SheetDescription>
           </SheetHeader>
           {previewPago && downloadToken && (
             <iframe

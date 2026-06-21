@@ -141,7 +141,7 @@ export default function PagosVentanillaGeneracion() {
                 data-testid={`pv-soc-${s.sociedad}`}
               >
                 <span className="font-bold mr-2">{s.sociedad === "TTE" ? "TotalEnergies" : "Baser"}</span>
-                {s.rows} pagos · {s.importe_total.toFixed(2)} €
+                {s.rows} {s.rows === 1 ? "pago" : "pagos"} · {s.importe_total.toFixed(2)} €
               </Badge>
             ))}
           </div>
