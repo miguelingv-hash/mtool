@@ -280,7 +280,7 @@ def build_pdf(row: Dict[str, Any], logos_by_sociedad: Optional[Dict[str, bytes]]
     y = geom.height - geom.margin_y
     # Logo (si existe el PNG, se dibuja; si no, fallback a texto estilizado)
     logo_path = soc.get("logo_path")
-    logo_h = 36  # altura fija
+    logo_h = 56  # altura del logo
     logo_w = 0
     if logo_path and Path(logo_path).exists():
         try:
@@ -292,20 +292,22 @@ def build_pdf(row: Dict[str, Any], logos_by_sociedad: Optional[Dict[str, bytes]]
                         preserveAspectRatio=True)
         except Exception:
             c.setFillColor(soc["primary_color"])
-            c.setFont("Helvetica-Bold", 18)
-            c.drawString(geom.margin_x, y - 14, soc["name_display"])
-            logo_w = 200
+            c.setFont("Helvetica-Bold", 20)
+            c.drawString(geom.margin_x, y - 22, soc["name_display"])
+            logo_w = 220
             c.setFillColor(colors.black)
     else:
         c.setFillColor(soc["primary_color"])
-        c.setFont("Helvetica-Bold", 18)
-        c.drawString(geom.margin_x, y - 14, soc["name_display"])
-        logo_w = 200
+        c.setFont("Helvetica-Bold", 20)
+        c.drawString(geom.margin_x, y - 22, soc["name_display"])
+        logo_w = 220
         c.setFillColor(colors.black)
 
+    # Título a la derecha, centrado verticalmente con el logo
     c.setFillColor(colors.black)
     c.setFont("Helvetica-Bold", 14)
-    c.drawRightString(geom.width - geom.margin_x, y - 14, "Documento para pago por ventanilla")
+    title_y = y - (logo_h / 2) - 5  # centrado vertical con el logo
+    c.drawRightString(geom.width - geom.margin_x, title_y, "Documento para pago por ventanilla")
 
     # Sub-cabecera: contacto — debajo del logo para evitar solape
     c.setFont("Helvetica", 9)
