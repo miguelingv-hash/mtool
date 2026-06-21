@@ -1,0 +1,3 @@
+sociedad;nombre_cliente;cif_nif;direccion_social;direccion_suministro;cuenta_contrato;numero_factura;fecha_emision_factura;fecha_emision_doc;fecha_limite_pago;importe;validez_meses;sufijo;idioma
+TTE;Juan UI Test;12345678Z;Calle Mayor 5;CL Sagrado Corazón 12;CC0001234;UI2026A001;13.03.2026;20.03.2026;20.05.2026;109,95;5;510;es
+BASER;Empresa UI S.L.;B12345678;Av. Costa 25;Pol. Asipo;CC0007890;UI2026B001;05.02.2026;20.02.2026;20.04.2026;1500,00;5;510;es

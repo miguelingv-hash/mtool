@@ -92,6 +92,7 @@ PyJWT==2.13.0
 pymongo==4.5.0
 pyparsing==3.3.2
 pytest==9.0.3
+python-barcode==0.16.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-jose==3.5.0
@@ -99,6 +100,7 @@ python-multipart==0.0.32
 pytokens==0.4.1
 pytz==2026.2
 PyYAML==6.0.3
+qrcode==8.2
 referencing==0.37.0
 regex==2026.5.9
 reportlab==4.1.0

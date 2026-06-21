@@ -21,6 +21,8 @@ import {
   LayoutGrid,
   Building,
   Sliders,
+  Banknote,
+  FileText,
 } from "lucide-react";
 import { useEnv } from "@/contexts/EnvContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -69,6 +71,16 @@ const NAV_TREE = [
       { to: "/tasas-municipales/tasas", label: "Tasas", icon: FileSpreadsheet, testId: "nav-tasas-tasas", perm: "tasas.manage" },
       { to: "/tasas-municipales/municipios", label: "Municipios", icon: Building, testId: "nav-tasas-municipios", perm: "tasas.view" },
       { to: "/tasas-municipales/ajustes", label: "Ajustes", icon: Sliders, testId: "nav-tasas-ajustes", perm: "tasas.admin" },
+    ],
+  },
+  {
+    id: "pagos-ventanilla",
+    label: "Pagos Ventanilla",
+    icon: Banknote,
+    testId: "nav-group-pv",
+    children: [
+      { to: "/pagos-ventanilla/generacion", label: "Generación", icon: FileText, testId: "nav-pv-generar", perm: "pagos_ventanilla.manage" },
+      { to: "/pagos-ventanilla/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-pv-historico", perm: "pagos_ventanilla.view" },
     ],
   },
   { to: "/admin/usuarios", label: "Usuarios", icon: Users, testId: "nav-admin-users", perm: "users.manage" },

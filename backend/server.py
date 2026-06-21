@@ -809,13 +809,15 @@ app.include_router(facturas_router)
 from router_auth import router as auth_router  # noqa: E402
 from router_admin import router as admin_router  # noqa: E402
 from router_tasas import router as tasas_router  # noqa: E402
+from router_pagos_ventanilla import router as pv_router  # noqa: E402
 from auth_seed import seed_auth  # noqa: E402
 
-# Los routers de auth/admin/tasas se montan también bajo /api
+# Los routers de auth/admin/tasas/pagos-ventanilla se montan también bajo /api
 auth_api = APIRouter(prefix="/api")
 auth_api.include_router(auth_router)
 auth_api.include_router(admin_router)
 auth_api.include_router(tasas_router)
+auth_api.include_router(pv_router)
 app.include_router(auth_api)
 
 # Exponer la BD en app.state para los dependencies de auth

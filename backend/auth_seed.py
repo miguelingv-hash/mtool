@@ -44,6 +44,8 @@ ROLES_DEFAULT = [
             "logs.view",
             "tasas.view",
             "tasas.manage",
+            "pagos_ventanilla.view",
+            "pagos_ventanilla.manage",
         ],
     },
 ]

@@ -22,6 +22,8 @@ import TasasTasas from "@/pages/tasas/TasasTasas";
 import TasasMunicipios from "@/pages/tasas/TasasMunicipios";
 import TasasSettings from "@/pages/tasas/TasasSettings";
 import TasasJobDetail from "@/pages/tasas/TasasJobDetail";
+import PagosVentanillaGeneracion from "@/pages/pagos_ventanilla/Generacion";
+import PagosVentanillaHistorico from "@/pages/pagos_ventanilla/Historico";
 
 function App() {
   return (
@@ -48,6 +50,8 @@ function App() {
               <Route path="/tasas-municipales/municipios" element={<ProtectedRoute requires="tasas.view"><TasasMunicipios /></ProtectedRoute>} />
               <Route path="/tasas-municipales/ajustes" element={<ProtectedRoute requires="tasas.admin"><TasasSettings /></ProtectedRoute>} />
               <Route path="/tasas-municipales/jobs/:jobId" element={<ProtectedRoute requires="tasas.view"><TasasJobDetail /></ProtectedRoute>} />
+              <Route path="/pagos-ventanilla/generacion" element={<ProtectedRoute requires="pagos_ventanilla.manage"><PagosVentanillaGeneracion /></ProtectedRoute>} />
+              <Route path="/pagos-ventanilla/historico" element={<ProtectedRoute requires="pagos_ventanilla.view"><PagosVentanillaHistorico /></ProtectedRoute>} />
               <Route path="/admin/usuarios" element={<ProtectedRoute requires="users.manage"><AdminUsuarios /></ProtectedRoute>} />
               <Route path="/admin/roles" element={<ProtectedRoute requires="roles.manage"><AdminRoles /></ProtectedRoute>} />
             </Route>

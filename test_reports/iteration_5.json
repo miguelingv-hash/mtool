@@ -1,0 +1,65 @@
+{
+  "summary": "End-to-end test of NEW 'Pagos Ventanilla' module. Backend 19/19 pytest tests PASS: CSV template download, upload (valid + invalid sociedad + zero importe rejected), generate (3 PDFs in one job), search filters (sociedad/cif/numero_factura/estado/importe_min/importe_max), download-token + signed PDF download, CORREOS rule (BASER 1500€ PDF DOES NOT contain CORREOS; BASER 50€ DOES), RBAC seed for usuario role includes pagos_ventanilla.view + pagos_ventanilla.manage, anonymous /search returns 401. Frontend: login OK, sidebar group 'Pagos Ventanilla' (between Tasas Municipales and Usuarios) with Generación + Histórico submenu visible, /pagos-ventanilla/generacion uploads CSV → preview cards with TTE/BASER badges, 'Generar X PDFs' generates and redirects to /pagos-ventanilla/historico?job=<id>, histórico table populated with new invoices, sociedad filter narrows results, PDF preview Sheet opens with iframe and token=<jwt> query param. ONE FRONTEND BUG: 'Limpiar' (clear filters) button does NOT reload with cleared params — uses stale closure of `load()`.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "Historico.jsx — clearFilters()",
+        "issue": "Pulsar 'Limpiar' resetea el estado de filtros pero la llamada siguiente a /api/pagos-ventanilla/pagos/search sigue usando los filtros antiguos (stale closure). Reproducción: filtrar por Sociedad=TTE → 4 filas → pulsar Limpiar → siguen apareciendo solo 4 filas (debería volver a las 10). El problema es: `clearFilters()` llama `setFilters({...ALL})` y luego `setTimeout(load, 50)`, pero `load` está capturado del render anterior y referencia `filters` por clausura, por lo que `buildParams()` lee el estado anterior.",
+        "selector": "[data-testid='pv-clear-btn']",
+        "priority": "HIGH",
+        "fix_suggestion": "Opción A: usar useEffect con dep [filters] que dispare load cuando los filtros cambien tras un reset. Opción B: cambiar buildParams para aceptar filters como argumento y, en clearFilters, llamar load(EMPTY_FILTERS). Opción C: usar functional update + flushSync. Lo más simple: `const empty = {...}; setFilters(empty); setPage(1); setTimeout(() => loadWith(empty), 0);` definiendo `loadWith(f)` que reciba el objeto explícitamente."
+      },
+      {
+        "component": "Generacion.jsx preview badges",
+        "issue": "Texto 'TotalEnergies1 pagos · 109.95 €' — falta espacio entre etiqueta y número y la pluralización siempre es 'pagos' incluso con 1 (debería ser '1 pago' / '2 pagos').",
+        "selector": "[data-testid='pv-soc-TTE'], [data-testid='pv-soc-BASER']",
+        "priority": "LOW"
+      },
+      {
+        "component": "Sheet PDF preview",
+        "issue": "Warning de Radix en consola: 'Missing Description or aria-describedby for {DialogContent}'. Añadir <SheetDescription> oculto o aria-describedby para accesibilidad.",
+        "selector": "[data-testid='pv-preview-sheet']",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_pagos_ventanilla.py",
+    "/app/test_reports/pytest/pv_results.xml"
+  ],
+  "action_items": [
+    "FRONTEND (HIGH): Corregir el bug de stale-closure en Historico.jsx → clearFilters() no re-busca con los filtros vacíos. Refactorizar buildParams() para aceptar el objeto de filtros como argumento, o usar useEffect([filters]) que dispare load al cambiar el estado.",
+    "FRONTEND (LOW): Arreglar pluralización 'pagos' y espacio en badges de sociedad en Generacion.jsx.",
+    "FRONTEND (LOW): Añadir SheetDescription/aria-describedby al Sheet de preview PDF para eliminar el warning de Radix.",
+    "(Opcional) Backend: añadir pdftotext (poppler-utils) al contenedor si se quieren tests de inspección de PDF nativos en futuras iteraciones — actualmente uso pypdf que ya está instalado para los tests."
+  ],
+  "critical_code_review_comments": [
+    "router_pagos_ventanilla.py: route ordering correcto — /jobs/auth/download-token declarado ANTES de /jobs/{job_id} ✓. Path traversal check en download_file ✓.",
+    "router_pagos_ventanilla.py /generate: crea ZIP _all.zip aunque no haya archivos generados (mismo patrón que tasas) — aceptable pero podría omitirse cuando files=[].",
+    "pagos_ventanilla_pdf.py LIMITE_CORREOS=999.99 con `>=` ✓ verificado con tests (1500€ excluye CORREOS, 50€ lo incluye).",
+    "pagos_ventanilla_pdf.py build_barcode_string genera 5+8+3+6+13+10+1 = 46 dígitos ✓ conforme a Cuaderno 57-507.",
+    "Historico.jsx (BUG HIGH): clearFilters() y onSearch usan setTimeout(load, ...) sobre clausura obsoleta — el patrón correcto sería useEffect([filters, page]) o pasar el objeto filtros explícitamente a una variante de load.",
+    "Historico.jsx: useEffect inicial usa eslint-disable-next-line react-hooks/exhaustive-deps — síntoma del mismo problema. Mejor extraer load fuera o usar useCallback.",
+    "Generacion.jsx: navegación post-generación a `/pagos-ventanilla/historico?job=${id}` ✓ pero la query `?job=` no se usa en Historico.jsx para resaltar el job recién generado (mejora UX).",
+    "auth_seed.py: pagos_ventanilla.view + pagos_ventanilla.manage agregados al rol usuario y refrescados en cada arranque ✓ confirmado vía /api/admin/roles."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_pagos_ventanilla.py (new — 19 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (19/19)",
+    "frontend": "~88% (login, sidebar, generación, upload, generate, redirect, histórico, sociedad/CIF/factura/importe filters, PDF iframe preview, descarga directa OK; Limpiar tiene bug stale-closure)"
+  },
+  "test_credentials": "Admin: miguelingv@gmail.com / MiguelAdmin2026! (usado). No se crearon usuarios test adicionales en esta iteración.",
+  "seed_data_creation": "Pytest creó 1 job adicional con 3 PDFs (TTE Juan Pérez 109,95€ + BASER Empresa Cliente 1500€ + BASER María López 50€) bajo el admin. Frontend test creó 1 job adicional con 2 PDFs (TTE Juan UI Test + BASER Empresa UI). Todos persisten en pagos_ventanilla_pagos.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend 100% verde (19/19 en /app/backend/tests/test_pagos_ventanilla.py — incluye verificación de CORREOS extrayendo texto del PDF con pypdf). Frontend funciona end-to-end salvo el botón 'Limpiar' del histórico (Historico.jsx clearFilters tiene stale closure → no recarga con filtros vacíos; reproducible: filtrar TTE, ver 4 filas, pulsar Limpiar → siguen 4 filas en lugar de 10). Verificar también pluralización 'pagos' y warning Radix DialogContent. RBAC del rol 'usuario' ya incluye los 2 permisos pagos_ventanilla.*; no probado el flujo completo loggeado como usuario (no era crítico para esta iteración, los permisos están en seed).",
+  "rca of the issue": "Stale closure en Historico.jsx: clearFilters() llama setFilters(EMPTY) (asíncrono) seguido de setTimeout(load, 50). El identificador `load` referencia la función creada durante el último render, que captura `filters` por clausura. Aunque setFilters dispare un re-render que cree un nuevo `load`, el `load` pasado al setTimeout sigue siendo el viejo. Cuando dispara a los 50ms, llama a buildParams() del viejo render → lee filtros antiguos → el GET /api/pagos-ventanilla/pagos/search?sociedad=TTE… persiste. Fix: useEffect([filters, page]) que llame load, o reescribir buildParams para aceptar argumento explícito y llamar `loadWith(EMPTY)` desde clearFilters."
+}
