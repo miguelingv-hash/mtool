@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import qrcode
@@ -41,9 +42,12 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # Sociedades
+ASSETS_DIR = Path("/app/backend/assets/logos")
+
 SOCIEDADES = {
     "TTE": {
         "name_display": "TotalEnergies Clientes",
+        "logo_path": ASSETS_DIR / "tte.png",
         "name_legal": "TotalEnergies Clientes, S.A.U.",
         "address": "Plaza de los Ferroviarios Asturianos 1, 33012 Oviedo (España)",
         "registral": "Reg. M. Asturias, T. 4.526, F. 186, H. AS-60.297, CIF A-95000295",
@@ -59,6 +63,7 @@ SOCIEDADES = {
     },
     "BASER": {
         "name_display": "BASER COR de TotalEnergies",
+        "logo_path": ASSETS_DIR / "baser.png",
         "name_legal": "BASER COMERCIALIZADORA DE REFERENCIA S.A.",
         "address": "Plaza de los Ferroviarios Asturianos 1, 33012 - Oviedo (España)",
         "registral": "Reg. M. Asturias, T. 3.777, F. 175, H. AS-39.440, CIF A-74251836",
@@ -273,9 +278,28 @@ def build_pdf(row: Dict[str, Any], logos_by_sociedad: Optional[Dict[str, bytes]]
     # CABECERA — logo + título
     # ===========================================================================
     y = geom.height - geom.margin_y
-    c.setFillColor(soc["primary_color"])
-    c.setFont("Helvetica-Bold", 22)
-    c.drawString(geom.margin_x, y - 10, soc["name_display"])
+    # Logo (si existe el PNG, se dibuja; si no, fallback a texto estilizado)
+    logo_path = soc.get("logo_path")
+    logo_h = 40  # altura fija
+    if logo_path and Path(logo_path).exists():
+        try:
+            from reportlab.lib.utils import ImageReader
+            img = ImageReader(str(logo_path))
+            iw, ih = img.getSize()
+            logo_w = logo_h * (iw / ih)
+            c.drawImage(img, geom.margin_x, y - logo_h, logo_w, logo_h, mask="auto",
+                        preserveAspectRatio=True)
+        except Exception:
+            c.setFillColor(soc["primary_color"])
+            c.setFont("Helvetica-Bold", 22)
+            c.drawString(geom.margin_x, y - 10, soc["name_display"])
+            c.setFillColor(colors.black)
+    else:
+        c.setFillColor(soc["primary_color"])
+        c.setFont("Helvetica-Bold", 22)
+        c.drawString(geom.margin_x, y - 10, soc["name_display"])
+        c.setFillColor(colors.black)
+
     c.setFillColor(colors.black)
     c.setFont("Helvetica-Bold", 14)
     c.drawRightString(geom.width - geom.margin_x, y - 10, "Documento para pago por ventanilla")
