@@ -280,7 +280,8 @@ def build_pdf(row: Dict[str, Any], logos_by_sociedad: Optional[Dict[str, bytes]]
     y = geom.height - geom.margin_y
     # Logo (si existe el PNG, se dibuja; si no, fallback a texto estilizado)
     logo_path = soc.get("logo_path")
-    logo_h = 40  # altura fija
+    logo_h = 36  # altura fija
+    logo_w = 0
     if logo_path and Path(logo_path).exists():
         try:
             from reportlab.lib.utils import ImageReader
@@ -291,37 +292,41 @@ def build_pdf(row: Dict[str, Any], logos_by_sociedad: Optional[Dict[str, bytes]]
                         preserveAspectRatio=True)
         except Exception:
             c.setFillColor(soc["primary_color"])
-            c.setFont("Helvetica-Bold", 22)
-            c.drawString(geom.margin_x, y - 10, soc["name_display"])
+            c.setFont("Helvetica-Bold", 18)
+            c.drawString(geom.margin_x, y - 14, soc["name_display"])
+            logo_w = 200
             c.setFillColor(colors.black)
     else:
         c.setFillColor(soc["primary_color"])
-        c.setFont("Helvetica-Bold", 22)
-        c.drawString(geom.margin_x, y - 10, soc["name_display"])
+        c.setFont("Helvetica-Bold", 18)
+        c.drawString(geom.margin_x, y - 14, soc["name_display"])
+        logo_w = 200
         c.setFillColor(colors.black)
 
     c.setFillColor(colors.black)
     c.setFont("Helvetica-Bold", 14)
-    c.drawRightString(geom.width - geom.margin_x, y - 10, "Documento para pago por ventanilla")
+    c.drawRightString(geom.width - geom.margin_x, y - 14, "Documento para pago por ventanilla")
 
-    # Sub-cabecera: contacto
+    # Sub-cabecera: contacto — debajo del logo para evitar solape
     c.setFont("Helvetica", 9)
     c.setFillColor(colors.HexColor("#555"))
     sub = f"Línea {soc['name_display'].split(' de ')[0]}  ·  {soc['telefono']}  ·  WhatsApp {soc['whatsapp']}  ·  {soc['website']}"
-    c.drawString(geom.margin_x, y - 28, sub)
+    sub_y = y - logo_h - 16
+    c.drawString(geom.margin_x, sub_y, sub)
     c.setFillColor(colors.black)
 
     # Línea separadora
     c.setStrokeColor(soc["primary_color"])
     c.setLineWidth(1.2)
-    c.line(geom.margin_x, y - 34, geom.width - geom.margin_x, y - 34)
+    sep_top_y = sub_y - 6
+    c.line(geom.margin_x, sep_top_y, geom.width - geom.margin_x, sep_top_y)
 
     # ===========================================================================
     # COLUMNA IZQUIERDA — datos cliente + suministro + datos pago
     # ===========================================================================
     left_x = geom.margin_x
     col_width = (geom.width - 2 * geom.margin_x) * 0.58
-    box_top = y - 42
+    box_top = sep_top_y - 14
     box_y = box_top
 
     def section_title(txt, x, y0):
@@ -390,9 +395,9 @@ def build_pdf(row: Dict[str, Any], logos_by_sociedad: Optional[Dict[str, bytes]]
     legal = (f"Una vez superada la fecha límite de pago indicada arriba, si usted desea pagar "
              f"puede utilizar este mismo documento en las entidades colaboradoras "
              f"durante un plazo de {row['validez_meses']} meses desde su emisión.")
-    _wrapped_text(c, legal, left_x, box_y, col_width, 9)
+    box_y = _wrapped_text(c, legal, left_x, box_y, col_width, 10)
     c.setFillColor(colors.black)
-    box_y -= 30
+    box_y -= 14
 
     # ===========================================================================
     # COLUMNA DERECHA — instrucciones de pago + QR + entidades bancarias
@@ -440,7 +445,7 @@ def build_pdf(row: Dict[str, Any], logos_by_sociedad: Optional[Dict[str, bytes]]
     # SECCIÓN INFERIOR — Resguardo cliente + Resguardo entidad colaboradora
     # ===========================================================================
     # Línea separadora gruesa
-    sep_y = max(box_y, ry) - 4
+    sep_y = min(box_y, ry) - 4
     c.setStrokeColor(colors.HexColor("#999"))
     c.setDash(2, 3)
     c.line(geom.margin_x, sep_y, geom.width - geom.margin_x, sep_y)
@@ -506,7 +511,7 @@ def _kv(c: Canvas, label: str, value: str, x: float, y: float, lw: int = 100) ->
     return y - 11
 
 
-def _wrapped_text(c: Canvas, text: str, x: float, y: float, max_w: float, leading: int = 10):
+def _wrapped_text(c: Canvas, text: str, x: float, y: float, max_w: float, leading: int = 10) -> float:
     from reportlab.pdfbase.pdfmetrics import stringWidth
     words = text.split()
     line = ""
@@ -520,6 +525,8 @@ def _wrapped_text(c: Canvas, text: str, x: float, y: float, max_w: float, leadin
             line = candidate
     if line:
         c.drawString(x, y, line)
+        y -= leading
+    return y
 
 
 def _imagereader(png_bytes: bytes):
