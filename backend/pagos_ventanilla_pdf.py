@@ -480,14 +480,17 @@ def build_pdf(row: Dict[str, Any], logos_by_sociedad: Optional[Dict[str, bytes]]
     rc = _kv(c, "Nombre/Razón social", row["nombre_cliente"], right_x, rc, 110)
 
     # ===========================================================================
-    # CÓDIGO DE BARRAS (abajo, full width)
+    # CÓDIGO DE BARRAS — debajo del Resguardo de la entidad colaboradora (col. dcha.)
     # ===========================================================================
     bc_png = _render_barcode_png(bc_string)
     bc_img = _imagereader(bc_png)
-    bc_w = geom.width - 2 * geom.margin_x
-    bc_h = 32
-    bc_y = geom.margin_y + 6
-    c.drawImage(bc_img, geom.margin_x, bc_y, bc_w, bc_h, mask="auto", preserveAspectRatio=False)
+    # Ancho ~ columna derecha, alto razonable
+    bc_w = (geom.width - geom.margin_x) - right_x
+    bc_h = 40
+    bc_y = rc - 14  # debajo de la última fila del resguardo derecho
+    if bc_y < geom.margin_y + 8:
+        bc_y = geom.margin_y + 8  # no se sale del pie
+    c.drawImage(bc_img, right_x, bc_y, bc_w, bc_h, mask="auto", preserveAspectRatio=False)
 
     # Pie con datos registrales
     c.setFont("Helvetica", 7)
