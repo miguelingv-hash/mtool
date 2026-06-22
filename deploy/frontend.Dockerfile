@@ -5,8 +5,10 @@ ARG REACT_APP_BACKEND_URL
 ENV REACT_APP_BACKEND_URL=$REACT_APP_BACKEND_URL
 
 WORKDIR /app
-COPY frontend/package.json frontend/yarn.lock /app/
-RUN yarn install --frozen-lockfile
+COPY frontend/package.json /app/
+# yarn.lock se omite porque no se versiona — se regenera durante el install.
+# Trade-off: el build NO es 100 % reproducible respecto a versiones minor de deps.
+RUN yarn install --network-timeout 600000
 
 COPY frontend/ /app/
 RUN yarn build
