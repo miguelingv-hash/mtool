@@ -94,6 +94,8 @@ frontend/node_modules/.cache/default-development/8.pack
 frontend/node_modules/.cache/default-development/10.pack
 .env.*
 *.env
+# Excepción: la plantilla pública del .env para Docker SÍ se versiona
+!deploy/.env.production.example
 credentials.json
 .credentials
 frontend/node_modules/.cache/default-development/2.pack
