@@ -1,5 +1,9 @@
 name: corporate-app
 
+# Las rutas relativas se resuelven desde el directorio donde está este archivo
+# (deploy/). Por eso `context: ..` apunta a la raíz del repo y los `volumes`
+# montados desde el host usan `../backend/...`.
+
 services:
   mongo:
     image: mongo:7
@@ -18,7 +22,7 @@ services:
 
   backend:
     build:
-      context: .
+      context: ..
       dockerfile: deploy/backend.Dockerfile
     restart: always
     env_file:
@@ -31,15 +35,15 @@ services:
       # Persistencia de PDFs generados (Tasas + Pagos Ventanilla)
       - backend_storage:/app/storage
       # Logos / certificados (móntalos desde host para fácil reemplazo)
-      - ./backend/assets:/app/assets:ro
-      - ./backend/certs:/app/certs:ro
+      - ../backend/assets:/app/assets:ro
+      - ../backend/certs:/app/certs:ro
     depends_on:
       mongo:
         condition: service_healthy
 
   frontend:
     build:
-      context: .
+      context: ..
       dockerfile: deploy/frontend.Dockerfile
       args:
         # IMPORTANTE: esta URL queda embebida en el bundle JS en build-time.
