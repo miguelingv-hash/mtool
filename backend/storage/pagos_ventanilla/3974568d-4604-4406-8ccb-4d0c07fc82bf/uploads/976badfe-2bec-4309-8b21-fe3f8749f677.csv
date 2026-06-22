@@ -1,0 +1,3 @@
+sociedad;nombre_cliente;cif_nif;direccion_social;direccion_suministro;cuenta_contrato;numero_factura;fecha_emision_factura;fecha_emision_doc;fecha_limite_pago;importe;validez_meses;sufijo;idioma,,,
+TTE;Pepe Perez Parez;12345678Z;Calle Mayor 5, 33012 Oviedo;CL Sagrado Corazón 12, 33208 Gijón;CC0001234;2026A0000123;13.03.2026;20.03.2026;20.05.2026;109,95;5;510;es
+BASER;Empresa Ejemplo S.L.;B12345678;Av. de la Costa 25, 33203 Gijón;Pol. Asipo Nave 12, 33428 Llanera;CC0007890;2026B0000456;05.02.2026;20.02.2026;20.04.2026;850,00;5;510;es
