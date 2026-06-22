@@ -3,6 +3,11 @@ FROM node:20-alpine AS build
 
 ARG REACT_APP_BACKEND_URL
 ENV REACT_APP_BACKEND_URL=$REACT_APP_BACKEND_URL
+# Sube el heap de Node a 3 GB para que webpack no muera (CRA es ávido de RAM).
+# Si tu host tiene <2 GB, añade swap antes (4 GB recomendado).
+ENV NODE_OPTIONS=--max-old-space-size=3072
+# Desactiva sourcemaps en build (-40 % RAM, -30 % tamaño bundle)
+ENV GENERATE_SOURCEMAP=false
 
 WORKDIR /app
 COPY frontend/package.json /app/
