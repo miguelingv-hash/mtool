@@ -1,0 +1,57 @@
+name: corporate-app
+
+services:
+  mongo:
+    image: mongo:7
+    restart: always
+    volumes:
+      - mongo_data:/data/db
+    # Sin puerto expuesto al host — sólo accesible desde la red interna.
+    # Si necesitas conectarte con Compass desde tu portátil descomenta:
+    # ports:
+    #   - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/backend.Dockerfile
+    restart: always
+    env_file:
+      - .env.production
+    environment:
+      # Forzamos la URL de Mongo al servicio interno (sobreescribe el .env si lo dejas).
+      # Comenta esta línea si usas MongoDB Atlas.
+      MONGO_URL: mongodb://mongo:27017
+    volumes:
+      # Persistencia de PDFs generados (Tasas + Pagos Ventanilla)
+      - backend_storage:/app/storage
+      # Logos / certificados (móntalos desde host para fácil reemplazo)
+      - ./backend/assets:/app/assets:ro
+      - ./backend/certs:/app/certs:ro
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/frontend.Dockerfile
+      args:
+        # IMPORTANTE: esta URL queda embebida en el bundle JS en build-time.
+        # Pon aquí tu dominio público (https://...).
+        REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost}
+    restart: always
+    ports:
+      - "80:80"
+      # Para HTTPS: usa Caddy/Traefik delante, o termina TLS en un ALB de AWS.
+    depends_on:
+      - backend
+
+volumes:
+  mongo_data:
+  backend_storage:

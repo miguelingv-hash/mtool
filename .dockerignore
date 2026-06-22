@@ -1,0 +1,36 @@
+# =============================================================================
+# .dockerignore — evita copiar basura a la imagen
+# =============================================================================
+**/.git
+**/.gitignore
+**/.DS_Store
+**/.env
+**/.env.*
+!.env.production.example
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.venv/
+**/venv/
+
+# Node
+**/node_modules/
+**/build/
+**/.cache/
+
+# IDE
+**/.vscode/
+**/.idea/
+**/*.swp
+
+# Datos locales (no queremos meter PDFs/dumps en la imagen)
+backend/storage/
+backend/certs/
+*.pfx
+*.p12
+
+# Tests + reports
+test_reports/
+**/test_*.py
