@@ -1,0 +1,40 @@
+# Caddyfile — HTTPS automático con Let's Encrypt
+#
+# El email es necesario para el registro ACME (recibirás avisos de expiración).
+# Sustituye `admin@example.com` por un email válido tuyo.
+{
+    email miguelingv@gmail.com
+}
+
+# Hostname público. sslip.io resuelve automáticamente a 3.125.115.81
+# (la IP está embebida en el propio hostname).
+3-125-115-81.sslip.io {
+    encode zstd gzip
+
+    # Subidas grandes (PDFs, CSVs)
+    request_body {
+        max_size 50MB
+    }
+
+    # API → backend FastAPI
+    @api path /api/*
+    reverse_proxy @api backend:8001 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # SPA — fallback a index.html
+    root * /usr/share/caddy
+    try_files {path} /index.html
+    file_server
+
+    # Cache fuerte para assets con hash
+    @static path_regexp \.(?:js|css|woff2?|ttf|otf|eot|svg|png|jpg|jpeg|gif|webp|ico)$
+    header @static Cache-Control "public, max-age=2592000, immutable"
+
+    # Healthcheck
+    handle /healthz {
+        respond "ok" 200
+    }
+}

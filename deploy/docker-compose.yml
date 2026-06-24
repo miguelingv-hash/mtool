@@ -47,17 +47,22 @@ services:
       dockerfile: deploy/frontend.Dockerfile
       args:
         # IMPORTANTE: esta URL queda embebida en el bundle JS en build-time.
-        # Pon aquí tu dominio público (https://...).
+        # Pon aquí tu hostname público con https://
         REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost}
     restart: always
     ports:
       - "80:80"
       - "443:443"
-      # Cert self-signed embebido en la imagen. Para usar Let's Encrypt con
-      # un dominio real, monta certs en /etc/nginx/certs y actualiza nginx.conf.
+    volumes:
+      # Persistencia de certificados Let's Encrypt entre reinicios
+      # (sin esto cada `up --force-recreate` pediría un cert nuevo y agotaría rate-limits)
+      - caddy_data:/data
+      - caddy_config:/config
     depends_on:
       - backend
 
 volumes:
   mongo_data:
   backend_storage:
+  caddy_data:
+  caddy_config:
