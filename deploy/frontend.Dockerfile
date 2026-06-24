@@ -21,11 +21,21 @@ RUN yarn build
 # ----------------------------------------------------------------------------
 FROM nginx:1.27-alpine
 
+# Genera certificado self-signed (válido 10 años) para HTTPS con IP literal.
+# Sustitúyelo montando /etc/nginx/certs cuando tengas un dominio real.
+RUN apk add --no-cache openssl && \
+    mkdir -p /etc/nginx/certs && \
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+      -keyout /etc/nginx/certs/selfsigned.key \
+      -out    /etc/nginx/certs/selfsigned.crt \
+      -subj "/CN=corporate-app" \
+      -addext "subjectAltName=IP:0.0.0.0,DNS:localhost"
+
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/build /usr/share/nginx/html
 
-EXPOSE 80
+EXPOSE 80 443
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-  CMD wget -qO- http://127.0.0.1/ > /dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1/healthz > /dev/null || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

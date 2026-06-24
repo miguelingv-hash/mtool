@@ -52,7 +52,9 @@ services:
     restart: always
     ports:
       - "80:80"
-      # Para HTTPS: usa Caddy/Traefik delante, o termina TLS en un ALB de AWS.
+      - "443:443"
+      # Cert self-signed embebido en la imagen. Para usar Let's Encrypt con
+      # un dominio real, monta certs en /etc/nginx/certs y actualiza nginx.conf.
     depends_on:
       - backend
 
