@@ -10,9 +10,12 @@ WORKDIR /app
 
 # Cache de pip
 COPY backend/requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r /app/requirements.txt && \
-    pip install --no-cache-dir emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/ || true
+
+# Filtra dependencias internas de Emergent que no son necesarias en producción
+# (emergentintegrations: índice privado no accesible desde EC2; litellm: asset interno; no se usan en el código)
+RUN grep -viE '^(emergentintegrations|litellm)([=@< ]|$)' /app/requirements.txt > /app/requirements.prod.txt && \
+    pip install --upgrade pip && \
+    pip install --no-cache-dir -r /app/requirements.prod.txt
 
 # Código backend
 COPY backend/ /app/
