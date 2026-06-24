@@ -100,19 +100,30 @@ def decode_token(token: str, expected_type: str) -> dict:
 # -----------------------------------------------------------------------------
 # Cookies
 # -----------------------------------------------------------------------------
+def _cookie_common() -> dict:
+    """Atributos de cookies leídos de entorno.
+
+    Defaults preparados para el editor de Emergent (iframe cross-site → HTTPS):
+    SameSite=None + Secure=True. En despliegues HTTP plano (EC2 sin TLS) hay
+    que poner COOKIE_SECURE=false y COOKIE_SAMESITE=lax o el navegador descarta
+    la cookie y se entra en bucle login → 401 → login.
+    """
+    samesite = (os.environ.get("COOKIE_SAMESITE") or "none").strip().lower()
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "none"
+    secure_env = (os.environ.get("COOKIE_SECURE") or "true").strip().lower()
+    secure = secure_env not in ("false", "0", "no", "off")
+    return {"httponly": True, "samesite": samesite, "secure": secure, "path": "/"}
+
+
 def set_auth_cookies(response: Response, access: str, refresh: str) -> None:
-    # SameSite=None+Secure es imprescindible cuando el frontend corre dentro
-    # de un iframe cross-site (editor de Emergent). `lax` no envía la cookie
-    # en peticiones AJAX cross-site y provoca un bucle login → 401 → login.
-    common = {"httponly": True, "samesite": "none", "secure": True, "path": "/"}
+    common = _cookie_common()
     response.set_cookie(COOKIE_ACCESS, access, max_age=ACCESS_TOKEN_MIN * 60, **common)
     response.set_cookie(COOKIE_REFRESH, refresh, max_age=REFRESH_TOKEN_DAYS * 86400, **common)
 
 
 def clear_auth_cookies(response: Response) -> None:
-    # Mismo trío de atributos que en set_auth_cookies para que el navegador
-    # invalide correctamente la cookie.
-    common = {"httponly": True, "samesite": "none", "secure": True, "path": "/"}
+    common = _cookie_common()
     response.set_cookie(COOKIE_ACCESS, "", max_age=0, **common)
     response.set_cookie(COOKIE_REFRESH, "", max_age=0, **common)
 
