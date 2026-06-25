@@ -55,7 +55,7 @@ export default function ForgotPassword() {
                 </AlertDescription>
               </Alert>
               <Link to="/login" className="block">
-                <Button variant="outline" className="w-full" data-testid="forgot-back-btn">
+                <Button variant="outline" className="w-full" data-testid="forgot-back-btn-success">
                   <ArrowLeft className="h-4 w-4 mr-2" /> Volver al login
                 </Button>
               </Link>
