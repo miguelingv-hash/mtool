@@ -186,9 +186,17 @@
   - `TasasMunicipios`: añadidos `name="codigo"` / `name="nombre"` para accesibilidad.
 - **Testing**: pytest backend `/app/backend/tests/test_tasas_api.py` con 17 tests (CRUD municipios, upload, generate, jobs, downloads, settings, RBAC) → 17/17 PASS. Frontend validado por testing agent + smoke tests propios: login, sidebar, Panel KPIs, Tasas upload+generate (CSV → 2 PDFs), Municipios listing, Ajustes (sólo admin), Job Detail (preview, descarga).
 
-### Backlog tras port Tasas Municipales
+### Feb 2026 — Bug fix: Newman CSV wrap perdía el delimitador `|`
+- **Síntoma reportado**: tras importar el CSV de Newman, multiples facturas mostraban `cuota_repercutida=null`, `tipo_impositivo` con valores no estándar (24.47), `contraparte_nif` con valores tipo nombre (`"Emiliano Morales Benito"`), `contraparte_nombre` concatenado con estado SII (`"DIAZ FRAILE JAVIERCorrecta"`), y `num_registro_presentacion` con timestamp terminando en `'`. Se reproducía como falso "Coincide" en la Comparativa cuando re-consultar unitariamente la misma factura traía los datos correctos vía SOAP y sobrescribía.
+- **Causa raíz**: en `backend/scripts/extraer_csv.py`, las regex `BORDER_LEFT_RE` y `BORDER_RIGHT_RE` incluían el pipe ASCII `|` como carácter de borde de tabla Newman. Pero ese pipe **es el delimitador de columnas** dentro de `CSVHEAD:`/`CSVROW:`. Cuando un wrap rompía la línea justo después de un `|`, ese pipe quedaba al borde y se eliminaba al limpiar. Al reensamblar, los valores de las celdas adyacentes quedaban pegados (`116.54` + `21` → `116.5421`) y todos los campos posteriores se desplazaban una posición a la derecha. El punto exacto del wrap variaba por fila, así que el desplazamiento afectaba distintos campos.
+- **Fix**: regex de bordes solo incluyen whitespace y `│` (U+2502, el verdadero borde Newman); ya no incluyen `|` ASCII. Cambio quirúrgico en `scripts/extraer_csv.py`.
+- **Tests**: nuevo `tests/test_extraer_csv_newman_wrap.py` con 3 casos (preservación del delimitador, no-desplazamiento de columnas posteriores, no-pérdida del primer pipe de una continuación) → 3/3 PASS. 49 tests pytest pre-existentes siguen verdes.
+- **Endpoint diagnóstico nuevo**: `POST /api/facturas/sii/diagnosticar-newman-wrap?aplicar=false|true` — detecta facturas con la signatura del bug (`num_registro_presentacion` terminando en `'`), devuelve muestra y opcionalmente sanea (separa nombre+estado concatenados, mueve csv_aeat-numérico desde estado_factura, recupera timestamp_presentacion). Requiere permiso `conciliacion.import`.
+- **BD saneada**: borradas 256 480 facturas con `fuente_ultima: 'conciliacion_newman'` (corruptas) + saneadas 3 con campos fantasma de Newman previo. Quedan 2 790 000 facturas y 0 con signatura del bug. El usuario re-importará desde los CSV regenerados con el `extraer_csv.py` corregido.
+
+### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.
-- **P2** Componetizar `Comparativa.jsx` (archivo enorme).
+- **P2** Componetizar `Comparativa.jsx` (archivo enorme, 1 590 líneas).
 - **P2** Alinear estilos de páginas Tasas con patrón Shadcn UI del resto.
 - **P2** Verificación de dominio en Resend para invitaciones a usuarios externos.
