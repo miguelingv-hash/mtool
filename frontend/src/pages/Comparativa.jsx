@@ -69,8 +69,20 @@ const PERIODOS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, 
 const labelOrigenComercial = (origen) => (origen === "SAP" ? "SAP FI" : origen);
 
 function DetalleIvaTable({ label, lineas, testIdSuffix }) {
-  const totalBase = lineas.reduce((a, li) => a + (li.base_imponible || 0), 0);
-  const totalCuota = lineas.reduce((a, li) => a + (li.cuota_repercutida || 0), 0);
+  // Orden por tipo IVA descendente (21, 10, 4, ...) con exentas/sin tipo al final.
+  // Así las dos tablas (SII y COMERCIAL) muestran las mismas categorías a la
+  // misma altura cuando hay tramos comparables.
+  const lineasOrdenadas = [...lineas].sort((a, b) => {
+    const ta = a.tipo_impositivo;
+    const tb = b.tipo_impositivo;
+    if (ta != null && tb != null) return tb - ta; // descendente
+    if (ta != null) return -1; // primero los que tienen tipo
+    if (tb != null) return 1;
+    // Ambos sin tipo: por causa_exencion ascendente (E1, E2, ...)
+    return String(a.causa_exencion || "").localeCompare(String(b.causa_exencion || ""));
+  });
+  const totalBase = lineasOrdenadas.reduce((a, li) => a + (li.base_imponible || 0), 0);
+  const totalCuota = lineasOrdenadas.reduce((a, li) => a + (li.cuota_repercutida || 0), 0);
   return (
     <div
       className="border border-slate-200"
@@ -98,7 +110,7 @@ function DetalleIvaTable({ label, lineas, testIdSuffix }) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {lineas.map((li, idx) => {
+          {lineasOrdenadas.map((li, idx) => {
             const esperada =
               li.base_imponible != null && li.tipo_impositivo != null
                 ? (li.base_imponible * li.tipo_impositivo) / 100
@@ -144,7 +156,7 @@ function DetalleIvaTable({ label, lineas, testIdSuffix }) {
               </TableRow>
             );
           })}
-          {lineas.length > 1 && (
+          {lineasOrdenadas.length > 1 && (
             <TableRow className="bg-slate-50 font-semibold">
               <TableCell className="text-xs uppercase tracking-wider text-slate-700">Totales</TableCell>
               <TableCell className="font-mono text-xs text-right">—</TableCell>
