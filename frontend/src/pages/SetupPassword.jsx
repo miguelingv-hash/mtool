@@ -67,7 +67,9 @@ export default function SetupPassword() {
           <div className="mx-auto h-10 w-10 rounded-full bg-slate-900 text-white flex items-center justify-center">
             <KeyRound className="h-5 w-5" />
           </div>
-          <CardTitle className="text-xl text-center">Establece tu contraseña</CardTitle>
+          <CardTitle className="text-xl text-center">
+            {tokenInfo?.motivo === "reset" ? "Restablece tu contraseña" : "Establece tu contraseña"}
+          </CardTitle>
         </CardHeader>
         <CardContent>
           {checking ? (
@@ -82,12 +84,17 @@ export default function SetupPassword() {
           ) : done ? (
             <Alert data-testid="setup-success">
               <CheckCircle2 className="h-4 w-4" />
-              <AlertDescription>¡Cuenta activada! Redirigiendo...</AlertDescription>
+              <AlertDescription>
+                {tokenInfo?.motivo === "reset"
+                  ? "¡Contraseña restablecida! Redirigiendo..."
+                  : "¡Cuenta activada! Redirigiendo..."}
+              </AlertDescription>
             </Alert>
           ) : (
             <form onSubmit={submit} className="space-y-4">
               <div className="text-sm text-muted-foreground">
-                Hola <strong>{tokenInfo?.name || tokenInfo?.email}</strong>, define tu contraseña.
+                Hola <strong>{tokenInfo?.name || tokenInfo?.email}</strong>,{" "}
+                {tokenInfo?.motivo === "reset" ? "define una contraseña nueva." : "define tu contraseña."}
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="pwd">Nueva contraseña</Label>
@@ -109,7 +116,7 @@ export default function SetupPassword() {
               ) : null}
               <Button type="submit" className="w-full" disabled={submitting} data-testid="setup-submit-btn">
                 {submitting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                Activar cuenta
+                {tokenInfo?.motivo === "reset" ? "Restablecer contraseña" : "Activar cuenta"}
               </Button>
             </form>
           )}

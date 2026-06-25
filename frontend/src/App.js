@@ -15,6 +15,7 @@ import Configuracion from "@/pages/Configuracion";
 import ConciliacionNewman from "@/pages/ConciliacionNewman";
 import Login from "@/pages/Login";
 import SetupPassword from "@/pages/SetupPassword";
+import ForgotPassword from "@/pages/ForgotPassword";
 import AdminUsuarios from "@/pages/AdminUsuarios";
 import AdminRoles from "@/pages/AdminRoles";
 import TasasPanel from "@/pages/tasas/TasasPanel";
@@ -34,6 +35,7 @@ function App() {
             {/* Públicas */}
             <Route path="/login" element={<Login />} />
             <Route path="/activar/:token" element={<SetupPassword />} />
+            <Route path="/olvide-password" element={<ForgotPassword />} />
 
             {/* Privadas */}
             <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
