@@ -839,12 +839,11 @@ async def conciliar_newman(
             "estado_factura": f.get("estado_factura"),
         })
 
-    # Lista completa de faltantes con todos los campos canónicos, capada por
-    # seguridad para no devolver megapayloads. El frontend la usará para
-    # importar en bloque sin volver a subir el CSV gigante.
-    MAX_FALTANTES_PAYLOAD = 100000
-    faltantes_completas = [filas_por_ns[ns] for ns in sorted(faltantes)[:MAX_FALTANTES_PAYLOAD]]
-    faltantes_truncado = len(faltantes) > MAX_FALTANTES_PAYLOAD
+    # Lista completa de faltantes con todos los campos canónicos. El frontend
+    # la trocea en lotes pequeños al llamar a `/importar-lote`, así no hay
+    # timeout independientemente del tamaño.
+    faltantes_completas = [filas_por_ns[ns] for ns in sorted(faltantes)]
+    faltantes_truncado = False
 
     extra_preview = sorted(extras)[:20]
 

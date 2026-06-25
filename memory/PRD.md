@@ -220,6 +220,13 @@
 - **Ordenación** de columnas (excepto "Campos con diferencias" por petición expresa). Click toggle: sin orden → desc → asc → sin orden. Default al primer clic: descendente (mayor a menor). Cliquéable en: Nº factura · Estado · Fecha expedición · Importe SII · Importe comercial.
 - Helper component `SortableHead` reutilizable. Estados `sortBy`/`sortDir` locales. La ordenación es client-side sobre `visibleItems`, estable, con null al final. Parser `DD-MM-YYYY → YYYYMMDD` para ordenación correcta de fechas.
 
+### Feb 2026 — Conciliación Newman: import sin límite de 100k + chunking + progreso
+- **Backend** (`/api/sii/conciliar-newman`): eliminado el cap `MAX_FALTANTES_PAYLOAD = 100000`. `faltantes_completas` devuelve TODAS las faltantes ordenadas. `faltantes_truncado` siempre `false` (campo conservado por compatibilidad).
+- **Frontend** (`ConciliacionNewman.jsx`): el botón "Importar N faltantes" trocea automáticamente el envío a `/importar-lote` en chunks de 10 000 facturas. Timeout por chunk: 3 minutos. Cada chunk es secuencial (no paralelo) para preservar consistencia de la BD.
+- **Progreso visible**: `Alert` con barra de progreso (`hechas / total` en %) y contador "lote X de Y". Se mantiene visible hasta que termina o falla.
+- **Manejo de errores**: si un chunk falla, el `toast` y el `Alert` indican cuántas se procesaron antes del fallo (`procesado X de Y`). La operación sigue siendo idempotente, así que el usuario puede reintentar sin duplicar.
+- **Dialogo de confirmación** actualizado: si hay > 10k faltantes, muestra "Se enviará en lotes de 10.000 con barra de progreso".
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.

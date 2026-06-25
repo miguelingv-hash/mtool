@@ -51,6 +51,7 @@ export default function ConciliacionNewman() {
   const [reporte, setReporte] = useState(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [importError, setImportError] = useState(null);
+  const [importProgress, setImportProgress] = useState(null); // {hechas, total} | null
 
   const reset = () => { setReporte(null); };
 
@@ -134,42 +135,70 @@ export default function ConciliacionNewman() {
     setConfirmOpen(false);
     const lote = reporte?.faltantes_completas || [];
     if (lote.length === 0) return;
+    const CHUNK_SIZE = 10_000;
+    const totalChunks = Math.ceil(lote.length / CHUNK_SIZE);
     setImporting(true);
     setImportError(null);
+    setImportProgress({ hechas: 0, total: lote.length, chunk: 0, totalChunks });
     // eslint-disable-next-line no-console
-    console.log(`[Conciliacion] Enviando lote de ${lote.length} facturas a /api/sii/conciliar-newman/importar-lote ...`);
+    console.log(
+      `[Conciliacion] Importando ${lote.length.toLocaleString("es-ES")} facturas en ${totalChunks} chunk(s) de ${CHUNK_SIZE}…`,
+    );
+    let insertadasTotal = 0;
+    const t0 = performance.now();
     try {
-      const t0 = performance.now();
-      const { data } = await api.post(
-        "/sii/conciliar-newman/importar-lote",
-        {
-          nif_titular: nifTitular.trim(),
-          nombre_titular: nombreTitular.trim() || undefined,
-          ejercicio: ejercicio || undefined,
-          periodo: periodo || undefined,
-          facturas: lote,
-        },
-        {
-          maxBodyLength: 256 * 1024 * 1024,
-          maxContentLength: 256 * 1024 * 1024,
-          timeout: 300_000,
-        },
-      );
+      for (let i = 0; i < lote.length; i += CHUNK_SIZE) {
+        const chunk = lote.slice(i, i + CHUNK_SIZE);
+        const chunkIndex = Math.floor(i / CHUNK_SIZE) + 1;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[Conciliacion] Chunk ${chunkIndex}/${totalChunks} (${chunk.length} facturas)…`,
+        );
+        const { data } = await api.post(
+          "/sii/conciliar-newman/importar-lote",
+          {
+            nif_titular: nifTitular.trim(),
+            nombre_titular: nombreTitular.trim() || undefined,
+            ejercicio: ejercicio || undefined,
+            periodo: periodo || undefined,
+            facturas: chunk,
+          },
+          {
+            maxBodyLength: 64 * 1024 * 1024,
+            maxContentLength: 64 * 1024 * 1024,
+            timeout: 180_000,
+          },
+        );
+        insertadasTotal += data.insertadas || 0;
+        setImportProgress({
+          hechas: Math.min(i + CHUNK_SIZE, lote.length),
+          total: lote.length,
+          chunk: chunkIndex,
+          totalChunks,
+        });
+      }
       const ms = Math.round(performance.now() - t0);
       // eslint-disable-next-line no-console
-      console.log(`[Conciliacion] OK en ${ms}ms ·`, data);
-      toast.success(`Importadas ${data.insertadas.toLocaleString("es-ES")} facturas en ${(ms/1000).toFixed(1)} s`);
+      console.log(`[Conciliacion] Import completo en ${ms}ms · ${insertadasTotal} insertadas`);
+      toast.success(
+        `Importadas ${insertadasTotal.toLocaleString("es-ES")} facturas en ${(ms / 1000).toFixed(1)} s (${totalChunks} chunk${totalChunks > 1 ? "s" : ""})`,
+      );
       await analizar();
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error("[Conciliacion] Error en import:", e);
-      const detalle = e?.response?.data?.detail || e?.response?.statusText || e?.message || "Error desconocido";
+      const detalle =
+        e?.response?.data?.detail || e?.response?.statusText || e?.message || "Error desconocido";
       const status = e?.response?.status;
       const msg = status ? `HTTP ${status} · ${detalle}` : detalle;
-      setImportError(msg);
-      toast.error(`Error al importar: ${msg}`, { duration: 10000 });
+      const procesado = importProgress
+        ? ` (procesado ${importProgress.hechas.toLocaleString("es-ES")} de ${importProgress.total.toLocaleString("es-ES")})`
+        : "";
+      setImportError(msg + procesado);
+      toast.error(`Error al importar: ${msg}${procesado}`, { duration: 10000 });
     } finally {
       setImporting(false);
+      setImportProgress(null);
     }
   };
 
@@ -268,6 +297,30 @@ export default function ConciliacionNewman() {
               </Button>
             ) : null}
           </div>
+
+          {importProgress ? (
+            <Alert data-testid="rec-import-progress">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <AlertDescription>
+                <div className="font-medium">
+                  Importando lote {importProgress.chunk} de {importProgress.totalChunks}…
+                </div>
+                <div className="text-xs mt-1 text-slate-600 tabular-nums">
+                  {importProgress.hechas.toLocaleString("es-ES")} de{" "}
+                  {importProgress.total.toLocaleString("es-ES")} facturas (
+                  {Math.round((importProgress.hechas / importProgress.total) * 100)}%)
+                </div>
+                <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-slate-900 transition-all duration-200"
+                    style={{
+                      width: `${(importProgress.hechas / importProgress.total) * 100}%`,
+                    }}
+                  />
+                </div>
+              </AlertDescription>
+            </Alert>
+          ) : null}
 
           {importError ? (
             <Alert variant="destructive" data-testid="rec-import-error">
@@ -391,10 +444,9 @@ export default function ConciliacionNewman() {
                 <div>
                   Vas a insertar <strong>{(reporte?.faltantes_completas?.length || 0).toLocaleString("es-ES")}</strong> facturas en la colección <code>facturas_sii</code>.
                 </div>
-                {reporte?.faltantes_truncado ? (
-                  <div className="text-amber-700">
-                    ⚠️ El reporte está truncado a 100.000 faltantes; tras esta importación deberás
-                    volver a analizar para procesar el resto.
+                {(reporte?.faltantes_completas?.length || 0) > 10000 ? (
+                  <div className="text-xs text-slate-600">
+                    Se enviará en lotes de 10.000 facturas con barra de progreso para evitar timeouts.
                   </div>
                 ) : null}
                 <div className="text-xs text-muted-foreground">
