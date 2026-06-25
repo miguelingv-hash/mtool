@@ -10,6 +10,8 @@ servidor con Docker (Amazon Linux 2023, Ubuntu, etc.) con **un solo comando**.
   nuevo despliegue.**
 - 🏗️ **[ARCHITECTURE.md](./ARCHITECTURE.md)** — Diagrama y descripción de
   componentes (frontend Caddy, backend FastAPI, MongoDB, integraciones).
+- 🤖 **[CI_CD_SETUP.md](./CI_CD_SETUP.md)** — Configurar GitHub Actions para
+  deploy automático en cada push a `main`.
 
 ## Contenido
 
@@ -17,6 +19,7 @@ servidor con Docker (Amazon Linux 2023, Ubuntu, etc.) con **un solo comando**.
 - `frontend.Dockerfile` — multi-stage Node 20 build → Caddy 2.8 alpine
 - `Caddyfile` — config Caddy del contenedor frontend (SPA + HTTPS automático)
 - `docker-compose.yml` — orquesta `mongo` + `backend` + `frontend`
+- `deploy.sh` — script idempotente que ejecuta el deploy en EC2
 - `.env.production.example` — plantilla de variables de entorno
 
 ## Despliegue paso a paso en EC2 (Amazon Linux 2023)

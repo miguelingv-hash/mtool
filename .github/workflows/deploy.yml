@@ -1,0 +1,84 @@
+# GitHub Actions — Deploy automático a AWS EC2
+#
+# Se ejecuta cuando haces push a `main`. SSH a la EC2 y lanza deploy/deploy.sh.
+#
+# Configuración necesaria en GitHub:
+#   Settings → Secrets and variables → Actions → New repository secret
+#     • EC2_HOST       → 3.125.115.81
+#     • EC2_USER       → ec2-user
+#     • EC2_SSH_KEY    → contenido completo de la clave privada .pem
+#                        (incluyendo -----BEGIN/END RSA PRIVATE KEY-----)
+#
+# También puedes dispararlo manualmente desde la pestaña Actions de GitHub.
+
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Solo redespliega si cambia algo relevante (no docs sueltas)
+      - 'backend/**'
+      - 'frontend/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Forzar build sin caché Docker (--no-cache)'
+        type: boolean
+        default: false
+
+# Cancela despliegues en curso si llega uno nuevo
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout (sólo para mostrar info)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Mostrar commit info
+        run: |
+          echo "Commit:  $(git log -1 --format='%H')"
+          echo "Author:  $(git log -1 --format='%an <%ae>')"
+          echo "Message: $(git log -1 --format='%s')"
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          timeout: 60s
+          command_timeout: 15m
+          envs: GITHUB_SHA,GITHUB_PREVIOUS_SHA,FORCE_REBUILD
+          script: |
+            set -e
+            export GITHUB_SHA="${{ github.sha }}"
+            export GITHUB_PREVIOUS_SHA="${{ github.event.before }}"
+            export FORCE_REBUILD="${{ github.event.inputs.force_rebuild == 'true' && '1' || '' }}"
+            cd ~/corporate-app
+            ./deploy/deploy.sh
+
+      - name: Smoke test público
+        run: |
+          set -e
+          URL="https://3-125-115-81.sslip.io/api/auth/me"
+          echo "Smoke test → $URL"
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$URL")
+          echo "HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" != "401" ]; then
+            echo "❌ Esperaba 401, obtuve $HTTP_CODE"
+            exit 1
+          fi
+          echo "✅ Backend público responde correctamente"
