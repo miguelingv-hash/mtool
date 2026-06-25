@@ -2178,10 +2178,22 @@ async def comparativa_totales(
         cuota = float(doc.get("cuota_repercutida") or 0)
         return base, cuota
 
+    def _fecha_ord(fecha_str: str | None) -> tuple[int, int, int] | None:
+        """Convierte `DD-MM-YYYY` → tupla ordenable (YYYY, MM, DD)."""
+        if not isinstance(fecha_str, str):
+            return None
+        try:
+            d, m, y = fecha_str.split("-")
+            return (int(y), int(m), int(d))
+        except (ValueError, AttributeError):
+            return None
+
     # --- SII ---
     sii_base = 0.0
     sii_cuota = 0.0
     sii_n = 0
+    sii_ultima_fecha: str | None = None
+    sii_ultima_orden: tuple[int, int, int] | None = None
     cursor = _db.facturas_sii.find(
         filtro_sii,
         {
@@ -2189,6 +2201,7 @@ async def comparativa_totales(
             "base_imponible": 1,
             "cuota_repercutida": 1,
             "detalle_iva": 1,
+            "fecha_expedicion": 1,
         },
     )
     async for d in cursor:
@@ -2196,6 +2209,10 @@ async def comparativa_totales(
         sii_base += b
         sii_cuota += c
         sii_n += 1
+        ordn = _fecha_ord(d.get("fecha_expedicion"))
+        if ordn and (sii_ultima_orden is None or ordn > sii_ultima_orden):
+            sii_ultima_orden = ordn
+            sii_ultima_fecha = d.get("fecha_expedicion")
 
     # --- Comercial por origen ---
     inv_map = config.get("invertir_signo_por_origen") or {}
@@ -2208,6 +2225,7 @@ async def comparativa_totales(
             "cuota_repercutida": 1,
             "detalle_iva": 1,
             "origen_comercial": 1,
+            "fecha_expedicion": 1,
         },
     )
     async for d in cursor:
@@ -2217,11 +2235,22 @@ async def comparativa_totales(
             b, c = -b, -c
         bucket = por_origen.setdefault(
             origen,
-            {"base": 0.0, "cuota": 0.0, "n_facturas": 0, "invertido": bool(inv_map.get(origen))},
+            {
+                "base": 0.0,
+                "cuota": 0.0,
+                "n_facturas": 0,
+                "invertido": bool(inv_map.get(origen)),
+                "ultima_fecha_expedicion": None,
+                "_orden": None,
+            },
         )
         bucket["base"] += b
         bucket["cuota"] += c
         bucket["n_facturas"] += 1
+        ordn = _fecha_ord(d.get("fecha_expedicion"))
+        if ordn and (bucket["_orden"] is None or ordn > bucket["_orden"]):
+            bucket["_orden"] = ordn
+            bucket["ultima_fecha_expedicion"] = d.get("fecha_expedicion")
 
     # --- Comercial total (Σ orígenes, ya con inversión aplicada) ---
     com_base = sum(o["base"] for o in por_origen.values())
@@ -2242,6 +2271,7 @@ async def comparativa_totales(
             "base": round(sii_base, 2),
             "cuota": round(sii_cuota, 2),
             "n_facturas": sii_n,
+            "ultima_fecha_expedicion": sii_ultima_fecha,
         },
         "comercial_por_origen": {
             k: {
@@ -2249,6 +2279,7 @@ async def comparativa_totales(
                 "cuota": round(v["cuota"], 2),
                 "n_facturas": v["n_facturas"],
                 "invertido": v["invertido"],
+                "ultima_fecha_expedicion": v["ultima_fecha_expedicion"],
             }
             for k, v in sorted(por_origen.items())
         },

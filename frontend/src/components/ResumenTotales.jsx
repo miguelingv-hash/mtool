@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { Loader2, RefreshCw, ArrowDownUp, AlertTriangle } from "lucide-react";
+import { Loader2, RefreshCw, ArrowDownUp, AlertTriangle, CalendarClock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
@@ -45,7 +45,7 @@ function formatPct(value) {
   }).format(value);
 }
 
-function ColumnaTotales({ titulo, sub, base, cuota, n, diff, testId }) {
+function ColumnaTotales({ titulo, sub, base, cuota, n, ultimaFecha, diff, testId }) {
   const isDiff = diff && (Math.abs(diff.base) > 0.005 || Math.abs(diff.cuota) > 0.005);
   return (
     <div
@@ -84,6 +84,17 @@ function ColumnaTotales({ titulo, sub, base, cuota, n, diff, testId }) {
           </div>
         </div>
       </div>
+      {ultimaFecha !== undefined && (
+        <div className="mt-1 pt-1.5 border-t border-slate-100 flex items-center gap-1.5">
+          <CalendarClock className="h-3 w-3 text-slate-400" />
+          <span className="text-[10px] uppercase text-slate-500 tracking-wider">
+            Última factura
+          </span>
+          <span className="text-[11px] font-mono text-slate-700 tabular-nums ml-auto">
+            {ultimaFecha || "—"}
+          </span>
+        </div>
+      )}
       {isDiff && (
         <div className="mt-1 pt-2 border-t border-rose-200 space-y-0.5">
           <div className="text-[10px] uppercase text-rose-700 tracking-wider flex items-center gap-1">
@@ -234,6 +245,7 @@ export default function ResumenTotales({ filtros }) {
             base={sii?.base}
             cuota={sii?.cuota}
             n={sii?.n_facturas}
+            ultimaFecha={sii?.ultima_fecha_expedicion}
             testId="totales-sii"
           />
           {origenesOrden.map((origen) => {
@@ -246,6 +258,7 @@ export default function ResumenTotales({ filtros }) {
                 base={o.base}
                 cuota={o.cuota}
                 n={o.n_facturas}
+                ultimaFecha={o.ultima_fecha_expedicion}
                 testId={`totales-origen-${origen.toLowerCase()}`}
               />
             );
