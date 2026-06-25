@@ -5,6 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { Loader2, Save, RotateCcw, Settings } from "lucide-react";
+import { labelOrigenComercial } from "@/lib/origenes";
 
 // Etiquetas legibles para cada campo canónico
 const FIELD_LABELS = {
@@ -227,7 +228,7 @@ export default function Configuracion() {
                 >
                   <div>
                     <div className="font-mono text-sm font-semibold text-slate-800">
-                      {origen}
+                      {labelOrigenComercial(origen)}
                     </div>
                     <div className="text-[11px] text-slate-500 mt-0.5">
                       Multiplicar importes del comercial por −1 antes de comparar

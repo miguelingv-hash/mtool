@@ -46,6 +46,7 @@ import {
 import { toast } from "sonner";
 import CertUploader from "@/components/CertUploader";
 import { useEnv } from "@/contexts/EnvContext";
+import { labelOrigenComercial } from "@/lib/origenes";
 
 const ESTADO_PILL = {
   coincide: { label: "Coincide", cls: "pill-success", Icon: CheckCircle2 },
@@ -64,9 +65,7 @@ const ESTADO_PILL = {
 
 const PERIODOS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
 
-// Etiqueta visible del origen comercial. Internamente se almacena "SAP" pero
-// en UI debe mostrarse como "SAP FI" para reflejar el módulo de origen.
-const labelOrigenComercial = (origen) => (origen === "SAP" ? "SAP FI" : origen);
+// Etiqueta visible del origen comercial: ver helper en @/lib/origenes.
 
 function DetalleIvaTable({ label, lineas, testIdSuffix }) {
   // Orden por tipo IVA descendente (21, 10, 4, ...) con exentas/sin tipo al final.
@@ -131,7 +130,7 @@ function DetalleIvaTable({ label, lineas, testIdSuffix }) {
                 }
               >
                 <TableCell className="text-xs text-slate-600">
-                  {li.origen || "—"}
+                  {labelOrigenComercial(li.origen) || "—"}
                   {li.causa_exencion && (
                     <span
                       className="ml-1 text-[10px] uppercase tracking-wider bg-amber-100 text-amber-800 px-1.5 py-0.5"
