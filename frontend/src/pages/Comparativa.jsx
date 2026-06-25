@@ -169,6 +169,85 @@ const tieneIvaIncorrecto = (row) => {
   });
 };
 
+/**
+ * Comparación de líneas IVA emparejadas por tipo impositivo / causa de exención.
+ * Recibe el array `diferencias.detalle_iva` que devuelve el backend.
+ * Cada elemento tiene: {key:{tipo?,causa_exencion?}, sii:{base,cuota}, comercial:{base,cuota}, diff:bool}
+ */
+function LineasIvaCompare({ tramos }) {
+  if (!Array.isArray(tramos) || tramos.length === 0) return null;
+  const fmt = (v) => (v == null ? "—" : Number(v).toFixed(2));
+  const labelKey = (k) => {
+    if (!k) return "—";
+    if (k.tipo != null) return `Tipo ${Number(k.tipo).toFixed(2)} %`;
+    if (k.causa_exencion) return `Exenta · ${k.causa_exencion}`;
+    return "Otro";
+  };
+  return (
+    <div
+      className="border border-slate-200 mt-6"
+      data-testid="lineas-iva-compare"
+    >
+      <div className="px-4 py-2 bg-slate-900 text-white border-b border-slate-200 flex items-center justify-between">
+        <div className="text-xs uppercase tracking-wider font-semibold">
+          Comparación de líneas IVA
+        </div>
+        <div className="text-[11px] text-slate-300">
+          Emparejadas por tipo / causa de exención
+        </div>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow className="bg-slate-50 hover:bg-slate-50">
+            <TableHead className="text-xs uppercase tracking-wider">Tramo</TableHead>
+            <TableHead className="text-xs uppercase tracking-wider text-right">SII · Base</TableHead>
+            <TableHead className="text-xs uppercase tracking-wider text-right">SII · Cuota</TableHead>
+            <TableHead className="text-xs uppercase tracking-wider text-right">Comercial · Base</TableHead>
+            <TableHead className="text-xs uppercase tracking-wider text-right">Comercial · Cuota</TableHead>
+            <TableHead className="text-xs uppercase tracking-wider w-24">Estado</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {tramos.map((t, idx) => {
+            const sii = t.sii;
+            const com = t.comercial;
+            return (
+              <TableRow
+                key={idx}
+                className={t.diff ? "bg-rose-50/60" : "bg-emerald-50/40"}
+                data-testid={`tramo-row-${idx}`}
+              >
+                <TableCell className="text-xs text-slate-700 font-medium">
+                  {labelKey(t.key)}
+                </TableCell>
+                <TableCell className="font-mono text-xs tabular-nums text-right">
+                  {sii ? fmt(sii.base_imponible) : <span className="text-slate-400 italic">—</span>}
+                </TableCell>
+                <TableCell className="font-mono text-xs tabular-nums text-right">
+                  {sii ? fmt(sii.cuota_repercutida) : <span className="text-slate-400 italic">—</span>}
+                </TableCell>
+                <TableCell className="font-mono text-xs tabular-nums text-right">
+                  {com ? fmt(com.base_imponible) : <span className="text-slate-400 italic">solo SII</span>}
+                </TableCell>
+                <TableCell className="font-mono text-xs tabular-nums text-right">
+                  {com ? fmt(com.cuota_repercutida) : <span className="text-slate-400 italic">—</span>}
+                </TableCell>
+                <TableCell className="text-xs">
+                  {t.diff ? (
+                    <span className="text-rose-700 font-semibold">Discrepancia</span>
+                  ) : (
+                    <span className="text-emerald-700 font-semibold">Coincide</span>
+                  )}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 export default function Comparativa() {
   const { entorno } = useEnv();
   const location = useLocation();
@@ -1258,6 +1337,14 @@ export default function Comparativa() {
                   </TableBody>
                 </Table>
               </div>
+
+              {(() => {
+                const tramos = Array.isArray(detail?.diferencias?.detalle_iva)
+                  ? detail.diferencias.detalle_iva
+                  : null;
+                if (!tramos) return null;
+                return <LineasIvaCompare tramos={tramos} />;
+              })()}
 
               {(() => {
                 const sii = Array.isArray(detail.sii?.detalle_iva)
