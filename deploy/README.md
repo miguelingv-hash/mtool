@@ -3,10 +3,19 @@
 Esta carpeta contiene todo lo necesario para levantar la aplicación en cualquier
 servidor con Docker (Amazon Linux 2023, Ubuntu, etc.) con **un solo comando**.
 
+## 📚 Documentación
+
+- 📘 **[DEPLOY_GUIDE.md](./DEPLOY_GUIDE.md)** — Guía paso a paso para
+  re-desplegar cambios desde Emergent → EC2. **Empieza aquí si vas a hacer un
+  nuevo despliegue.**
+- 🏗️ **[ARCHITECTURE.md](./ARCHITECTURE.md)** — Diagrama y descripción de
+  componentes (frontend Caddy, backend FastAPI, MongoDB, integraciones).
+
 ## Contenido
+
 - `backend.Dockerfile` — imagen Python 3.11 + FastAPI + uvicorn
-- `frontend.Dockerfile` — multi-stage Node 20 build → nginx alpine
-- `nginx.conf` — config nginx del contenedor frontend (sirve SPA + proxy `/api/*`)
+- `frontend.Dockerfile` — multi-stage Node 20 build → Caddy 2.8 alpine
+- `Caddyfile` — config Caddy del contenedor frontend (SPA + HTTPS automático)
 - `docker-compose.yml` — orquesta `mongo` + `backend` + `frontend`
 - `.env.production.example` — plantilla de variables de entorno
 
