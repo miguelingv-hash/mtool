@@ -580,6 +580,55 @@ _NEWMAN_NUMERIC = {
     "importe_total", "base_imponible", "tipo_impositivo", "cuota_repercutida",
 }
 
+# Tipos de IVA legales en España (con un pequeño margen por si AEAT introduce
+# otros tramos). Cualquier valor fuera de este rango se considera ruido del CSV
+# (típicamente por celdas concatenadas en el export de Newman/Postman).
+_TIPO_IMPOSITIVO_RANGO_VALIDO = (0.0, 30.0)
+
+
+def _sanear_tipo_y_cuota(doc: dict) -> Optional[str]:
+    """Detecta y mitiga celdas concatenadas en `tipo_impositivo`.
+
+    Caso conocido en exports Newman bug: la celda TipoImpositivo trae el tipo y
+    la cuota juntos sin separador, p.ej. "21" + "1.84" → 211.84.
+    Si `tipo_impositivo` está fuera del rango legal y `cuota_repercutida` es
+    None, intenta reconstruirlo: separa el "21" inicial y deja el resto como
+    cuota. Si no se puede, descarta ambos campos (deja None) para evitar
+    diferencias espurias en la comparativa.
+
+    Devuelve una descripción del saneado (o None si no fue necesario).
+    """
+    t = doc.get("tipo_impositivo")
+    if t is None:
+        return None
+    try:
+        tf = float(t)
+    except (TypeError, ValueError):
+        doc["tipo_impositivo"] = None
+        return "tipo_impositivo no numérico → null"
+    lo, hi = _TIPO_IMPOSITIVO_RANGO_VALIDO
+    if lo <= tf <= hi:
+        return None
+    # Anómalo. Intenta separar prefijo "21" / "10" / "4" / "5" / "7" / "0".
+    s = f"{tf:.2f}".rstrip("0").rstrip(".")
+    for prefijo in ("21", "10", "7", "5", "4", "0"):
+        if s.startswith(prefijo) and len(s) > len(prefijo):
+            resto = s[len(prefijo):].lstrip(".")
+            try:
+                # Reconstruye "1.84" desde "184" o "1.84"
+                cuota_val = float(f"0.{resto}") if "." not in resto else float(resto)
+                doc["tipo_impositivo"] = float(prefijo)
+                if doc.get("cuota_repercutida") is None:
+                    doc["cuota_repercutida"] = round(cuota_val, 2)
+                return (
+                    f"tipo_impositivo anómalo {tf} → {prefijo} + cuota {cuota_val} "
+                    f"(celdas Newman concatenadas)"
+                )
+            except ValueError:
+                pass
+    doc["tipo_impositivo"] = None
+    return f"tipo_impositivo fuera de rango ({tf}) → null"
+
 
 def _parse_amount_es(raw) -> Optional[float]:
     """Acepta '1.234,56', '1234,56', '1234.56'. Vacío → None."""
@@ -679,6 +728,13 @@ def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str)
         # sean estables aunque AEAT/Newman emitan '5' sin zero-padding.
         if doc.get("periodo"):
             doc["periodo"] = _norm_periodo(doc["periodo"])
+        # Saneado: el export Newman tiene un bug por el cual a veces concatena
+        # TipoImpositivo + CuotaRepercutida en la misma celda (p.ej. "211.84"
+        # cuando debería ser tipo=21, cuota=1.84). Detectamos valores fuera del
+        # rango legal y tratamos de reconstruir.
+        warn = _sanear_tipo_y_cuota(doc)
+        if warn:
+            errores.append(f"Fila {idx} ({doc.get('num_serie_factura')}): {warn}")
         doc["nif_titular"] = nif_titular
         if nombre_titular:
             doc["nombre_titular"] = nombre_titular
@@ -935,6 +991,81 @@ async def conciliar_newman_importar_lote(payload: dict):
         },
         "recibidas": len(facturas),
         "insertadas": insertadas,
+    }
+
+
+@router.post("/facturas/sii/limpiar-tipo-impositivo-anomalo")
+async def limpiar_tipo_impositivo_anomalo(dry_run: bool = True) -> dict:
+    """Limpia registros con `tipo_impositivo` fuera del rango legal [0, 30].
+
+    Causa conocida: el export Newman/Postman a veces concatena
+    TipoImpositivo + CuotaRepercutida en una celda (p.ej. "211.84" cuando
+    debería ser tipo=21, cuota=1.84). Este endpoint repara la BD aplicando la
+    heurística de `_sanear_tipo_y_cuota` a las facturas ya cargadas.
+
+    - `dry_run=true` (default): cuenta cuántas se afectarían sin escribir.
+    - `dry_run=false`: aplica los cambios y devuelve el contador real.
+
+    Solo opera sobre `facturas_sii`. Las facturas comerciales no se tocan.
+    """
+    from pymongo import UpdateOne  # noqa: WPS433
+
+    lo, hi = _TIPO_IMPOSITIVO_RANGO_VALIDO
+    filtro = {
+        "$or": [
+            {"tipo_impositivo": {"$gt": hi}},
+            {"tipo_impositivo": {"$lt": lo}},
+        ]
+    }
+    total = await _db.facturas_sii.count_documents(filtro)
+    if total == 0 or dry_run:
+        return {
+            "encontradas": total,
+            "actualizadas": 0,
+            "dry_run": dry_run,
+            "mensaje": (
+                "Dry run — pasa ?dry_run=false para aplicar"
+                if dry_run else "Nada que limpiar"
+            ),
+        }
+
+    reparadas = 0
+    descartadas = 0
+    cursor = _db.facturas_sii.find(
+        filtro,
+        {"_id": 1, "num_serie_factura": 1, "tipo_impositivo": 1, "cuota_repercutida": 1},
+    )
+    ops: list = []
+    async for d in cursor:
+        antes_tipo = d.get("tipo_impositivo")
+        sane = {"tipo_impositivo": antes_tipo, "cuota_repercutida": d.get("cuota_repercutida")}
+        _sanear_tipo_y_cuota(sane)
+        if sane["tipo_impositivo"] != antes_tipo:
+            if sane["tipo_impositivo"] is not None:
+                reparadas += 1
+            else:
+                descartadas += 1
+            ops.append(
+                UpdateOne(
+                    {"_id": d["_id"]},
+                    {"$set": {
+                        "tipo_impositivo": sane["tipo_impositivo"],
+                        "cuota_repercutida": sane["cuota_repercutida"],
+                    }},
+                )
+            )
+            if len(ops) >= 1000:
+                await _db.facturas_sii.bulk_write(ops, ordered=False)
+                ops = []
+    if ops:
+        await _db.facturas_sii.bulk_write(ops, ordered=False)
+
+    return {
+        "encontradas": total,
+        "actualizadas": reparadas + descartadas,
+        "reparadas_con_cuota_extraida": reparadas,
+        "descartadas_a_null": descartadas,
+        "dry_run": False,
     }
 
 
