@@ -215,6 +215,11 @@
   - Cada columna muestra base + cuota + nº facturas. La columna Σ Comercial pinta fondo rojo y badge "Diferencia vs SII" cuando hay desviación.
 - **Probado E2E** con datos dummy: 100% conciliado verde + escenario con discrepancia 0,01€ → banner ámbar 99,97% + columna Σ Comercial sombreada en rojo con diff visible.
 
+### Feb 2026 — Tabla Comparativa: nueva columna "Fecha expedición" + ordenación de columnas
+- **Nueva columna** "Fecha expedición" entre "Estado" e "Importe SII". Muestra `r.sii?.fecha_expedicion` (o `r.comercial?.fecha_expedicion` si la SII es null).
+- **Ordenación** de columnas (excepto "Campos con diferencias" por petición expresa). Click toggle: sin orden → desc → asc → sin orden. Default al primer clic: descendente (mayor a menor). Cliquéable en: Nº factura · Estado · Fecha expedición · Importe SII · Importe comercial.
+- Helper component `SortableHead` reutilizable. Estados `sortBy`/`sortDir` locales. La ordenación es client-side sobre `visibleItems`, estable, con null al final. Parser `DD-MM-YYYY → YYYYMMDD` para ordenación correcta de fechas.
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.

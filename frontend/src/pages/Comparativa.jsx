@@ -42,6 +42,9 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import CertUploader from "@/components/CertUploader";
@@ -265,6 +268,29 @@ function LineasIvaCompare({ tramos }) {
   );
 }
 
+function SortableHead({ label, sortKey, sortBy, sortDir, onClick, align }) {
+  const active = sortBy === sortKey;
+  const Icon = !active ? ArrowUpDown : sortDir === "desc" ? ArrowDown : ArrowUp;
+  return (
+    <TableHead
+      className={`text-xs uppercase tracking-wider cursor-pointer select-none hover:bg-slate-100 transition-colors ${
+        align === "right" ? "text-right" : ""
+      }`}
+      onClick={() => onClick(sortKey)}
+      data-testid={`sort-${sortKey}`}
+    >
+      <span
+        className={`inline-flex items-center gap-1 ${
+          align === "right" ? "justify-end" : ""
+        } ${active ? "text-slate-900" : "text-slate-600"}`}
+      >
+        {label}
+        <Icon className={`h-3 w-3 ${active ? "opacity-100" : "opacity-40"}`} />
+      </span>
+    </TableHead>
+  );
+}
+
 export default function Comparativa() {
   const { entorno } = useEnv();
   const location = useLocation();
@@ -285,6 +311,8 @@ export default function Comparativa() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [loading, setLoading] = useState(false);
+  const [sortBy, setSortBy] = useState(null);   // 'num_serie_factura' | 'estado' | 'importe_sii' | 'importe_comercial' | 'fecha_expedicion' | null
+  const [sortDir, setSortDir] = useState("desc"); // 'asc' | 'desc'
   const [detail, setDetail] = useState(null);
 
   // Form consulta mensual
@@ -622,6 +650,64 @@ export default function Comparativa() {
   };
 
   const visibleItems = onlyIvaErr ? items.filter(tieneIvaIncorrecto) : items;
+
+  // Sort de la tabla. `sortBy` es la clave de columna; `sortDir` 'asc'|'desc'.
+  // 'Campos con diferencias' no es ordenable por petición expresa del usuario.
+  const sortedItems = (() => {
+    if (!sortBy) return visibleItems;
+    const dir = sortDir === "asc" ? 1 : -1;
+    const getVal = (r) => {
+      switch (sortBy) {
+        case "num_serie_factura":
+          return r.num_serie_factura ?? "";
+        case "estado":
+          return r.estado ?? "";
+        case "importe_sii":
+          return r.sii?.importe_total ?? null;
+        case "importe_comercial":
+          return r.comercial?.importe_total ?? null;
+        case "fecha_expedicion": {
+          // Devuelve una tupla ordenable (Y, M, D) a partir de "DD-MM-YYYY".
+          // Prioriza SII; si no hay, cae al comercial.
+          const fe =
+            r.sii?.fecha_expedicion || r.comercial?.fecha_expedicion;
+          if (typeof fe !== "string") return null;
+          const m = fe.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+          if (!m) return null;
+          return Number(`${m[3]}${m[2]}${m[1]}`);
+        }
+        default:
+          return null;
+      }
+    };
+    // Stable sort
+    return [...visibleItems].sort((a, b) => {
+      const va = getVal(a);
+      const vb = getVal(b);
+      // null/undefined siempre al final independientemente de la dirección
+      if (va === null || va === undefined)
+        return vb === null || vb === undefined ? 0 : 1;
+      if (vb === null || vb === undefined) return -1;
+      if (typeof va === "number" && typeof vb === "number") {
+        return (va - vb) * dir;
+      }
+      return String(va).localeCompare(String(vb), "es", { numeric: true }) * dir;
+    });
+  })();
+
+  const toggleSort = (key) => {
+    if (sortBy === key) {
+      // mismo campo → toggle dir; tercer click → quita ordenación
+      if (sortDir === "desc") setSortDir("asc");
+      else {
+        setSortBy(null);
+        setSortDir("desc");
+      }
+    } else {
+      setSortBy(key);
+      setSortDir("desc"); // primer click siempre descendente (mayor a menor)
+    }
+  };
 
   return (
     <div className="px-8 py-8 max-w-[1500px]">
@@ -1102,14 +1188,43 @@ export default function Comparativa() {
         <Table>
           <TableHeader>
             <TableRow className="bg-slate-50 hover:bg-slate-50">
-              <TableHead className="text-xs uppercase tracking-wider">Nº factura</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Estado</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider text-right">
-                Importe SII
-              </TableHead>
-              <TableHead className="text-xs uppercase tracking-wider text-right">
-                Importe comercial
-              </TableHead>
+              <SortableHead
+                label="Nº factura"
+                sortKey="num_serie_factura"
+                sortBy={sortBy}
+                sortDir={sortDir}
+                onClick={toggleSort}
+              />
+              <SortableHead
+                label="Estado"
+                sortKey="estado"
+                sortBy={sortBy}
+                sortDir={sortDir}
+                onClick={toggleSort}
+              />
+              <SortableHead
+                label="Fecha expedición"
+                sortKey="fecha_expedicion"
+                sortBy={sortBy}
+                sortDir={sortDir}
+                onClick={toggleSort}
+              />
+              <SortableHead
+                label="Importe SII"
+                sortKey="importe_sii"
+                sortBy={sortBy}
+                sortDir={sortDir}
+                onClick={toggleSort}
+                align="right"
+              />
+              <SortableHead
+                label="Importe comercial"
+                sortKey="importe_comercial"
+                sortBy={sortBy}
+                sortDir={sortDir}
+                onClick={toggleSort}
+                align="right"
+              />
               <TableHead className="text-xs uppercase tracking-wider">
                 Campos con diferencias
               </TableHead>
@@ -1119,13 +1234,13 @@ export default function Comparativa() {
           <TableBody>
             {loading ? (
               <TableRow>
-                <TableCell colSpan={6} className="text-center py-10 text-slate-500">
+                <TableCell colSpan={7} className="text-center py-10 text-slate-500">
                   Cargando…
                 </TableCell>
               </TableRow>
-            ) : visibleItems.length === 0 ? (
+            ) : sortedItems.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="text-center py-10 text-slate-500">
+                <TableCell colSpan={7} className="text-center py-10 text-slate-500">
                   {onlyIvaErr
                     ? "Ninguna factura con redondeo IVA incorrecto"
                     : filtroEstado === "diffs"
@@ -1142,7 +1257,7 @@ export default function Comparativa() {
                 </TableCell>
               </TableRow>
             ) : (
-              visibleItems.map((r) => {
+              sortedItems.map((r) => {
                 const meta = ESTADO_PILL[r.estado];
                 const Icon = meta.Icon;
                 return (
@@ -1158,6 +1273,11 @@ export default function Comparativa() {
                       <span className={`pill ${meta.cls}`}>
                         <Icon className="h-3 w-3" /> {meta.label}
                       </span>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs tabular-nums text-slate-700">
+                      {r.sii?.fecha_expedicion ||
+                        r.comercial?.fecha_expedicion ||
+                        "—"}
                     </TableCell>
                     <TableCell className="font-mono text-xs tabular-nums text-right">
                       {r.sii?.importe_total != null
