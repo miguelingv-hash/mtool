@@ -1,7 +1,6 @@
 # Caddyfile — HTTPS automático con Let's Encrypt
 #
 # El email es necesario para el registro ACME (recibirás avisos de expiración).
-# Sustituye `admin@example.com` por un email válido tuyo.
 {
     email miguelingv@gmail.com
 }
@@ -16,25 +15,28 @@
         max_size 50MB
     }
 
-    # API → backend FastAPI
-    @api path /api/*
-    reverse_proxy @api backend:8001 {
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-    }
-
-    # SPA — fallback a index.html
-    root * /usr/share/caddy
-    try_files {path} /index.html
-    file_server
-
-    # Cache fuerte para assets con hash
+    # Cache fuerte para assets con hash (no para index.html)
     @static path_regexp \.(?:js|css|woff2?|ttf|otf|eot|svg|png|jpg|jpeg|gif|webp|ico)$
     header @static Cache-Control "public, max-age=2592000, immutable"
 
-    # Healthcheck
+    # Healthcheck (responde antes que todo lo demás)
     handle /healthz {
         respond "ok" 200
+    }
+
+    # API → backend FastAPI (handle EXCLUSIVO, no continúa al siguiente bloque)
+    handle /api/* {
+        reverse_proxy backend:8001 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # SPA — todo lo demás cae aquí (handle por defecto)
+    handle {
+        root * /usr/share/caddy
+        try_files {path} /index.html
+        file_server
     }
 }
