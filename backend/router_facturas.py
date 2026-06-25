@@ -16,7 +16,7 @@ El CSV escribe en `db.facturas_comercial`. La comparativa hace join por
 
 from __future__ import annotations
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Depends
 from fastapi.responses import StreamingResponse
 from typing import Optional
 from datetime import datetime, timezone
@@ -25,6 +25,8 @@ import csv
 import io
 import time
 import uuid
+
+from auth import require_permission
 
 from factura_model import (
     CAMPOS_CANONICOS,
@@ -995,7 +997,10 @@ async def conciliar_newman_importar_lote(payload: dict):
 
 
 @router.post("/facturas/sii/limpiar-tipo-impositivo-anomalo")
-async def limpiar_tipo_impositivo_anomalo(dry_run: bool = True) -> dict:
+async def limpiar_tipo_impositivo_anomalo(
+    dry_run: bool = True,
+    _: dict = Depends(require_permission("conciliacion.import")),
+) -> dict:
     """Limpia registros con `tipo_impositivo` fuera del rango legal [0, 30].
 
     Causa conocida: el export Newman/Postman a veces concatena
