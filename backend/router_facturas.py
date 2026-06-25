@@ -2138,6 +2138,139 @@ async def get_comparativa_config():
     }
 
 
+@router.get("/comparativa/totales")
+async def comparativa_totales(
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+    num_serie: Optional[str] = None,
+):
+    """Devuelve totales agregados de Base Imponible y Cuota de IVA para:
+      - SII (universo completo del filtro).
+      - Comercial desglosado por `origen_comercial` (típicamente SAP, SIGLO).
+      - Comercial agregado (Σ de todos los orígenes).
+      - Diferencia SII − Σ Comercial y % de conciliación.
+
+    Aplica la inversión de signo configurada en `comparativa_config` para los
+    orígenes que la tienen activada (por defecto SAP, ya que en SAP FI las
+    facturas emitidas se contabilizan con signo negativo).
+
+    Los totales **ignoran** el filtro `only_diffs` (siempre se calculan sobre
+    todas las facturas del universo filtrado por ejercicio/periodo/num_serie),
+    porque el objetivo es comparar masas fiscales completas.
+
+    Para SII usa el desglose `detalle_iva` cuando existe (sumando los tramos);
+    si no, cae al top-level `base_imponible` / `cuota_repercutida`.
+    """
+    config = await _load_comparativa_config()
+    filtro_sii, filtro_com = await _build_filtros(
+        ejercicio, periodo, num_serie,
+        excluir_base_cero=config["excluir_comercial_base_cero"],
+    )
+
+    def _sum_doc(doc: dict) -> tuple[float, float]:
+        """Devuelve (base, cuota) de un doc, usando detalle_iva si existe."""
+        det = doc.get("detalle_iva")
+        if isinstance(det, list) and det:
+            base = sum(float(t.get("base_imponible") or 0) for t in det)
+            cuota = sum(float(t.get("cuota_repercutida") or 0) for t in det)
+            return base, cuota
+        base = float(doc.get("base_imponible") or 0)
+        cuota = float(doc.get("cuota_repercutida") or 0)
+        return base, cuota
+
+    # --- SII ---
+    sii_base = 0.0
+    sii_cuota = 0.0
+    sii_n = 0
+    cursor = _db.facturas_sii.find(
+        filtro_sii,
+        {
+            "_id": 0,
+            "base_imponible": 1,
+            "cuota_repercutida": 1,
+            "detalle_iva": 1,
+        },
+    )
+    async for d in cursor:
+        b, c = _sum_doc(d)
+        sii_base += b
+        sii_cuota += c
+        sii_n += 1
+
+    # --- Comercial por origen ---
+    inv_map = config.get("invertir_signo_por_origen") or {}
+    por_origen: dict[str, dict] = {}
+    cursor = _db.facturas_comercial.find(
+        filtro_com,
+        {
+            "_id": 0,
+            "base_imponible": 1,
+            "cuota_repercutida": 1,
+            "detalle_iva": 1,
+            "origen_comercial": 1,
+        },
+    )
+    async for d in cursor:
+        origen = d.get("origen_comercial") or "DESCONOCIDO"
+        b, c = _sum_doc(d)
+        if inv_map.get(origen):
+            b, c = -b, -c
+        bucket = por_origen.setdefault(
+            origen,
+            {"base": 0.0, "cuota": 0.0, "n_facturas": 0, "invertido": bool(inv_map.get(origen))},
+        )
+        bucket["base"] += b
+        bucket["cuota"] += c
+        bucket["n_facturas"] += 1
+
+    # --- Comercial total (Σ orígenes, ya con inversión aplicada) ---
+    com_base = sum(o["base"] for o in por_origen.values())
+    com_cuota = sum(o["cuota"] for o in por_origen.values())
+    com_n = sum(o["n_facturas"] for o in por_origen.values())
+
+    # --- Diferencias y % conciliado ---
+    diff_base = round(sii_base - com_base, 2)
+    diff_cuota = round(sii_cuota - com_cuota, 2)
+
+    def _pct(num: float, denom: float) -> float | None:
+        if denom == 0:
+            return None
+        return round(1.0 - abs(num) / abs(denom), 6)
+
+    return {
+        "sii": {
+            "base": round(sii_base, 2),
+            "cuota": round(sii_cuota, 2),
+            "n_facturas": sii_n,
+        },
+        "comercial_por_origen": {
+            k: {
+                "base": round(v["base"], 2),
+                "cuota": round(v["cuota"], 2),
+                "n_facturas": v["n_facturas"],
+                "invertido": v["invertido"],
+            }
+            for k, v in sorted(por_origen.items())
+        },
+        "comercial_total": {
+            "base": round(com_base, 2),
+            "cuota": round(com_cuota, 2),
+            "n_facturas": com_n,
+        },
+        "diferencias": {
+            "base": diff_base,
+            "cuota": diff_cuota,
+            "pct_conciliado_base": _pct(diff_base, sii_base),
+            "pct_conciliado_cuota": _pct(diff_cuota, sii_cuota),
+        },
+        "filtros": {
+            "ejercicio": ejercicio,
+            "periodo": periodo,
+            "num_serie": num_serie,
+        },
+    }
+
+
 @router.put("/comparativa/config")
 async def put_comparativa_config(payload: dict):
     """Actualiza la configuración de comparativa. Acepta:

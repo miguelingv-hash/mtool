@@ -47,6 +47,7 @@ import { toast } from "sonner";
 import CertUploader from "@/components/CertUploader";
 import { useEnv } from "@/contexts/EnvContext";
 import { labelOrigenComercial } from "@/lib/origenes";
+import ResumenTotales from "@/components/ResumenTotales";
 
 const ESTADO_PILL = {
   coincide: { label: "Coincide", cls: "pill-success", Icon: CheckCircle2 },
@@ -1088,6 +1089,14 @@ export default function Comparativa() {
           </Button>
         </div>
       </div>
+
+      <ResumenTotales
+        filtros={{
+          ejercicio: filtroEjercicio !== "__all__" ? filtroEjercicio : undefined,
+          periodo: filtroPeriodo !== "__all__" ? filtroPeriodo : undefined,
+          num_serie: filtroNumSerieDebounced.trim() || undefined,
+        }}
+      />
 
       <div className="border border-slate-200">
         <Table>
