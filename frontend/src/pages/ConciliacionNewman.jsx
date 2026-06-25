@@ -83,15 +83,31 @@ export default function ConciliacionNewman() {
     try {
       const { data } = await api.post("/sii/conciliar-newman", buildForm(false), {
         headers: { "Content-Type": "multipart/form-data" },
+        maxBodyLength: 512 * 1024 * 1024,
+        maxContentLength: 512 * 1024 * 1024,
+        timeout: 600_000, // 10 min
+        // axios soporta progress de upload vía onUploadProgress
+        onUploadProgress: (ev) => {
+          if (ev.total) {
+            // eslint-disable-next-line no-console
+            console.log(
+              `[Conciliacion] Upload: ${Math.round((ev.loaded / ev.total) * 100)}%`,
+            );
+          }
+        },
       });
       setReporte(data);
       if (data.faltantes_en_bd === 0) {
         toast.success("BD y CSV coinciden: no hay facturas perdidas");
       } else {
-        toast.warning(`${data.faltantes_en_bd} facturas en el CSV no están en BD`);
+        toast.warning(`${data.faltantes_en_bd.toLocaleString("es-ES")} facturas en el CSV no están en BD`);
       }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Error al conciliar");
+      // eslint-disable-next-line no-console
+      console.error("[Conciliacion] analizar error:", e);
+      const detalle =
+        e?.response?.data?.detail || e?.code || e?.message || "Error al conciliar";
+      toast.error(`Error al analizar: ${detalle}`, { duration: 10000 });
     } finally {
       setAnalyzing(false);
     }
@@ -102,8 +118,7 @@ export default function ConciliacionNewman() {
     console.log("[Conciliacion] Click Importar. Estado:", {
       hasReporte: !!reporte,
       faltantes_en_bd: reporte?.faltantes_en_bd,
-      faltantes_completas_len: reporte?.faltantes_completas?.length,
-      faltantes_truncado: reporte?.faltantes_truncado,
+      hasFile: !!file,
       nifTitular: nifTitular,
       importing, analyzing,
     });
@@ -119,12 +134,8 @@ export default function ConciliacionNewman() {
       toast.error("Indica el NIF titular");
       return;
     }
-    const lote = reporte.faltantes_completas || [];
-    if (lote.length === 0) {
-      toast.error(
-        "El reporte no trae el detalle de faltantes. Pulsa Analizar de nuevo después de recargar la página (Ctrl+F5).",
-        { duration: 8000 },
-      );
+    if (!file) {
+      toast.error("El CSV ya no está en memoria. Vuelve a seleccionarlo y pulsa Analizar.");
       return;
     }
     setImportError(null);
@@ -133,69 +144,60 @@ export default function ConciliacionNewman() {
 
   const importarConfirmado = async () => {
     setConfirmOpen(false);
-    const lote = reporte?.faltantes_completas || [];
-    if (lote.length === 0) return;
-    const CHUNK_SIZE = 10_000;
-    const totalChunks = Math.ceil(lote.length / CHUNK_SIZE);
+    if (!file) {
+      toast.error("Falta el fichero CSV");
+      return;
+    }
     setImporting(true);
     setImportError(null);
-    setImportProgress({ hechas: 0, total: lote.length, chunk: 0, totalChunks });
+    setImportProgress({ hechas: 0, total: reporte?.faltantes_en_bd || 0, fase: "upload" });
     // eslint-disable-next-line no-console
     console.log(
-      `[Conciliacion] Importando ${lote.length.toLocaleString("es-ES")} facturas en ${totalChunks} chunk(s) de ${CHUNK_SIZE}…`,
+      `[Conciliacion] Import server-side de ${reporte?.faltantes_en_bd || "?"} faltantes via /importar-faltantes`,
     );
-    let insertadasTotal = 0;
     const t0 = performance.now();
     try {
-      for (let i = 0; i < lote.length; i += CHUNK_SIZE) {
-        const chunk = lote.slice(i, i + CHUNK_SIZE);
-        const chunkIndex = Math.floor(i / CHUNK_SIZE) + 1;
-        // eslint-disable-next-line no-console
-        console.log(
-          `[Conciliacion] Chunk ${chunkIndex}/${totalChunks} (${chunk.length} facturas)…`,
-        );
-        const { data } = await api.post(
-          "/sii/conciliar-newman/importar-lote",
-          {
-            nif_titular: nifTitular.trim(),
-            nombre_titular: nombreTitular.trim() || undefined,
-            ejercicio: ejercicio || undefined,
-            periodo: periodo || undefined,
-            facturas: chunk,
+      // Reutilizamos el endpoint server-side que sube el CSV una sola vez y
+      // procesa todo el insert en backend (en lotes de 2000 internamente).
+      // Esto evita devolver al cliente las cientos de miles de facturas y
+      // luego re-postearlas — todo se hace en una sola request.
+      const { data } = await api.post(
+        "/sii/conciliar-newman/importar-faltantes",
+        buildForm(true),
+        {
+          headers: { "Content-Type": "multipart/form-data" },
+          maxBodyLength: 512 * 1024 * 1024,
+          maxContentLength: 512 * 1024 * 1024,
+          timeout: 1800_000, // 30 min — CSVs gigantes
+          onUploadProgress: (ev) => {
+            if (ev.total) {
+              const pct = Math.round((ev.loaded / ev.total) * 100);
+              setImportProgress({
+                hechas: ev.loaded,
+                total: ev.total,
+                fase: pct < 100 ? "upload" : "procesando",
+                pctUpload: pct,
+              });
+            }
           },
-          {
-            maxBodyLength: 64 * 1024 * 1024,
-            maxContentLength: 64 * 1024 * 1024,
-            timeout: 180_000,
-          },
-        );
-        insertadasTotal += data.insertadas || 0;
-        setImportProgress({
-          hechas: Math.min(i + CHUNK_SIZE, lote.length),
-          total: lote.length,
-          chunk: chunkIndex,
-          totalChunks,
-        });
-      }
+        },
+      );
       const ms = Math.round(performance.now() - t0);
       // eslint-disable-next-line no-console
-      console.log(`[Conciliacion] Import completo en ${ms}ms · ${insertadasTotal} insertadas`);
+      console.log(`[Conciliacion] Import completo en ${ms}ms ·`, data);
       toast.success(
-        `Importadas ${insertadasTotal.toLocaleString("es-ES")} facturas en ${(ms / 1000).toFixed(1)} s (${totalChunks} chunk${totalChunks > 1 ? "s" : ""})`,
+        `Importadas ${(data.insertadas || 0).toLocaleString("es-ES")} facturas en ${(ms / 1000).toFixed(1)} s`,
       );
       await analizar();
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error("[Conciliacion] Error en import:", e);
       const detalle =
-        e?.response?.data?.detail || e?.response?.statusText || e?.message || "Error desconocido";
+        e?.response?.data?.detail || e?.response?.statusText || e?.code || e?.message || "Error desconocido";
       const status = e?.response?.status;
       const msg = status ? `HTTP ${status} · ${detalle}` : detalle;
-      const procesado = importProgress
-        ? ` (procesado ${importProgress.hechas.toLocaleString("es-ES")} de ${importProgress.total.toLocaleString("es-ES")})`
-        : "";
-      setImportError(msg + procesado);
-      toast.error(`Error al importar: ${msg}${procesado}`, { duration: 10000 });
+      setImportError(msg);
+      toast.error(`Error al importar: ${msg}`, { duration: 10000 });
     } finally {
       setImporting(false);
       setImportProgress(null);
@@ -303,21 +305,22 @@ export default function ConciliacionNewman() {
               <Loader2 className="h-4 w-4 animate-spin" />
               <AlertDescription>
                 <div className="font-medium">
-                  Importando lote {importProgress.chunk} de {importProgress.totalChunks}…
+                  {importProgress.fase === "upload"
+                    ? `Subiendo CSV al servidor… ${importProgress.pctUpload ?? 0}%`
+                    : "Servidor procesando el CSV e insertando faltantes. Esto puede tardar varios minutos…"}
                 </div>
-                <div className="text-xs mt-1 text-slate-600 tabular-nums">
-                  {importProgress.hechas.toLocaleString("es-ES")} de{" "}
-                  {importProgress.total.toLocaleString("es-ES")} facturas (
-                  {Math.round((importProgress.hechas / importProgress.total) * 100)}%)
-                </div>
-                <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-slate-900 transition-all duration-200"
-                    style={{
-                      width: `${(importProgress.hechas / importProgress.total) * 100}%`,
-                    }}
-                  />
-                </div>
+                {importProgress.fase === "upload" && importProgress.pctUpload !== undefined ? (
+                  <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-slate-900 transition-all duration-200"
+                      style={{ width: `${importProgress.pctUpload}%` }}
+                    />
+                  </div>
+                ) : (
+                  <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                    <div className="h-full bg-slate-900 animate-pulse" style={{ width: "100%" }} />
+                  </div>
+                )}
               </AlertDescription>
             </Alert>
           ) : null}
@@ -442,13 +445,12 @@ export default function ConciliacionNewman() {
             <AlertDialogDescription asChild>
               <div className="space-y-2">
                 <div>
-                  Vas a insertar <strong>{(reporte?.faltantes_completas?.length || 0).toLocaleString("es-ES")}</strong> facturas en la colección <code>facturas_sii</code>.
+                  Vas a insertar <strong>{(reporte?.faltantes_en_bd || 0).toLocaleString("es-ES")}</strong> facturas en la colección <code>facturas_sii</code>.
                 </div>
-                {(reporte?.faltantes_completas?.length || 0) > 10000 ? (
-                  <div className="text-xs text-slate-600">
-                    Se enviará en lotes de 10.000 facturas con barra de progreso para evitar timeouts.
-                  </div>
-                ) : null}
+                <div className="text-xs text-slate-600">
+                  El CSV se sube una vez y el servidor inserta en bloques de 2.000 internamente.
+                  Para CSVs grandes la operación puede tardar varios minutos — no cierres la pestaña.
+                </div>
                 <div className="text-xs text-muted-foreground">
                   La operación es idempotente: si alguna factura ya existiera, se actualizará sin duplicarse.
                 </div>

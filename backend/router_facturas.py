@@ -760,6 +760,7 @@ async def conciliar_newman(
     nif_titular: str = Form(...),
     ejercicio: Optional[str] = Form(None),
     periodo: Optional[str] = Form(None),
+    incluir_faltantes_completas: bool = Form(False),
 ):
     """Sube un CSV (formato Newman extraído por extraer_csv.py) y lo compara
     contra `facturas_sii` filtrado por `(nif_titular, ejercicio, periodo)`.
@@ -842,7 +843,17 @@ async def conciliar_newman(
     # Lista completa de faltantes con todos los campos canónicos. El frontend
     # la trocea en lotes pequeños al llamar a `/importar-lote`, así no hay
     # timeout independientemente del tamaño.
-    faltantes_completas = [filas_por_ns[ns] for ns in sorted(faltantes)]
+    #
+    # PERO con CSVs gigantes (cientos de miles de filas) devolver TODAS las
+    # faltantes en una sola respuesta hincha el JSON a centenas de MB y rompe
+    # el ingress. Por defecto NO se devuelven aquí. El frontend puede:
+    #   - Pedirlas con `incluir_faltantes_completas=true` (CSVs pequeños), o
+    #   - Llamar a `/importar-faltantes` con el CSV (CSV se procesa server-side
+    #     entero, sin re-postear los datos al backend).
+    if incluir_faltantes_completas:
+        faltantes_completas = [filas_por_ns[ns] for ns in sorted(faltantes)]
+    else:
+        faltantes_completas = []
     faltantes_truncado = False
 
     extra_preview = sorted(extras)[:20]

@@ -227,6 +227,20 @@
 - **Manejo de errores**: si un chunk falla, el `toast` y el `Alert` indican cuántas se procesaron antes del fallo (`procesado X de Y`). La operación sigue siendo idempotente, así que el usuario puede reintentar sin duplicar.
 - **Dialogo de confirmación** actualizado: si hay > 10k faltantes, muestra "Se enviará en lotes de 10.000 con barra de progreso".
 
+### Feb 2026 — Fix CRÍTICO: subida de CSVs Newman gigantes (>25MB / >100k facturas)
+- **Síntoma**: tras subir CSV de 180MB / 800k facturas el botón "Analizar" mostraba todo "—" sin error, conexión colgada/timeout.
+- **Causas combinadas**:
+  1. `/sii/conciliar-newman` devolvía siempre `faltantes_completas` con TODOS los registros → JSON de ~300MB → ingress k8s timeout en preview.
+  2. axios sin timeout/maxBodyLength → conexión colgada en preview.
+  3. nginx Docker producción tenía `client_max_body_size 25m` → CSVs > 25MB rechazados (HTTP 413 silencioso).
+  4. nginx Docker producción tenía `proxy_read_timeout 120s` → imports largos cortados.
+- **Fixes**:
+  - Backend: param `incluir_faltantes_completas` (default false). Respuesta del análisis ahora es ligera (sólo conteos + preview).
+  - Frontend `analizar()`: `timeout: 10 min`, `maxBodyLength: 512MB`, `onUploadProgress` para feedback, mejor handling de errores con detalles.
+  - Frontend `importarConfirmado()`: ahora usa el endpoint server-side `/importar-faltantes` (no `/importar-lote`). El CSV se sube una vez, todo el procesado y los inserts (chunks de 2.000) ocurren en backend. Sin re-postear miles de facturas al servidor.
+  - Frontend: barra de progreso con dos fases visibles: "Subiendo CSV X%" → "Servidor procesando…".
+  - Nginx prod: `client_max_body_size 512m` (era 25m), `proxy_read_timeout 1800s` (era 120s), `proxy_request_buffering off` para streaming de subidas grandes.
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.
