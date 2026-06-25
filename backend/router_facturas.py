@@ -494,7 +494,10 @@ def _sumar_detalle_iva(sin_desglose) -> tuple[float, float, float | None, list[d
             "causa_exencion": str(causa) if causa is not None else None,
         })
 
-    return base_tot, cuota_tot, tipo, lineas
+    # base_tot y cuota_tot son sumas de varios DetalleIVA. Floats binarios
+    # acumulan errores de precisión (p.ej. 3.87 + (-0.01) = 3.8600000000000003),
+    # así que redondeamos a 2 decimales (importes monetarios).
+    return round(base_tot, 2), round(cuota_tot, 2), tipo, lineas
 
 
 def _extraer_iva_emitida(
@@ -539,7 +542,9 @@ def _extraer_iva_emitida(
                 encontrado = True
     if not encontrado:
         return None, None, None, []
-    return base, cuota, tipo, detalle_iva
+    # Misma razón que en _sumar_detalle_iva: redondeo a 2 decimales tras sumar
+    # múltiples desgloses (DesgloseFactura + PrestacionServicios + Entrega).
+    return round(base, 2), round(cuota, 2), tipo, detalle_iva
 
 
 # =============================================================================
@@ -1071,6 +1076,56 @@ async def limpiar_tipo_impositivo_anomalo(
         "reparadas_con_cuota_extraida": reparadas,
         "descartadas_a_null": descartadas,
         "dry_run": False,
+    }
+
+
+@router.post("/facturas/sii/redondear-importes")
+async def redondear_importes(
+    dry_run: bool = True,
+    _: dict = Depends(require_permission("conciliacion.import")),
+) -> dict:
+    """Aplica round(_, 2) a `base_imponible`, `cuota_repercutida`, `importe_total`
+    en registros con errores de precisión float (p.ej. 3.86 que se guardó como
+    3.8600000000000003 al sumar Sujeta.Exenta + Sujeta.NoExenta).
+
+    Detecta registros donde `round(x,2) != x` para esos campos y los corrige.
+    `dry_run=true` (default) cuenta sin escribir.
+    """
+    from pymongo import UpdateOne  # noqa: WPS433
+
+    CAMPOS = ("base_imponible", "cuota_repercutida", "importe_total")
+    cursor = _db.facturas_sii.find(
+        {"$or": [{c: {"$ne": None}} for c in CAMPOS]},
+        {"_id": 1, **{c: 1 for c in CAMPOS}},
+    )
+    afectadas = 0
+    ops: list = []
+    async for d in cursor:
+        sets: dict = {}
+        for c in CAMPOS:
+            v = d.get(c)
+            if v is None or not isinstance(v, (int, float)):
+                continue
+            r = round(float(v), 2)
+            if r != v:
+                sets[c] = r
+        if sets:
+            afectadas += 1
+            if not dry_run:
+                ops.append(UpdateOne({"_id": d["_id"]}, {"$set": sets}))
+                if len(ops) >= 1000:
+                    await _db.facturas_sii.bulk_write(ops, ordered=False)
+                    ops = []
+    if ops:
+        await _db.facturas_sii.bulk_write(ops, ordered=False)
+    return {
+        "encontradas": afectadas,
+        "actualizadas": 0 if dry_run else afectadas,
+        "dry_run": dry_run,
+        "mensaje": (
+            "Dry run — pasa ?dry_run=false para aplicar"
+            if dry_run else "Limpieza completada"
+        ),
     }
 
 
