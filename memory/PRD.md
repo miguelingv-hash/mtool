@@ -206,6 +206,15 @@
 - **Sidebar**: nuevo enlace "Mantenimiento" (icono Wrench, perm `sii.wipe`) bajo el bloque admin.
 - **Validado**: endpoint probado con datos dummy (100+50+10+5) → wipe correcto (todos a 0). Rechaza confirmaciones inválidas (`"borrar"` → 400). Ruta `/admin/mantenimiento` protegida correctamente (redirige a /login sin sesión).
 
+### Feb 2026 — Resumen de conciliación: totales agregados SII vs Σ Comercial
+- **Endpoint backend** `GET /api/comparativa/totales?ejercicio=&periodo=&num_serie=` — agrega Base Imponible + Cuota IVA del universo SII y desglosa Comercial por `origen_comercial` (SAP, SIGLO, …). Aplica inversión de signo según `comparativa_config.invertir_signo_por_origen`. Usa `detalle_iva` cuando existe; cae a top-level si no. Ignora `only_diffs` por diseño (los totales reflejan la masa fiscal completa).
+- Devuelve: `sii` / `comercial_por_origen` (por origen, con flag `invertido`) / `comercial_total` / `diferencias` (base, cuota, `pct_conciliado_base/cuota`).
+- **Componente frontend** `ResumenTotales.jsx` (~250 líneas) — tarjeta colocada justo encima de la tabla de la Comparativa. Reacciona a los mismos filtros (`ejercicio`/`periodo`/`num_serie`). Estructura:
+  - Banner KPI: verde 100% conciliado / ámbar `X% conciliado` + Δ Base y Δ Cuota.
+  - Grid de 4 columnas: SII (Datos AEAT) · SAP FI (Signo invertido) · SIGLO (Signo directo) · Σ Comercial (Suma orígenes).
+  - Cada columna muestra base + cuota + nº facturas. La columna Σ Comercial pinta fondo rojo y badge "Diferencia vs SII" cuando hay desviación.
+- **Probado E2E** con datos dummy: 100% conciliado verde + escenario con discrepancia 0,01€ → banner ámbar 99,97% + columna Σ Comercial sombreada en rojo con diff visible.
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.
