@@ -276,27 +276,48 @@ async def _invoke_sii(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Error invocando SII")
         msg = str(exc) or exc.__class__.__name__
+
+        # Clasificación robusta por isinstance() — más estable que substring
+        # contra mensajes localizados de zeep/requests.
+        try:
+            import requests.exceptions as _rex
+        except ImportError:  # pragma: no cover
+            _rex = None
+        try:
+            from zeep.exceptions import TransportError as _ZTE
+        except ImportError:  # pragma: no cover
+            _ZTE = None
+
+        is_timeout = _rex is not None and isinstance(
+            exc, (_rex.ReadTimeout, _rex.ConnectTimeout, _rex.Timeout),
+        )
+        is_conn = _rex is not None and isinstance(exc, _rex.ConnectionError) and not is_timeout
+        is_ssl = _rex is not None and isinstance(exc, _rex.SSLError)
+        is_transport = _ZTE is not None and isinstance(exc, _ZTE)
+
+        # Fallback substring para casos exóticos (errores wrapped, etc.)
         low = msg.lower()
-        # Clasifica errores típicos para devolver código + mensaje claros
-        # ANTES de que el proxy externo (Cloudflare) corte la conexión con un 5xx.
-        if "timeout" in low or "timed out" in low or "operation_timeout" in low:
+        if is_timeout or "timeout" in low or "timed out" in low:
             raise HTTPException(
                 504,
                 "Timeout consultando el SII (servicio AEAT no respondió a tiempo). "
                 "Reintenta en unos minutos.",
             )
-        if "connection" in low or "connectionerror" in low or "could not resolve" in low:
-            raise HTTPException(
-                502,
-                "No se pudo conectar con el SII (problema de red o DNS). "
-                f"Detalle: {msg[:200]}",
-            )
-        if "ssl" in low or "certificate" in low or "tls" in low:
+        # IMPORTANTE: SSL antes que conexión, porque SSLError hereda de ConnectionError
+        if is_ssl or "ssl" in low or "certificate" in low or "tls" in low:
             raise HTTPException(
                 502,
                 "Error TLS/certificado al conectar con el SII. "
                 f"Detalle: {msg[:200]}",
             )
+        if is_conn or "could not resolve" in low or "name resolution" in low:
+            raise HTTPException(
+                502,
+                "No se pudo conectar con el SII (problema de red o DNS). "
+                f"Detalle: {msg[:200]}",
+            )
+        if is_transport:
+            raise HTTPException(502, f"Error de transporte SOAP: {msg[:200]}")
         raise HTTPException(502, f"Error en servicio SII: {msg[:300]}")
 
     return respuesta, req_xml, resp_xml, datos_factura

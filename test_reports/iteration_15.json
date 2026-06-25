@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 15 backend-only validation: refinamiento del fix de clasificación de errores en _invoke_sii. (1) Los 5 unit tests pytest pasan (incluyendo el caso SSLError→502 'TLS/certificado' que requiere el orden ssl-antes-de-conn). (2) Regresión completa de 4 ficheros previos: 46/46 verde. (3) Integración live: /api/auth/me devuelve 401 sin auth, /api/sii/config devuelve 200 con admin JWT, /api/sii/consulta-unitaria-cert con NIF inválido devuelve 422 (no 502). Sin issues nuevos.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "server.py startup/shutdown", "issue": "DeprecationWarning: @app.on_event('startup'/'shutdown') está deprecado; migrar a lifespan handlers (no bloqueante, solo ruido en pytest)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_invoke_sii_errors.py",
+    "/app/backend/tests/test_diff_tramos_iva.py",
+    "/app/backend/tests/test_precision_detalle_iva.py",
+    "/app/backend/tests/test_sanear_tipo_impositivo.py",
+    "/app/test_reports/pytest/iteration_15_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py L270-323: clasificación correcta via isinstance(). Orden if (timeout → ssl → conn → transport → genérico) es CORRECTO porque SSLError hereda de ConnectionError; cambiar el orden re-introduciría el bug. Mantener cubierto por test exc3.",
+    "Defensa-en-profundidad bien aplicada: isinstance() primario + fallback substring secundario por compatibilidad con excepciones envueltas (zeep).",
+    "Imports diferidos de requests.exceptions y zeep.exceptions dentro del except: aceptable (defensa contra fallo de import en runtime), pero podría subirse al top-level para evitar overhead por excepción. No crítico."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (46/46 pytest + 4/4 endpoints integración)", "frontend": "N/A (backend-only)"},
+  "test_credentials": "Admin: miguelingv@gmail.com — JWT minted con auth.create_access_token() + JWT_SECRET de .env (procedimiento documentado en /app/memory/test_credentials.md).",
+  "seed_data_creation": "Ninguno. Solo lectura del usuario admin existente para mintear JWT.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "El fix iteration_14 + iteration_15 está completo y verificado. Toda la cascada de excepciones (Timeout, SSL, Connection, Transport, genérico) tiene unit-test pytest con monkeypatch. El bug del orden SSL/Conn (SSLError es subclase de ConnectionError) está cubierto explícitamente por exc3-502-TLS/certificado. Tests E2E reales contra AEAT siguen sin ser posibles (sin cert válido + sin red outbound), pero la cobertura unit es ya completa.",
+  "rca of the issue": "N/A — esta iteración fue refinamiento + tests, no debugging."
+}
