@@ -194,6 +194,12 @@
 - **Endpoint diagnóstico nuevo**: `POST /api/facturas/sii/diagnosticar-newman-wrap?aplicar=false|true` — detecta facturas con la signatura del bug (`num_registro_presentacion` terminando en `'`), devuelve muestra y opcionalmente sanea (separa nombre+estado concatenados, mueve csv_aeat-numérico desde estado_factura, recupera timestamp_presentacion). Requiere permiso `conciliacion.import`.
 - **BD saneada**: borradas 256 480 facturas con `fuente_ultima: 'conciliacion_newman'` (corruptas) + saneadas 3 con campos fantasma de Newman previo. Quedan 2 790 000 facturas y 0 con signatura del bug. El usuario re-importará desde los CSV regenerados con el `extraer_csv.py` corregido.
 
+### Feb 2026 — Fix UI: filas top-level no marcaban discrepancia con desglose de IVA
+- **Síntoma**: en la `Sheet` de detalle de Comparativa, cuando había discrepancia a nivel de tramos de IVA (`detalle_iva`), las filas top-level `base_imponible` / `cuota_repercutida` / `tipo_impositivo` no se renderizaban con el sombreado rojo (`bg-rose-50/40`) aunque visualmente los valores diferían (ej. SII=74.9 vs Comercial=-112.35). Reportado por el usuario sobre factura `26TEFJN000004814`.
+- **Causa**: tras el refactor de comparación por tramos, `diff_facturas` excluye correctamente `base_imponible`/`tipo_impositivo`/`cuota_repercutida` de `diferencias` cuando hay desglose (la diferencia "real" se reporta en `diferencias.detalle_iva`). Pero el JSX usaba `isDiff = !!diferencias[campo]` → `false` para esos 3 campos → fila sin sombrear.
+- **Fix**: 1 línea en `frontend/src/pages/Comparativa.jsx` — cuando `Array.isArray(diferencias.detalle_iva)` y el campo es uno de los 3 del desglose, marca `isDiff=true`. Mantiene la semántica del backend (la verdad canónica está en `detalle_iva`) y restaura el indicador visual.
+- **Tests**: 12/12 pytest verdes (sin cambios backend).
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.

@@ -1327,7 +1327,22 @@ export default function Comparativa() {
                         ].includes(k),
                       )
                       .map(([campo]) => {
-                        const isDiff = !!detail.diferencias[campo];
+                        const hasTramoDiff = Array.isArray(
+                          detail.diferencias?.detalle_iva,
+                        );
+                        // Cuando hay diff a nivel tramo, base/cuota/tipo a nivel
+                        // cabecera no se incluyen en `diferencias` (los gestiona
+                        // el desglose), pero visualmente queremos marcar la fila
+                        // para que el usuario tenga el indicador en rojo aunque
+                        // el detalle "real" esté en la tabla de tramos.
+                        const isCampoDesglose = [
+                          "base_imponible",
+                          "tipo_impositivo",
+                          "cuota_repercutida",
+                        ].includes(campo);
+                        const isDiff =
+                          !!detail.diferencias[campo] ||
+                          (hasTramoDiff && isCampoDesglose);
                         const vs = detail.sii?.[campo];
                         const vc = detail.comercial?.[campo];
                         return (
