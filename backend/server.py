@@ -275,7 +275,29 @@ async def _invoke_sii(
         raise HTTPException(400, str(exc))
     except Exception as exc:  # noqa: BLE001
         logger.exception("Error invocando SII")
-        raise HTTPException(502, f"Error en servicio SII: {exc}")
+        msg = str(exc) or exc.__class__.__name__
+        low = msg.lower()
+        # Clasifica errores típicos para devolver código + mensaje claros
+        # ANTES de que el proxy externo (Cloudflare) corte la conexión con un 5xx.
+        if "timeout" in low or "timed out" in low or "operation_timeout" in low:
+            raise HTTPException(
+                504,
+                "Timeout consultando el SII (servicio AEAT no respondió a tiempo). "
+                "Reintenta en unos minutos.",
+            )
+        if "connection" in low or "connectionerror" in low or "could not resolve" in low:
+            raise HTTPException(
+                502,
+                "No se pudo conectar con el SII (problema de red o DNS). "
+                f"Detalle: {msg[:200]}",
+            )
+        if "ssl" in low or "certificate" in low or "tls" in low:
+            raise HTTPException(
+                502,
+                "Error TLS/certificado al conectar con el SII. "
+                f"Detalle: {msg[:200]}",
+            )
+        raise HTTPException(502, f"Error en servicio SII: {msg[:300]}")
 
     return respuesta, req_xml, resp_xml, datos_factura
 

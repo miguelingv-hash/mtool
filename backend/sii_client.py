@@ -325,7 +325,12 @@ class ZeepSIIClient(SIIClient):
             session.cert = (cert_path, key_path)
             session.verify = True
 
-            transport = Transport(session=session, timeout=30, operation_timeout=60)
+            # Timeouts:
+            #   timeout = handshake TLS / conexión inicial (15s).
+            #   operation_timeout = read del response SOAP (45s).
+            # Total <60s para no chocar contra el límite del proxy Cloudflare
+            # del preview Emergent (que devuelve 5xx tras ~100s).
+            transport = Transport(session=session, timeout=15, operation_timeout=45)
             settings = Settings(strict=False, xml_huge_tree=True)
 
             # Cargamos el WSDL desde el bundle local (file://) para evitar las

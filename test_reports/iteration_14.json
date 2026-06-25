@@ -1,0 +1,50 @@
+{
+  "summary": "Backend-only validation tras el endurecimiento de timeouts y la clasificación de errores en _invoke_sii (consulta unitaria SOAP). Verificado: (1) /api/auth/me responde 401 sin auth y 200 con JWT minted desde JWT_SECRET; (2) /api/sii/config responde 200 con auth y muestra wsdl + endpoints (timeouts solo aplican al cliente SOAP, no al config); (3) ValidationError en /api/sii/consulta-unitaria-cert sigue dando HTTP 422 para NIF inválido, fecha mal formada y campo faltante; (4) Cuando no hay cert ni server-cert configurado → HTTP 400 con mensaje útil (no 500); (5) PKCS#12 inválido → HTTP 400 con detail claro (no 500); (6) Los 41 tests pytest de tests/test_diff_tramos_iva.py + tests/test_precision_detalle_iva.py + tests/test_sanear_tipo_impositivo.py pasan 41/41 en 0.31s; (7) Inspección manual del código confirma Transport(timeout=15, operation_timeout=45) en sii_client.py L333 y la nueva cascada de excepciones en server.py L270-300 (timeout→504, connection/DNS→502, ssl/cert→502 con detalle, else→502 genérico). El backend está vivo, sin 502/504 espontáneos, y la latencia de todas las llamadas observadas es <0.2s. NO se pudo ejercitar la rama real de _invoke_sii (timeout/502/504) end-to-end porque (a) no hay PKCS#12 válido en el preview y (b) el preview puede no tener red outbound a sede.aeat.es — esto es esperado y queda fuera de alcance, según indicó el main agent.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/pytest/iteration_14_results.xml",
+    "/app/backend/tests/test_diff_tramos_iva.py",
+    "/app/backend/tests/test_precision_detalle_iva.py",
+    "/app/backend/tests/test_sanear_tipo_impositivo.py"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "sii_client.py L333 — Transport(timeout=15, operation_timeout=45) suma 60s en el peor caso, justo en el límite del proxy Cloudflare (~100s). El cambio es correcto: handshake corto + read razonable. Considerar reducir operation_timeout a 35-40 si en producción se siguen viendo 520 — deja más margen al backend para serializar la respuesta y devolver 504 limpio.",
+    "server.py L278-300 — La clasificación por substring ('timeout' in low, 'connection' in low, 'ssl' in low) funciona pero es frágil contra mensajes localizados de zeep/requests. Sugerencia: usar isinstance() contra requests.exceptions.ReadTimeout / ConnectTimeout / ConnectionError / SSLError / zeep.exceptions.TransportError antes de caer al substring match. Mantener el substring fallback para casos exóticos.",
+    "server.py L300 — El detail genérico expone hasta 300 chars del str(exc). Para producción podría filtrar/anonimizar paths internos. Aceptable para el preview/debug.",
+    "server.py L391-392 — `raise HTTPException(422, exc.errors())` pasa exc.errors() (una lista) como detail; FastAPI lo serializa OK (verificado en tests T2-T4) pero rompe el contrato típico de FastAPI donde 422 lo genera Pydantic automáticamente con shape estándar. Es consistente, no urgente.",
+    "Cobertura ausente: no hay test de pytest que valide directamente la nueva clasificación de errores en _invoke_sii. Sería trivial añadir tests con monkeypatch de build_client que lance requests.exceptions.ReadTimeout / ConnectionError / SSLError y aserte 504/502 + mensajes. Recomendado para iteración futura."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (41/41 pytest + 7/7 curl checks pasan)",
+    "frontend": "N/A (skipped por petición)"
+  },
+  "test_credentials": "Admin miguelingv@gmail.com — JWT minted vía auth.create_access_token(str(user._id), user.email) usando JWT_SECRET de /app/backend/.env. Token inyectado en cookie monitorsii_access. /auth/me responde 200 OK.",
+  "seed_data_creation": "Ninguna nueva — usuario admin ya existía. Sin escritura a BD durante las pruebas curl (todas las llamadas fallaron antes de persistir, como esperado).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "test_results_detail": {
+    "HEALTH_auth_me_sin_auth": "PASS — HTTP 401 'No autenticado' en 0.32s. NO 502/504.",
+    "HEALTH_auth_me_con_jwt": "PASS — HTTP 200 retorna user object (id, email=miguelingv@gmail.com, role=admin, status=active). JWT mint funciona.",
+    "HEALTH_sii_config": "PASS — HTTP 200, wsdl + 4 endpoints (preproduccion, preproduccion_sello, produccion, produccion_sello) en 0.16s. Timeouts NO afectan al config endpoint.",
+    "REGRESION_422_nif_invalido": "PASS — POST /api/sii/consulta-unitaria-cert con nif_titular='XX' → HTTP 422 string_too_short (min_length 8). NO 502.",
+    "REGRESION_422_fecha_mal_formada": "PASS — fecha_expedicion='2025/01/15' → HTTP 422 string_pattern_mismatch (pattern ^\\d{2}-\\d{2}-\\d{4}$). NO 502.",
+    "REGRESION_422_campo_faltante": "PASS — sin nif_titular → HTTP 422 missing. NO 502.",
+    "MITIGACION_400_sin_cert": "PASS — payload válido sin certificate ni SII_CERT_PATH → HTTP 400 'Sin certificado: aporta el PKCS#12...'. NO 500/502.",
+    "MITIGACION_400_pkcs12_invalido": "PASS — PKCS#12 corrupto → HTTP 400 'No se pudo leer el PKCS#12...'. NO 500/502.",
+    "PYTEST_41_41": "PASS — 41/41 en 0.31s. Listing: test_diff_tramos_iva (9) + test_precision_detalle_iva (6) + test_sanear_tipo_impositivo (26).",
+    "CODE_REVIEW_sii_client_L333": "VERIFIED — Transport(timeout=15, operation_timeout=45). Total 60s máx.",
+    "CODE_REVIEW_server_L270_300": "VERIFIED — Cascada except con clasificación timeout→504 / connection→502 / ssl→502 / else→502 genérico. msg recortado a 200-300 chars."
+  },
+  "context_for_next_testing_agent": "Iteración 14 valida el endurecimiento del backend frente al 520 Cloudflare del preview Emergent. NO se pudo testear E2E las ramas timeout/connection/ssl del nuevo bloque except en server.py L270-300 porque requiere un certificado PKCS#12 válido + red outbound a sede.aeat.es (ambos out-of-scope en preview, según main agent). Si en una próxima iteración se quiere cobertura unitaria de esa rama, escribir un test que monkeypatchee build_client para lanzar requests.exceptions.ReadTimeout / ConnectionError / SSLError y aserte HTTPException(504/502, ...) — patrón sugerido en critical_code_review_comments. El admin miguelingv@gmail.com es accesible vía JWT mint con str(user._id) como subject (el modelo Mongo guarda _id como UUID string, no usa campo 'id' explícito). El endpoint /api/sii/consulta-unitaria-cert SÍ requiere auth (responde 401 sin cookie). El endpoint /api/sii/config también requiere auth ahora.",
+  "rca_of_the_issue": "RCA del 520 Cloudflare reportado por el usuario: el proxy Cloudflare del preview Emergent corta conexiones que tardan >~100s. Antes del fix, el cliente zeep usaba timeout=30 + operation_timeout=60 → en el peor caso una llamada SOAP a sede.aeat.es bloqueada en read podía exceder el límite del proxy y devolver 520 al navegador (no 504 del backend). Mitigación aplicada: (a) bajar a timeout=15 + operation_timeout=45 = 60s máx, garantizando que zeep aborte la operación ANTES de que Cloudflare la corte; (b) capturar la excepción resultante en _invoke_sii y mapearla a HTTPException(504/502, msg útil) en vez de dejar que se propague como 500 genérico. Limitación: si el problema raíz es que el preview no tiene ruta outbound a sede.aeat.es (DNS/firewall), seguiremos viendo 502 'No se pudo conectar...' pero ya con un mensaje útil y rápido. El test E2E real contra AEAT debe hacerse en la EC2 del usuario con su certificado, según indicó el main agent."
+}
