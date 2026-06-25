@@ -145,6 +145,55 @@ class TestDiffPorTramos:
         # Cabecera: SII no tiene cuota_repercutida (None), comercial sí (21.0) → diff
         assert "cuota_repercutida" in d
 
+    def test_cuota_null_sii_equivale_cero_comercial(self):
+        """Líneas exentas: SII no envía cuota_repercutida (null) pero comercial puede
+        traer 0.0 — semánticamente equivalente, NO debe marcarse discrepancia."""
+        sii = {
+            "num_serie_factura": "X",
+            "detalle_iva": [
+                {"tipo_impositivo": 21.0, "base_imponible": 100.0, "cuota_repercutida": 21.0},
+                {"tipo_impositivo": None, "base_imponible": -0.01, "cuota_repercutida": None, "causa_exencion": "E1"},
+            ],
+        }
+        com = {
+            "num_serie_factura": "X",
+            "detalle_iva": [
+                {"tipo_impositivo": 21.0, "base_imponible": 100.0, "cuota_repercutida": 21.0},
+                {"tipo_impositivo": None, "base_imponible": -0.01, "cuota_repercutida": 0.0},
+            ],
+        }
+        d = diff_facturas(sii, com)
+        # Si todos los tramos coinciden, detalle_iva no aparece en diff
+        assert "detalle_iva" not in d, f"esperaba sin discrepancias, obtuve {d}"
+
+    def test_orden_descendente_por_tipo_iva(self):
+        """Las líneas deben salir ordenadas: 21, 10, 4, ..., exentas al final."""
+        sii = {
+            "num_serie_factura": "X",
+            "detalle_iva": [
+                {"tipo_impositivo": 10.0, "base_imponible": 10.0, "cuota_repercutida": 1.0},
+                {"tipo_impositivo": None, "base_imponible": 5.0, "cuota_repercutida": None, "causa_exencion": "E2"},
+                {"tipo_impositivo": 21.0, "base_imponible": 100.0, "cuota_repercutida": 21.0},
+                {"tipo_impositivo": 4.0, "base_imponible": 50.0, "cuota_repercutida": 2.0},
+            ],
+        }
+        com = {
+            "num_serie_factura": "X",
+            "detalle_iva": [
+                # mismas líneas, distintas cuotas para forzar diff y que aparezca detalle_iva
+                {"tipo_impositivo": 21.0, "base_imponible": 100.0, "cuota_repercutida": 999.0},
+                {"tipo_impositivo": 10.0, "base_imponible": 10.0, "cuota_repercutida": 1.0},
+                {"tipo_impositivo": 4.0, "base_imponible": 50.0, "cuota_repercutida": 2.0},
+                {"tipo_impositivo": None, "base_imponible": 5.0, "cuota_repercutida": 0.0, "causa_exencion": "E2"},
+            ],
+        }
+        d = diff_facturas(sii, com)
+        tramos = d["detalle_iva"]
+        tipos_orden = [t["key"].get("tipo") for t in tramos if "tipo" in t["key"]]
+        assert tipos_orden == [21.0, 10.0, 4.0], f"esperaba [21,10,4], obtuve {tipos_orden}"
+        # La exenta es la última
+        assert tramos[-1]["key"].get("causa_exencion") == "E2"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -220,6 +220,11 @@ def _diff_tramos(
             c_base = -c_base
         if invertir and c_cuota is not None:
             c_cuota = -c_cuota
+        # Normaliza -0.0 → 0.0 (IEEE-754 tras invertir signo)
+        if s_cuota == 0:
+            s_cuota = 0.0
+        if c_cuota == 0:
+            c_cuota = 0.0
         # Clave informativa: prioriza SII y si no comercial
         if s:
             ks = _key_tramo(s)
@@ -230,7 +235,21 @@ def _diff_tramos(
             key_info = {"tipo": ks[1]}
         elif ks[0] == "exenta":
             key_info = {"causa_exencion": ks[1]}
-        diff = (c is None) or (s is None) or s_base != c_base or s_cuota != c_cuota
+
+        # Comparación de cuota: None == 0.0 (en exentas no aplica IVA — equivalente
+        # semántico de "sin cuota" en SII y "cuota 0" en comercial).
+        def _eq_cuota(a, b):
+            if a is None and (b is None or b == 0):
+                return True
+            if b is None and (a is None or a == 0):
+                return True
+            return a == b
+
+        diff = (
+            (c is None) or (s is None)
+            or s_base != c_base
+            or not _eq_cuota(s_cuota, c_cuota)
+        )
         return {
             "key": key_info,
             "sii": {"base_imponible": s_base, "cuota_repercutida": s_cuota} if s else None,
@@ -274,6 +293,17 @@ def _diff_tramos(
     # Comercial que quedó sin pareja
     for c in com_pool:
         out.append(_build(None, c))
+
+    # Orden: por tipo impositivo descendente (21, 10, 4, ...) y exentas al final.
+    # Líneas con tipo None van después de las que tienen tipo.
+    def _orden(linea: dict) -> tuple:
+        key = linea.get("key") or {}
+        if "tipo" in key and key["tipo"] is not None:
+            return (0, -float(key["tipo"]))  # negativo para descendente
+        if "causa_exencion" in key:
+            return (1, str(key.get("causa_exencion") or ""))
+        return (2, "")
+    out.sort(key=_orden)
     return out
 
 

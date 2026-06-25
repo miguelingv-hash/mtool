@@ -1,12 +1,12 @@
 """Integration tests for /api/comparativa endpoint with diff-by-tramos behavior.
 
-FEATURES tested:
-  - F1: diferencias.detalle_iva con 2 tramos (21 coincide, E1 diff por null vs 0)
-  - F2: con desglose en ambos lados, base/cuota/tipo NO aparecen en cabecera
-  - F3: matching relajado — tramo SII exento E1 empareja con tramo comercial sin causa
-  - REGRESIÓN: endpoints redondear-importes y limpiar-tipo-impositivo-anomalo siguen 200
+UPDATED for iteration_11:
+  - Cambio funcional: null cuota SII == 0.0 cuota comercial → NO es discrepancia.
+  - Factura 26TAABN000008293 ahora marca estado='coincide' (antes 'discrepancia').
+  - diferencias.detalle_iva NO debe aparecer (todos los tramos coinciden).
+  - REGRESIÓN: endpoints redondear-importes y limpiar-tipo-impositivo-anomalo siguen 200.
+  - REGRESIÓN B: una factura con tramos 21+10 sin exentas se sigue comparando OK.
 """
-import json
 import os
 import sys
 
@@ -53,7 +53,6 @@ def comparativa_8293(admin_session):
     )
     assert r.status_code == 200, f"HTTP {r.status_code}: {r.text[:500]}"
     payload = r.json()
-    # Endpoint puede devolver lista o {items:[...]}
     items = payload if isinstance(payload, list) else payload.get("items") or payload.get("data") or []
     assert items, f"esperaba items, obtuve: {str(payload)[:500]}"
     item = next((x for x in items if x.get("num_serie_factura") == "26TAABN000008293"), None)
@@ -61,64 +60,78 @@ def comparativa_8293(admin_session):
     return item
 
 
-# --- FEATURE 1: detalle_iva como array de 2 tramos ---
-class TestFeature1DiffPorTramos:
-    def test_diferencias_contiene_detalle_iva(self, comparativa_8293):
+# --- FEATURE 1 (iteration_11): null cuota SII == 0 comercial → coincide ---
+class TestFeature1NullEquivCero:
+    def test_estado_coincide(self, comparativa_8293):
+        """La factura 8293 antes marcaba 'discrepancia' por la exenta E1 (null vs 0).
+        Ahora con la nueva regla debe marcar 'coincide'."""
+        estado = comparativa_8293.get("estado")
+        assert estado == "coincide", f"esperaba estado='coincide', obtuve '{estado}' — item={comparativa_8293}"
+
+    def test_detalle_iva_no_aparece(self, comparativa_8293):
+        """Si todos los tramos coinciden, detalle_iva NO debe aparecer en diferencias."""
         diffs = comparativa_8293.get("diferencias") or {}
-        assert "detalle_iva" in diffs, f"diferencias sin detalle_iva: {list(diffs.keys())}"
+        assert "detalle_iva" not in diffs, f"detalle_iva no debería aparecer: {list(diffs.keys())}"
 
-    def test_dos_tramos(self, comparativa_8293):
-        tramos = comparativa_8293["diferencias"]["detalle_iva"]
-        assert isinstance(tramos, list)
-        assert len(tramos) == 2, f"esperaba 2 tramos, obtuve {len(tramos)}: {json.dumps(tramos, default=str)[:500]}"
-
-    def test_tramo_21_coincide(self, comparativa_8293):
-        tramos = comparativa_8293["diferencias"]["detalle_iva"]
-        t21 = next((t for t in tramos if (t.get("key") or {}).get("tipo") == 21.0), None)
-        assert t21 is not None, f"no encuentro tramo 21: {tramos}"
-        assert t21["diff"] is False, f"tramo 21 debería coincidir: {t21}"
-        assert t21["sii"]["base_imponible"] == 3.87
-        assert t21["sii"]["cuota_repercutida"] == 0.81
-        assert t21["comercial"]["base_imponible"] == 3.87
-        assert t21["comercial"]["cuota_repercutida"] == 0.81
-
-    def test_tramo_exento_diff_por_null_vs_0(self, comparativa_8293):
-        tramos = comparativa_8293["diferencias"]["detalle_iva"]
-        texe = next((t for t in tramos if (t.get("key") or {}).get("causa_exencion") == "E1"), None)
-        assert texe is not None, f"no encuentro tramo E1: {tramos}"
-        assert texe["diff"] is True, f"tramo E1 debería tener diff=True: {texe}"
-        assert texe["sii"]["cuota_repercutida"] is None
-        # 0.0 o -0.0 ambos aceptables (mantiene la discrepancia null vs valor)
-        assert texe["comercial"]["cuota_repercutida"] in (0.0, -0.0)
-
-
-# --- FEATURE 2: cabecera (base/cuota/tipo) NO se compara cuando hay desglose ---
-class TestFeature2CabeceraNoSeCompara:
-    def test_sin_base_imponible_cabecera(self, comparativa_8293):
+    def test_diferencias_sin_campos_cabecera_iva(self, comparativa_8293):
+        """No debería haber base/cuota/tipo a nivel cabecera (ambos lados tienen desglose)."""
         diffs = comparativa_8293.get("diferencias") or {}
-        assert "base_imponible" not in diffs, f"keys: {list(diffs.keys())}"
-
-    def test_sin_cuota_cabecera(self, comparativa_8293):
-        diffs = comparativa_8293.get("diferencias") or {}
-        assert "cuota_repercutida" not in diffs, f"keys: {list(diffs.keys())}"
-
-    def test_sin_tipo_cabecera(self, comparativa_8293):
-        diffs = comparativa_8293.get("diferencias") or {}
-        assert "tipo_impositivo" not in diffs, f"keys: {list(diffs.keys())}"
+        assert "base_imponible" not in diffs
+        assert "cuota_repercutida" not in diffs
+        assert "tipo_impositivo" not in diffs
 
 
-# --- FEATURE 3: matching relajado (SII exento con causa ↔ comercial sin causa) ---
-class TestFeature3MatchingRelajado:
-    def test_tramo_exento_emparejado(self, comparativa_8293):
-        tramos = comparativa_8293["diferencias"]["detalle_iva"]
-        texe = next((t for t in tramos if (t.get("key") or {}).get("causa_exencion") == "E1"), None)
-        assert texe is not None
-        # Ambos lados presentes ⇒ matching relajado funcionó (el comercial no tenía causa_exencion)
-        assert texe["sii"] is not None, f"SII null → no se emparejó: {texe}"
-        assert texe["comercial"] is not None, f"comercial null → no se emparejó: {texe}"
+# --- REGRESIÓN B: factura con tramos 21+10 (sin exentas) ---
+class TestRegresionFacturaMultiTramo:
+    def test_factura_con_tramos_21_y_10(self, admin_session, db):
+        """Busca una factura con tramos 21+10 que exista en ambas colecciones,
+        valida que el endpoint responde 200 y compara correctamente."""
+        # Recolectar num_series de comercial con >=2 tramos
+        comercial_series = set(
+            f["num_serie_factura"]
+            for f in db.facturas_comercial.find(
+                {"detalle_iva.1": {"$exists": True}},
+                {"num_serie_factura": 1},
+            ).limit(500)
+        )
+        cursor = db.facturas_sii.find(
+            {"detalle_iva.1": {"$exists": True}},
+            {"num_serie_factura": 1, "detalle_iva": 1},
+        ).limit(500)
+        target = None
+        for f in cursor:
+            if f["num_serie_factura"] not in comercial_series:
+                continue
+            tipos = {(d or {}).get("tipo_impositivo") for d in (f.get("detalle_iva") or [])}
+            if 21.0 in tipos and 10.0 in tipos and None not in tipos:
+                target = f["num_serie_factura"]
+                break
+        if not target:
+            pytest.skip("No se encontró factura con tramos 21+10 sin exentas presente en ambas colecciones")
+
+        r = admin_session.get(
+            f"{BASE_URL}/api/comparativa",
+            params={"num_serie": target, "limit": 5, "only_diffs": "false"},
+            timeout=60,
+        )
+        assert r.status_code == 200, f"HTTP {r.status_code}: {r.text[:300]}"
+        payload = r.json()
+        items = payload if isinstance(payload, list) else payload.get("items") or payload.get("data") or []
+        assert items, f"sin items para {target}"
+        item = next((x for x in items if x.get("num_serie_factura") == target), None)
+        assert item is not None, f"factura {target} no presente"
+        # Si tiene detalle_iva en diff, debe estar ordenado 21 antes que 10
+        diffs = item.get("diferencias") or {}
+        tramos = diffs.get("detalle_iva")
+        if tramos:
+            tipos_orden = [(t.get("key") or {}).get("tipo") for t in tramos if "tipo" in (t.get("key") or {})]
+            if 21.0 in tipos_orden and 10.0 in tipos_orden:
+                idx21 = tipos_orden.index(21.0)
+                idx10 = tipos_orden.index(10.0)
+                assert idx21 < idx10, f"Orden incorrecto: {tipos_orden}"
 
 
-# --- REGRESIÓN: endpoints de saneamiento vivos ---
+# --- REGRESIÓN A: endpoints de saneamiento siguen vivos ---
 class TestRegresionEndpoints:
     def test_redondear_importes_dry_run(self, admin_session):
         r = admin_session.post(
@@ -140,6 +153,18 @@ class TestRegresionEndpoints:
         assert r.status_code == 200, f"HTTP {r.status_code}: {r.text[:300]}"
         data = r.json()
         assert data.get("encontradas") == 0, f"BD debería estar saneada: {data}"
+
+    def test_comparativa_sin_filtros(self, admin_session):
+        """Endpoint sin filtros responde 200."""
+        r = admin_session.get(
+            f"{BASE_URL}/api/comparativa",
+            params={"limit": 10, "only_diffs": "false"},
+            timeout=60,
+        )
+        assert r.status_code == 200, f"HTTP {r.status_code}: {r.text[:300]}"
+        payload = r.json()
+        items = payload if isinstance(payload, list) else payload.get("items") or payload.get("data") or []
+        assert isinstance(items, list)
 
 
 if __name__ == "__main__":

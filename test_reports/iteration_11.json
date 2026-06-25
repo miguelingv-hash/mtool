@@ -1,0 +1,51 @@
+{
+  "summary": "Backend-only verification of 2 IVA-tramos refinements: (1) cuota=null SII == cuota=0 comercial → coincide, (2) tramos ordenados por tipo desc (21,10,4,...) y exentas al final. 9/9 unit tests pass en test_diff_tramos_iva.py (incluyendo los 2 nuevos). Full suite 41 unit + 15 integration = 56 passed, 1 skipped (no hay factura con tramos 21+10 sin exentas presente en ambas colecciones — skip conceptual, no es fallo). Live endpoint para 8293 confirma estado='coincide' y diferencias={}.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_diff_tramos_iva.py",
+    "/app/backend/tests/test_comparativa_integration.py",
+    "/app/backend/tests/test_precision_detalle_iva.py",
+    "/app/backend/tests/test_sanear_tipo_impositivo.py",
+    "/app/backend/tests/test_precision_api.py",
+    "/app/test_reports/pytest/iteration_11_full.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "factura_model.py _build/_eq_cuota (lines 241-246): tratamiento null==0 acotado SOLO al campo cuota_repercutida, no a base_imponible. Correcto — semánticamente solo aplica a cuota en exentas. Si comercial trae base=0 vs SII base=null seguiría siendo diff (esperado).",
+    "factura_model.py _build (lines 223-227): la normalización -0.0 → 0.0 ocurre ANTES de _eq_cuota, así que tanto +0.0 como -0.0 quedan como 0.0 y son equiv a None correctamente.",
+    "factura_model.py _orden (lines 299-306): tupla (categoria, -tipo|causa) garantiza orden 0<1<2 (tipo<exenta<otro) y dentro de tipo orden DESCENDENTE (21,10,4) por -float. Estable. Las exentas dentro de categoría 1 se ordenan alfabéticamente por causa — razonable.",
+    "El cambio funcional cuota null==0 NO afecta cuando ambos lados traen valores numéricos diferentes (p.ej. 0.0 vs 0.81 sigue siendo diff). Acotado a casos null/0.",
+    "Cobertura mejorada: 9 unit tests en test_diff_tramos_iva.py cubren todas las rutas (cabecera omitida, match exacto, sin inversión, emparejamiento por causa, solo un lado, sin desglose, desglose un lado, null==0, orden descendente). Cobertura suficiente.",
+    "Endpoint /api/comparativa sigue devolviendo 200 sin cambios estructurales — el nuevo orden de tramos se serializa automáticamente desde la lista ordenada por _diff_tramos."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_comparativa_integration.py (actualizado: ahora valida estado='coincide' en lugar de 'discrepancia' para factura 8293 — cambio funcional intencional iteration_11)"
+  ],
+  "success_rate": {
+    "backend": "100% (56/56 ejecutados, 1 skipped por falta de fixture data)",
+    "frontend": "N/A (skipped por request)"
+  },
+  "test_credentials": "Admin miguelingv@gmail.com — JWT vía auth.create_access_token + JWT_SECRET en /app/backend/.env (bypass MFA para tests).",
+  "seed_data_creation": "Ninguna. BD ya saneada de iteraciones anteriores. Factura real 26TAABN000008293 reutilizada.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "test_results_detail": {
+    "FEATURE1_null_cuota_equiv_cero": "PASS — Live endpoint para 26TAABN000008293 ahora retorna estado='coincide' y diferencias={} (antes diferencias.detalle_iva con tramo E1 diff=True). Unit test test_cuota_null_sii_equivale_cero_comercial valida el comportamiento aislado.",
+    "FEATURE2_orden_descendente": "PASS — Unit test test_orden_descendente_por_tipo_iva con tramos [10,exenta,21,4] entrada produce [21,10,4,exenta] salida. Implementación correcta vía tupla (categoria, -tipo|causa).",
+    "TESTS_PYTEST_diff_tramos_iva": "PASS 9/9 — 7 previos + 2 nuevos (cuota_null_sii_equivale_cero_comercial, orden_descendente_por_tipo_iva).",
+    "TESTS_PYTEST_full_suite_41": "PASS 41/41 — 9 test_diff_tramos_iva + 6 test_precision_detalle_iva + 26 test_sanear_tipo_impositivo.",
+    "REGRESION_58_tests_iteration_10": "PASS — 56/56 ejecutados, 1 skipped. Suite completa (41 unit + 15 integration: 3 nuevos NullEquivCero + 1 skip MultiTramo21y10 + 3 RegresionEndpoints + 9 test_precision_api) = sin fallos. test_comparativa_integration.py adaptado al nuevo comportamiento esperado (cambio funcional intencional confirmado por main agent).",
+    "REGRESION_B_endpoint_sin_filtros": "PASS — GET /api/comparativa con limit=10 sin num_serie responde 200, items es lista.",
+    "REGRESION_factura_21_10_sin_exentas": "SKIP — Tras escanear hasta 500 facturas de cada colección, no se encontró ninguna que cumpla (tramos 21+10, sin exentas, presente en ambas colecciones). El test queda como skip-tolerante; conceptualmente el orden está validado en el unit test orden_descendente_por_tipo_iva."
+  },
+  "context_for_next_testing_agent": "Cambios funcionales iteration_11: (1) _eq_cuota(a,b) en _build trata None==0 como equivalente (líneas 241-246 factura_model.py). (2) _diff_tramos al final ordena por (categoria 0/1/2, -tipo|causa) — descendente para tipo, exentas después. La factura 26TAABN000008293 ahora marca estado='coincide' (verificado en vivo). El test test_comparativa_integration.py de iteration_10 fue REESCRITO para reflejar este cambio: TestFeature1NullEquivCero (3 tests pasan), TestRegresionFacturaMultiTramo (1 test que skipea si no hay fixture data), TestRegresionEndpoints (3 tests). Si en el futuro se necesita validar orden descendente con datos reales del endpoint, hay que añadir manualmente una factura con tramos 21+10 a ambas colecciones (facturas_sii y facturas_comercial). Para frontend testing futuro: el LineasIvaCompare en Comparativa.jsx hereda automáticamente el orden del backend, no hay cambios JS.",
+  "rca_of_the_issue": "N/A — refinamientos funcionales, no bug fix. Implementación correcta y validada end-to-end."
+}
