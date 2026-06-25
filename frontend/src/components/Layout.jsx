@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   UserCog,
   Users,
+  Wrench,
   Activity,
   Coins,
   LayoutGrid,
@@ -85,6 +86,7 @@ const NAV_TREE = [
   },
   { to: "/admin/usuarios", label: "Usuarios", icon: Users, testId: "nav-admin-users", perm: "users.manage" },
   { to: "/admin/roles", label: "Roles", icon: UserCog, testId: "nav-admin-roles", perm: "roles.manage" },
+  { to: "/admin/mantenimiento", label: "Mantenimiento", icon: Wrench, testId: "nav-admin-mantenimiento", perm: "sii.wipe" },
 ];
 
 function isItemAccessible(node, hasPermission) {

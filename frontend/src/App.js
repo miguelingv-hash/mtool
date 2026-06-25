@@ -18,6 +18,7 @@ import SetupPassword from "@/pages/SetupPassword";
 import ForgotPassword from "@/pages/ForgotPassword";
 import AdminUsuarios from "@/pages/AdminUsuarios";
 import AdminRoles from "@/pages/AdminRoles";
+import AdminMantenimiento from "@/pages/AdminMantenimiento";
 import TasasPanel from "@/pages/tasas/TasasPanel";
 import TasasTasas from "@/pages/tasas/TasasTasas";
 import TasasMunicipios from "@/pages/tasas/TasasMunicipios";
@@ -56,6 +57,7 @@ function App() {
               <Route path="/pagos-ventanilla/historico" element={<ProtectedRoute requires="pagos_ventanilla.view"><PagosVentanillaHistorico /></ProtectedRoute>} />
               <Route path="/admin/usuarios" element={<ProtectedRoute requires="users.manage"><AdminUsuarios /></ProtectedRoute>} />
               <Route path="/admin/roles" element={<ProtectedRoute requires="roles.manage"><AdminRoles /></ProtectedRoute>} />
+              <Route path="/admin/mantenimiento" element={<ProtectedRoute requires="sii.wipe"><AdminMantenimiento /></ProtectedRoute>} />
             </Route>
           </Routes>
         </BrowserRouter>

@@ -56,6 +56,7 @@ PERMISSIONS_CATALOG = [
     {"key": "tasas.admin", "label": "Ajustes globales de Tasas (SharePoint, etc.)"},
     {"key": "users.manage", "label": "Gestionar usuarios"},
     {"key": "roles.manage", "label": "Gestionar roles y permisos"},
+    {"key": "sii.wipe", "label": "Vaciar módulo SII (operación destructiva)"},
 ]
 
 
@@ -320,3 +321,66 @@ async def permissions_catalog(
     _: dict = Depends(require_permission("roles.manage")),
 ):
     return PERMISSIONS_CATALOG
+
+
+# ============================================================================
+# Mantenimiento del módulo SII (destructivo)
+# ============================================================================
+SII_WIPE_COLLECTIONS = (
+    "facturas_sii",
+    "facturas_comercial",
+    "consultas",
+    "jobs",
+)
+
+
+class WipeSIIIn(BaseModel):
+    confirmacion: str = Field(
+        ...,
+        description="Debe ser exactamente 'VACIAR' para confirmar la operación.",
+    )
+
+
+@router.post("/sii/vaciar-modulo")
+async def vaciar_modulo_sii(
+    request: Request,
+    payload: WipeSIIIn,
+    dry_run: bool = False,
+    _: dict = Depends(require_permission("sii.wipe")),
+):
+    """Vacía las colecciones del módulo SII: `facturas_sii`, `facturas_comercial`,
+    `consultas`, `jobs`. **Operación irreversible**.
+
+    No toca: `users`, `roles`, `comparativa_config`, `tasas_*`, `users_mfa`,
+    `login_attempts`, `activation_tokens`.
+
+    Requisitos:
+      - Permiso `sii.wipe` (solo admin por defecto).
+      - Body con `confirmacion = "VACIAR"`.
+      - `dry_run=true` para sólo contar sin borrar.
+    """
+    if payload.confirmacion != "VACIAR":
+        raise HTTPException(
+            400,
+            "Confirmación inválida. El campo 'confirmacion' debe ser exactamente 'VACIAR'.",
+        )
+    db = _db(request)
+    resumen: dict[str, dict[str, int]] = {}
+    for col in SII_WIPE_COLLECTIONS:
+        antes = await db[col].count_documents({})
+        if dry_run:
+            resumen[col] = {"antes": antes, "borrados": 0, "despues": antes}
+        else:
+            res = await db[col].delete_many({})
+            despues = await db[col].count_documents({})
+            resumen[col] = {
+                "antes": antes,
+                "borrados": res.deleted_count,
+                "despues": despues,
+            }
+    return {
+        "dry_run": dry_run,
+        "colecciones_afectadas": list(SII_WIPE_COLLECTIONS),
+        "resumen": resumen,
+    }
+

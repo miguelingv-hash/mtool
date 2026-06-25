@@ -200,6 +200,12 @@
 - **Fix**: 1 línea en `frontend/src/pages/Comparativa.jsx` — cuando `Array.isArray(diferencias.detalle_iva)` y el campo es uno de los 3 del desglose, marca `isDiff=true`. Mantiene la semántica del backend (la verdad canónica está en `detalle_iva`) y restaura el indicador visual.
 - **Tests**: 12/12 pytest verdes (sin cambios backend).
 
+### Feb 2026 — Admin Mantenimiento: vaciar módulo SII desde la UI
+- **Endpoint nuevo**: `POST /api/admin/sii/vaciar-modulo` con `?dry_run=true|false` y body `{"confirmacion": "VACIAR"}` literal. Borra `facturas_sii` + `facturas_comercial` + `consultas` + `jobs`. No toca auth, comparativa_config ni tasas_*. Requiere permiso `sii.wipe` (añadido al catálogo; admin lo cubre con wildcard).
+- **Página nueva**: `/admin/mantenimiento` (`AdminMantenimiento.jsx`). Tarjeta destructiva con: botón "Ver estado actual" (dry-run), botón "Vaciar módulo SII" que abre AlertDialog con input que exige escribir literalmente `VACIAR` para habilitar la acción. Tras vaciar muestra una tabla con antes/borrados/después por colección. Tests data-testid presentes (`sii-wipe-resumen`, `sii-wipe-confirm-input`, etc.).
+- **Sidebar**: nuevo enlace "Mantenimiento" (icono Wrench, perm `sii.wipe`) bajo el bloque admin.
+- **Validado**: endpoint probado con datos dummy (100+50+10+5) → wipe correcto (todos a 0). Rechaza confirmaciones inválidas (`"borrar"` → 400). Ruta `/admin/mantenimiento` protegida correctamente (redirige a /login sin sesión).
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.
