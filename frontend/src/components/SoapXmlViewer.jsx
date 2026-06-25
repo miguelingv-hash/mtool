@@ -67,8 +67,12 @@ function prettyXml(xml) {
 }
 
 /**
- * Aplana el árbol DOM en una lista lineal con depth, para evitar recursión JSX
- * (que confunde al transpilador de Babel en algunos casos).
+ * Aplana el árbol DOM en una lista lineal con depth (pre-order). Aunque
+ * internamente usa una función `walk` recursiva, los árboles SOAP del SII son
+ * shallow (~20 nodos en producción), así que no hay riesgo de stack overflow.
+ * Lo aplanamos para que el renderizado sea iterativo (sin recursión JSX), lo
+ * que evita que babel-traverse entre en bucle al transpilar y mejora la
+ * estabilidad del cálculo de visibilidad cuando se colapsan ramas.
  */
 function flattenXmlNode(root) {
   const items = [];
