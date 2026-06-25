@@ -6,9 +6,9 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import EstadoBadge from "@/components/EstadoBadge";
+import SoapXmlViewer from "@/components/SoapXmlViewer";
 import { ESTADO_META } from "@/lib/api";
 
 const Row = ({ label, value, mono = false }) => (
@@ -89,25 +89,11 @@ export default function QueryDetailSheet({ open, onOpenChange, record }) {
             </TabsContent>
 
             <TabsContent value="request" className="mt-3">
-              <ScrollArea className="h-[420px] border border-slate-200 bg-slate-950">
-                <pre
-                  className="p-4 text-xs text-slate-100 font-mono whitespace-pre-wrap break-all"
-                  data-testid="soap-request-xml"
-                >
-                  {record.soap_request_xml}
-                </pre>
-              </ScrollArea>
+              <SoapXmlViewer xml={record.soap_request_xml} testid="soap-request" />
             </TabsContent>
 
             <TabsContent value="response" className="mt-3">
-              <ScrollArea className="h-[420px] border border-slate-200 bg-slate-950">
-                <pre
-                  className="p-4 text-xs text-slate-100 font-mono whitespace-pre-wrap break-all"
-                  data-testid="soap-response-xml"
-                >
-                  {record.soap_response_xml}
-                </pre>
-              </ScrollArea>
+              <SoapXmlViewer xml={record.soap_response_xml} testid="soap-response" />
             </TabsContent>
           </Tabs>
         </div>
