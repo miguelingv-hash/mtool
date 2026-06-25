@@ -913,17 +913,24 @@ async def conciliar_newman_importar(
 
     num_series_csv = [f["num_serie_factura"] for f in filas]
 
-    filtro_bd: dict = {"nif_titular": nif_titular}
+    base_filtro_bd: dict = {"nif_titular": nif_titular}
     if ejercicio:
-        filtro_bd["ejercicio"] = str(ejercicio)
+        base_filtro_bd["ejercicio"] = str(ejercicio)
     if periodo:
         periodo_norm = _norm_periodo(periodo)
-        filtro_bd["periodo"] = {"$in": [periodo_norm, str(int(periodo_norm)) if periodo_norm.isdigit() else periodo_norm]}
-    filtro_bd["num_serie_factura"] = {"$in": num_series_csv}
+        base_filtro_bd["periodo"] = {"$in": [periodo_norm, str(int(periodo_norm)) if periodo_norm.isdigit() else periodo_norm]}
 
+    # Trocea la query existencial: MongoDB limita las queries a 16MB de BSON.
+    # Con un `$in` de cientos de miles de num_serie_factura el filtro supera ese
+    # límite y devuelve DocumentTooLarge. Procesamos en chunks de 20k.
+    NS_CHUNK = 20_000
     existentes: set[str] = set()
-    async for d in _db.facturas_sii.find(filtro_bd, {"_id": 0, "num_serie_factura": 1}):
-        existentes.add(d["num_serie_factura"])
+    for i in range(0, len(num_series_csv), NS_CHUNK):
+        chunk_ns = num_series_csv[i : i + NS_CHUNK]
+        filtro_bd = dict(base_filtro_bd)
+        filtro_bd["num_serie_factura"] = {"$in": chunk_ns}
+        async for d in _db.facturas_sii.find(filtro_bd, {"_id": 0, "num_serie_factura": 1}):
+            existentes.add(d["num_serie_factura"])
 
     faltantes = [f for f in filas if f["num_serie_factura"] not in existentes]
 
