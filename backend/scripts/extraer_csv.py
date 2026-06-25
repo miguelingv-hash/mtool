@@ -28,10 +28,16 @@ import sys
 # Regex utilidades
 # ---------------------------------------------------------------------------
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-# Quita SOLO los bordes laterales (│ ó |) y los espacios de padding adyacentes.
-# Mantiene el contenido intacto.
-BORDER_LEFT_RE = re.compile(r"^[\s\u2502|]+")
-BORDER_RIGHT_RE = re.compile(r"[\s\u2502|]+$")
+# Quita SOLO los bordes laterales de tabla Newman (carácter '│' U+2502) y los
+# espacios de padding adyacentes. Mantiene el contenido intacto.
+#
+# IMPORTANTE: NO incluir '|' (pipe ASCII) en el char class — ese es el
+# DELIMITADOR de columnas dentro de las celdas CSVHEAD/CSVROW. Si lo
+# tratáramos como borde, los wraps que rompen justo al final de una columna
+# perderían el separador y al concatenar dos celdas quedarían pegadas
+# (ej. '...116.54|' + '21|24.47...' → '...116.5421|24.47...').
+BORDER_LEFT_RE = re.compile(r"^[\s\u2502]+")
+BORDER_RIGHT_RE = re.compile(r"[\s\u2502]+$")
 # Líneas que sólo contienen bordes de tabla (┌─┬─┐ ├─┤ └─┴─┘ etc.)
 BOX_LINE_RE = re.compile(r"^[\s\u2500-\u257F]+$")
 

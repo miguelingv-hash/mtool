@@ -1079,6 +1079,151 @@ async def limpiar_tipo_impositivo_anomalo(
     }
 
 
+@router.post("/facturas/sii/diagnosticar-newman-wrap")
+async def diagnosticar_newman_wrap(
+    aplicar: bool = False,
+    _: dict = Depends(require_permission("conciliacion.import")),
+) -> dict:
+    """Diagnostica (y opcionalmente sanea) facturas afectadas por el bug de
+    wrap del export de Newman (`scripts/extraer_csv.py` previo al fix de los
+    bordes `|` ASCII).
+
+    **Bug** (ya corregido en el script): cuando una fila CSVROW: rompía con
+    wrap justo al final de una celda, el `|` delimitador de columna se
+    eliminaba al limpiar bordes. Al reensamblar, dos columnas quedaban
+    pegadas y los campos posteriores se desplazaban una posición a la derecha.
+    El punto exacto del wrap varía por fila, así que reparar por shift-back
+    no es fiable. Esta función se limita a:
+
+    1. Detectar el residuo del bug (signatura: `num_registro_presentacion`
+       termina en `'` — proviene en realidad de `TimestampPresentacion`).
+    2. **Recuperar** `timestamp_presentacion` desde ahí (quitando la comilla).
+    3. **Limpiar** campos claramente contaminados:
+       - `num_registro_presentacion` → unset.
+       - `contraparte_nombre`: si termina en un estado SII conocido
+         (`Correcta`, `AceptadaConErrores`, etc.), se separa el sufijo y
+         se asigna a `estado_factura`.
+       - `estado_factura`: si es un string puramente numérico (proviene
+         de `CSVAEAT` por shift), se mueve a `csv_aeat` y queda en None.
+       - `tipo_impositivo` fuera de los tipos legales {21,10,7,5,4,0} en
+         registros con esta signatura: unset (suele ser el cuota_repercutida).
+
+    Tras esto, **re-importar el CSV** regenerado con el `extraer_csv.py`
+    corregido repuebla todos los campos correctamente (los upserts hacen
+    `$set` solo de valores no vacíos, por eso primero hay que limpiar los
+    residuos).
+
+    Modo:
+      - `aplicar=false` (default): solo cuenta y devuelve muestra.
+      - `aplicar=true`: aplica la limpieza.
+    """
+    from pymongo import UpdateOne  # noqa: WPS433
+
+    filtro = {"num_registro_presentacion": {"$regex": r"'$"}}
+    total = await _db.facturas_sii.count_documents(filtro)
+    muestra = await _db.facturas_sii.find(
+        filtro,
+        {
+            "_id": 0,
+            "num_serie_factura": 1,
+            "tipo_impositivo": 1,
+            "cuota_repercutida": 1,
+            "contraparte_nif": 1,
+            "contraparte_nombre": 1,
+            "estado_factura": 1,
+            "num_registro_presentacion": 1,
+        },
+    ).limit(5).to_list(None)
+
+    if not aplicar:
+        return {
+            "encontradas": total,
+            "muestra": muestra,
+            "aplicado": False,
+            "mensaje": (
+                "Modo diagnóstico. Para limpiar, pasa ?aplicar=true. "
+                "Tras limpiar, re-importar el CSV regenerado con el "
+                "extraer_csv.py corregido para repoblar los campos."
+            ),
+        }
+
+    ESTADOS_SII = (
+        "Correcta",
+        "AceptadaConErrores",
+        "AceptadaPorOtraUE",
+        "Anulada",
+        "NoRegistrada",
+        "Rechazada",
+    )
+    TIPOS_LEGALES = {0.0, 4.0, 5.0, 7.0, 10.0, 21.0}
+
+    reparadas = 0
+    ops: list = []
+    cursor = _db.facturas_sii.find(filtro)
+    async for d in cursor:
+        sets: dict = {}
+        unsets: dict = {}
+
+        # 1) Recupera timestamp_presentacion desde num_registro_presentacion.
+        nrp = d.get("num_registro_presentacion")
+        if isinstance(nrp, str) and nrp.endswith("'"):
+            sets["timestamp_presentacion"] = nrp.rstrip("'").strip()
+            unsets["num_registro_presentacion"] = ""
+
+        # 2) Repara contraparte_nombre concatenado con estado SII al final.
+        nombre = d.get("contraparte_nombre")
+        if isinstance(nombre, str):
+            for est in ESTADOS_SII:
+                if nombre.endswith(est) and nombre != est:
+                    sets["contraparte_nombre"] = nombre[: -len(est)].rstrip()
+                    sets["estado_factura"] = est
+                    break
+
+        # 3) estado_factura puramente numérico → en realidad es CSVAEAT.
+        estado = sets.get("estado_factura", d.get("estado_factura"))
+        # Solo movemos a csv_aeat si NO estamos a punto de poner un estado
+        # válido en el paso 2 (en cuyo caso el estado_factura actual era
+        # el csv_aeat shifted).
+        if "estado_factura" in sets:
+            estado_previo = d.get("estado_factura")
+            if isinstance(estado_previo, str) and estado_previo.isdigit():
+                sets["csv_aeat"] = estado_previo
+        elif isinstance(estado, str) and estado.isdigit():
+            sets["csv_aeat"] = estado
+            unsets["estado_factura"] = ""
+
+        # 4) tipo_impositivo fuera de los tipos legales → unset
+        #    (suele ser el cuota_repercutida shifted).
+        tipo = d.get("tipo_impositivo")
+        if isinstance(tipo, (int, float)) and float(tipo) not in TIPOS_LEGALES:
+            unsets["tipo_impositivo"] = ""
+
+        if sets or unsets:
+            update: dict = {}
+            if sets:
+                update["$set"] = sets
+            if unsets:
+                update["$unset"] = unsets
+            ops.append(UpdateOne({"_id": d["_id"]}, update))
+            reparadas += 1
+            if len(ops) >= 1000:
+                await _db.facturas_sii.bulk_write(ops, ordered=False)
+                ops = []
+    if ops:
+        await _db.facturas_sii.bulk_write(ops, ordered=False)
+
+    return {
+        "encontradas": total,
+        "saneadas": reparadas,
+        "aplicado": True,
+        "mensaje": (
+            f"Se limpiaron campos contaminados en {reparadas} facturas. "
+            f"Próximo paso: re-importar el CSV regenerado con el "
+            f"extraer_csv.py corregido para repoblar los campos correctos."
+        ),
+    }
+
+
 @router.post("/facturas/sii/redondear-importes")
 async def redondear_importes(
     dry_run: bool = True,
