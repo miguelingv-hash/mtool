@@ -176,7 +176,12 @@ const tieneIvaIncorrecto = (row) => {
  */
 function LineasIvaCompare({ tramos }) {
   if (!Array.isArray(tramos) || tramos.length === 0) return null;
-  const fmt = (v) => (v == null ? "—" : Number(v).toFixed(2));
+  const fmt = (v) => {
+    if (v == null) return "—";
+    // Normaliza -0 a 0 (IEEE-754 tras invertir signo del comercial)
+    const n = Number(v) === 0 ? 0 : Number(v);
+    return n.toFixed(2);
+  };
   const labelKey = (k) => {
     if (!k) return "—";
     if (k.tipo != null) return `Tipo ${Number(k.tipo).toFixed(2)} %`;
