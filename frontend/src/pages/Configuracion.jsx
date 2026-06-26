@@ -73,6 +73,14 @@ export default function Configuracion() {
     });
   };
 
+  const toggleExcluirTipoIvaCero = () => {
+    if (!cfg) return;
+    setCfg({
+      ...cfg,
+      excluir_comercial_tipo_iva_cero: !cfg.excluir_comercial_tipo_iva_cero,
+    });
+  };
+
   const guardar = async () => {
     if (!cfg) return;
     setSaving(true);
@@ -81,6 +89,7 @@ export default function Configuracion() {
         campos_comparados: cfg.campos_comparados,
         invertir_signo_por_origen: cfg.invertir_signo_por_origen,
         excluir_comercial_base_cero: cfg.excluir_comercial_base_cero,
+        excluir_comercial_tipo_iva_cero: cfg.excluir_comercial_tipo_iva_cero,
       });
       toast.success("Configuración guardada", {
         description:
@@ -102,6 +111,7 @@ export default function Configuracion() {
       campos_comparados: cfg.campos_comparados_default || [],
       invertir_signo_por_origen: {},
       excluir_comercial_base_cero: false,
+      excluir_comercial_tipo_iva_cero: true,
     });
   };
 
@@ -277,6 +287,27 @@ export default function Configuracion() {
               checked={!!cfg.excluir_comercial_base_cero}
               onCheckedChange={toggleExcluirBaseCero}
               data-testid="switch-excluir-base-cero"
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 border border-slate-200 rounded-md">
+            <div>
+              <div className="font-mono text-sm font-semibold text-slate-800">
+                Excluir líneas comerciales con{" "}
+                <span className="bg-slate-100 px-1.5 py-0.5">
+                  tipo_impositivo vacío o = 0
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                Líneas con cuota nula (exentas, suplidos, ajustes) no se
+                suman a totales ni se comparan línea a línea. Aplica a SAP FI
+                y SIGLO.
+              </div>
+            </div>
+            <Switch
+              checked={!!cfg.excluir_comercial_tipo_iva_cero}
+              onCheckedChange={toggleExcluirTipoIvaCero}
+              data-testid="switch-excluir-tipo-iva-cero"
             />
           </div>
         </div>

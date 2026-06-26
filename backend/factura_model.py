@@ -341,6 +341,24 @@ def diff_facturas(
     campos_comp: list[str] = cfg.get("campos_comparados") or CAMPOS_COMPARADOS_DEFAULT
     inv_map: dict = cfg.get("invertir_signo_por_origen") or {}
     invertir = bool(inv_map.get(b.get("origen_comercial")))
+    excluir_tipo_cero = bool(cfg.get("excluir_comercial_tipo_iva_cero", True))
+
+    # Filtra las líneas comerciales con tipo_impositivo vacío o cero ANTES de
+    # comparar (cuando el flag está activo). Estas líneas se consideran "no
+    # comparables" — típicas en SAP/SIGLO para conceptos exentos, suplidos o
+    # ajustes contables que no aplican a la conciliación con SII.
+    if excluir_tipo_cero:
+        det_b = b.get("detalle_iva")
+        if isinstance(det_b, list) and det_b:
+            def _tipo_no_cero(linea):
+                t = linea.get("tipo_impositivo")
+                if t is None:
+                    return False
+                try:
+                    return float(t) != 0
+                except (TypeError, ValueError):
+                    return True
+            b = {**b, "detalle_iva": [l for l in det_b if _tipo_no_cero(l)]}
 
     # ¿Aplicamos comparación línea a línea?
     detalle_mode = _hay_desglose(a) and _hay_desglose(b)

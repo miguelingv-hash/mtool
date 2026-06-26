@@ -253,6 +253,14 @@
 - **Frontend**: el botón "Importar" ahora encola el job y hace polling cada 2s a `/api/jobs/{id}`. Barra de progreso con 4 fases distintas: upload → parsing → matching → inserting. Muestra contador real (`processed / faltantes_total`).
 - **Validado E2E** con CSV sintético de 50k filas: job encolado en < 1s, procesado en background, status `done` con `result.insertadas` correcto.
 
+### Feb 2026 — Nuevo flag: excluir líneas comerciales con tipo_impositivo vacío o = 0
+- **Petición**: en SAP FI y SIGLO hay líneas con tipo_impositivo nulo o 0 (típicamente exentas, suplidos, ajustes contables) que no deben conciliarse contra SII.
+- **Backend**: nuevo campo de config `excluir_comercial_tipo_iva_cero` (bool, default `True`). Aplicado en:
+  1. `/api/comparativa/totales`: las líneas filtradas no suman a los totales por origen ni al Σ comercial (los `% conciliado` reflejan ahora la base "comparable").
+  2. `factura_model.diff_facturas` → `_diff_tramos`: las líneas filtradas no entran al matching → no aparecen como diff "comercial solo".
+- **Frontend** `Configuracion.jsx`: nuevo toggle `Switch` "Excluir líneas comerciales con tipo_impositivo vacío o = 0" justo debajo del existente "Excluir base_imponible = 0". Persistido vía `PUT /comparativa/config`.
+- **Tests**: 1 test nuevo `test_excluir_comercial_tipo_iva_cero_filtra_lineas` que prueba ambos comportamientos (flag on / off). Test pre-existente `test_cuota_null_sii_equivale_cero_comercial` actualizado para pasar el flag a `False` (mantiene su semántica original). 13/13 verdes.
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.

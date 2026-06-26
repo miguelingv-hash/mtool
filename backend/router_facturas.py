@@ -122,6 +122,7 @@ async def _load_comparativa_config() -> dict:
             "campos_comparados": list(CAMPOS_COMPARADOS_DEFAULT),
             "invertir_signo_por_origen": {},
             "excluir_comercial_base_cero": False,
+            "excluir_comercial_tipo_iva_cero": True,
         }
     return {
         "campos_comparados": doc.get(
@@ -132,6 +133,9 @@ async def _load_comparativa_config() -> dict:
         ) or {},
         "excluir_comercial_base_cero": bool(
             doc.get("excluir_comercial_base_cero", False)
+        ),
+        "excluir_comercial_tipo_iva_cero": bool(
+            doc.get("excluir_comercial_tipo_iva_cero", True)
         ),
     }
 
@@ -2376,6 +2380,7 @@ async def get_comparativa_config():
         "campos_comparados": cfg["campos_comparados"],
         "invertir_signo_por_origen": cfg["invertir_signo_por_origen"],
         "excluir_comercial_base_cero": cfg["excluir_comercial_base_cero"],
+        "excluir_comercial_tipo_iva_cero": cfg["excluir_comercial_tipo_iva_cero"],
         "campos_disponibles": list(CAMPOS_CANONICOS),
         "campos_numericos": list(CAMPOS_NUMERICOS),
         "origenes_disponibles": origenes,
@@ -2412,13 +2417,57 @@ async def comparativa_totales(
         excluir_base_cero=config["excluir_comercial_base_cero"],
     )
 
-    def _sum_doc(doc: dict) -> tuple[float, float]:
-        """Devuelve (base, cuota) de un doc, usando detalle_iva si existe."""
+    excluir_tipo_iva_cero = config.get("excluir_comercial_tipo_iva_cero", True)
+
+    def _linea_excluida_comercial(linea: dict) -> bool:
+        """Devuelve True si una línea del detalle_iva del comercial debe
+        excluirse del cómputo (tipo_impositivo vacío o cero).
+        """
+        if not excluir_tipo_iva_cero:
+            return False
+        t = linea.get("tipo_impositivo")
+        if t is None:
+            return True
+        try:
+            return float(t) == 0
+        except (TypeError, ValueError):
+            return False
+
+    def _sum_doc_sii(doc: dict) -> tuple[float, float]:
+        """Devuelve (base, cuota) de un doc SII (no aplica filtro)."""
         det = doc.get("detalle_iva")
         if isinstance(det, list) and det:
             base = sum(float(t.get("base_imponible") or 0) for t in det)
             cuota = sum(float(t.get("cuota_repercutida") or 0) for t in det)
             return base, cuota
+        base = float(doc.get("base_imponible") or 0)
+        cuota = float(doc.get("cuota_repercutida") or 0)
+        return base, cuota
+
+    def _sum_doc_comercial(doc: dict) -> tuple[float, float]:
+        """Devuelve (base, cuota) de un doc COMERCIAL aplicando el filtro de
+        líneas con tipo_impositivo vacío o cero (si está activo en config).
+
+        Cuando no hay detalle_iva pero `excluir_tipo_iva_cero=True` y el
+        `tipo_impositivo` a nivel cabecera es vacío/cero, el doc completo
+        contribuye 0 (consistente con la idea de no comparar esas filas).
+        """
+        det = doc.get("detalle_iva")
+        if isinstance(det, list) and det:
+            base = sum(
+                float(t.get("base_imponible") or 0)
+                for t in det
+                if not _linea_excluida_comercial(t)
+            )
+            cuota = sum(
+                float(t.get("cuota_repercutida") or 0)
+                for t in det
+                if not _linea_excluida_comercial(t)
+            )
+            return base, cuota
+        # Sin detalle_iva: aplicamos el filtro al doc-cabecera
+        if _linea_excluida_comercial(doc):
+            return 0.0, 0.0
         base = float(doc.get("base_imponible") or 0)
         cuota = float(doc.get("cuota_repercutida") or 0)
         return base, cuota
@@ -2450,7 +2499,7 @@ async def comparativa_totales(
         },
     )
     async for d in cursor:
-        b, c = _sum_doc(d)
+        b, c = _sum_doc_sii(d)
         sii_base += b
         sii_cuota += c
         sii_n += 1
@@ -2468,6 +2517,7 @@ async def comparativa_totales(
             "_id": 0,
             "base_imponible": 1,
             "cuota_repercutida": 1,
+            "tipo_impositivo": 1,
             "detalle_iva": 1,
             "origen_comercial": 1,
             "fecha_expedicion": 1,
@@ -2475,7 +2525,7 @@ async def comparativa_totales(
     )
     async for d in cursor:
         origen = d.get("origen_comercial") or "DESCONOCIDO"
-        b, c = _sum_doc(d)
+        b, c = _sum_doc_comercial(d)
         if inv_map.get(origen):
             b, c = -b, -c
         bucket = por_origen.setdefault(
@@ -2570,6 +2620,7 @@ async def put_comparativa_config(payload: dict):
     inv_clean = {str(k): bool(v) for k, v in inv_in.items() if k}
 
     excl_base_cero = bool(payload.get("excluir_comercial_base_cero", False))
+    excl_tipo_iva_cero = bool(payload.get("excluir_comercial_tipo_iva_cero", True))
 
     await _db.comparativa_config.update_one(
         {"_id": _CONFIG_DOC_ID},
@@ -2577,6 +2628,7 @@ async def put_comparativa_config(payload: dict):
             "campos_comparados": campos_valid,
             "invertir_signo_por_origen": inv_clean,
             "excluir_comercial_base_cero": excl_base_cero,
+            "excluir_comercial_tipo_iva_cero": excl_tipo_iva_cero,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }},
         upsert=True,
@@ -2586,6 +2638,7 @@ async def put_comparativa_config(payload: dict):
         "campos_comparados": campos_valid,
         "invertir_signo_por_origen": inv_clean,
         "excluir_comercial_base_cero": excl_base_cero,
+        "excluir_comercial_tipo_iva_cero": excl_tipo_iva_cero,
     }
 
 

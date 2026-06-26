@@ -162,9 +162,37 @@ class TestDiffPorTramos:
                 {"tipo_impositivo": None, "base_imponible": -0.01, "cuota_repercutida": 0.0},
             ],
         }
-        d = diff_facturas(sii, com)
+        d = diff_facturas(sii, com, config={"excluir_comercial_tipo_iva_cero": False})
         # Si todos los tramos coinciden, detalle_iva no aparece en diff
         assert "detalle_iva" not in d, f"esperaba sin discrepancias, obtuve {d}"
+
+    def test_excluir_comercial_tipo_iva_cero_filtra_lineas(self):
+        """Cuando `excluir_comercial_tipo_iva_cero=True` (default), las líneas
+        comerciales con tipo_impositivo vacío o cero se omiten antes de
+        comparar — útil para SAP/SIGLO donde aparecen como exentas, suplidos
+        o ajustes que NO se conciliarán contra SII."""
+        sii = {
+            "num_serie_factura": "X",
+            "detalle_iva": [
+                {"tipo_impositivo": 21.0, "base_imponible": 100.0, "cuota_repercutida": 21.0},
+            ],
+        }
+        com = {
+            "num_serie_factura": "X",
+            "detalle_iva": [
+                {"tipo_impositivo": 21.0, "base_imponible": 100.0, "cuota_repercutida": 21.0},
+                {"tipo_impositivo": 0.0, "base_imponible": 50.0, "cuota_repercutida": 0.0},
+                {"tipo_impositivo": None, "base_imponible": 30.0, "cuota_repercutida": 0.0},
+            ],
+        }
+        # Con flag por defecto (True) → las dos líneas comerciales basura se ignoran
+        d = diff_facturas(sii, com)
+        assert "detalle_iva" not in d, (
+            f"esperaba que las líneas com con tipo=0/None se filtraran, obtuve {d}"
+        )
+        # Con flag desactivado → aparecen como tramos sin contrapartida en SII
+        d2 = diff_facturas(sii, com, config={"excluir_comercial_tipo_iva_cero": False})
+        assert "detalle_iva" in d2, "flag desactivado debe mostrar las líneas como diff"
 
     def test_orden_descendente_por_tipo_iva(self):
         """Las líneas deben salir ordenadas: 21, 10, 4, ..., exentas al final."""
