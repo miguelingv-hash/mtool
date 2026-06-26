@@ -2971,12 +2971,10 @@ async def comparativa_export(
             yield _writerow_to_str(_row_to_cells(r)).encode("utf-8")
 
         # 4) Filas solo_sii: cursor incremental en SII fuera de comercial.
-        #    Sólo si el usuario las quiere ver (estado=solo_sii o estado=None
-        #    con only_diffs=False/True; "diffs" incluye solo_sii por defecto).
-        incluir_solo_sii = (
-            estado == "solo_sii"
-            or (estado is None and (only_diffs or not only_diffs))
-        )
+        #    Sólo si el usuario las quiere ver (estado=None engloba "diffs"
+        #    y "all" — ambos incluyen solo_sii; estado=solo_sii filtra a
+        #    sólo esas).
+        incluir_solo_sii = estado in (None, "solo_sii")
         if incluir_solo_sii:
             solo_sii_filter = dict(filtro_sii)
             ns_clause = dict(solo_sii_filter.get("num_serie_factura") or {})

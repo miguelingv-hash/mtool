@@ -269,9 +269,30 @@
   - `router_facturas._aplicar_exclusion_tipo_iva_cero` (nuevo helper): aplica el mismo filtro + recálculo al doc comercial que se devuelve al frontend via `/api/comparativa`. Garantiza coherencia visual: la columna Comercial del detail Sheet ahora muestra los valores recalculados.
 - **Validado por testing agent (iteration_16.json)**: 3 tests E2E verdes que inyectan el escenario exacto del bug. 22 tests previos verdes (sin regresiones). Comercial.base recalculado correctamente. % conciliación 100%.
 
+### Feb 2026 — Filtro de primer nivel `nif_titular` + fix Exportar CSV
+- **Petición**: (1) Toggle visible para alternar entre las 2 sociedades en la Comparativa, sin mezclar masas fiscales. (2) Botón "Exportar a CSV" del listado de Comparativa estaba roto (al pulsar no descargaba nada).
+- **Causas del export roto**:
+  1. `window.location.href = ${API}/comparativa/export?...` hacía una navegación top-level que NO enviaba el header `Authorization: Bearer` → 401 en algunos contextos.
+  2. El endpoint cargaba TODO en memoria (`_comparativa_data` con `find().to_list(length=None)` para 862k+4731 docs) → 60s+ de espera, 120MB de buffer, riesgo de timeout Cloudflare 524 o OOM en backend.
+- **Fixes**:
+  - Backend (`router_facturas.py`):
+    - `_build_filtros` ahora acepta `nif_titular`. SII filtra estricto; comercial usa `$in: [nif, null]` (back-compat con 4 731 docs legacy sin NIF).
+    - Endpoints `/comparativa`, `/comparativa/totales`, `/comparativa/resumen-origenes`, `/comparativa/periodos` propagan `nif_titular`.
+    - Nuevo `GET /api/comparativa/nifs-titulares` → `{nifs_titulares: [...], comercial_sin_nif: N}` para construir el selector y avisar de data legacy.
+    - `/comparativa/export` refactorizado a **streaming** con `async generator` que escribe filas conforme se generan (BOM + cabecera → comercial map → matches SII → cursor `solo_sii`). 180MB en 48s, sin OOM, sin timeout.
+  - Frontend (`Comparativa.jsx` + `ResumenTotales.jsx`):
+    - Estado `filtroNif`, `nifsDisponibles`, `comercialSinNif`, `exporting` + carga inicial de `/comparativa/nifs-titulares` con auto-selección si solo hay 1 NIF.
+    - Nuevo bloque UI "Sociedad" (data-testid `nif-titular-selector`) con botones pill (`nif-toggle-{NIF}` + opcional `nif-toggle-all`).
+    - Aviso amarillo "⚠ X comerciales sin NIF" cuando hay docs legacy.
+    - `exportar()` reescrito: `api.get('/comparativa/export', { responseType: 'blob', timeout: 10min })` + `Blob URL` + `<a download>` + toast loading/success/error que diferencia 401 sesión expirada.
+    - Botón Exportar ahora muestra `Loader2` + texto "Exportando…" durante la descarga.
+- **Validado por testing agent (iteration_17.json)**: 8/8 tests pytest verdes (`test_comparativa_nif_titular_e2e.py`) + verificación E2E del flujo frontend (login → selector visible → autoselect → click export → descarga CSV via blob). Sin regresiones.
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.
-- **P2** Componetizar `Comparativa.jsx` (archivo enorme, 1 590 líneas).
+- **P2** Componetizar `Comparativa.jsx` (archivo enorme, ~1 800 líneas).
+- **P2** Backfill `nif_titular` en `facturas_comercial` (4 731 docs legacy) — UI o admin endpoint para asignar NIF y eliminar el aviso amarillo.
+- **P2** Aceptar `nif_titular` en el upload `/comercial/csv` (form field) para que cargas futuras NO requieran backfill.
 - **P2** Alinear estilos de páginas Tasas con patrón Shadcn UI del resto.
 - **P2** Verificación de dominio en Resend para invitaciones a usuarios externos.
