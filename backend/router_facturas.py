@@ -956,6 +956,191 @@ async def conciliar_newman_importar(
     }
 
 
+async def _ejecutar_importar_faltantes_job(
+    job_id: str,
+    contenido: bytes,
+    nif_titular: str,
+    nombre_titular: str,
+    ejercicio: Optional[str],
+    periodo: Optional[str],
+) -> None:
+    """Worker en background del import masivo desde CSV Newman.
+
+    Actualiza `jobs[job_id].progress.{processed, total, phase}` y `status`.
+    Reusa la misma lógica del endpoint síncrono pero sin restricción de tiempo
+    HTTP (Cloudflare corta a ~100s).
+    """
+    try:
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "running",
+                "started_at": _now_iso(),
+                "updated_at": _now_iso(),
+                "progress.phase": "parsing",
+            }},
+        )
+
+        filas, errores, _debug = _parsear_csv_newman(
+            contenido, nif_titular, nombre_titular or "",
+        )
+        if not filas:
+            raise RuntimeError(
+                f"No se pudieron extraer filas válidas del CSV. Errores: {errores[:3]}"
+            )
+
+        periodo_norm_in = _norm_periodo(periodo) if periodo else ""
+        for f in filas:
+            if ejercicio and not f.get("ejercicio"):
+                f["ejercicio"] = str(ejercicio)
+            if periodo_norm_in and not f.get("periodo"):
+                f["periodo"] = periodo_norm_in
+
+        if ejercicio:
+            filas = [f for f in filas if str(f.get("ejercicio", "")) == str(ejercicio)]
+        if periodo:
+            filas = [f for f in filas if _norm_periodo(f.get("periodo")) == periodo_norm_in]
+
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "progress.total": len(filas),
+                "progress.phase": "matching",
+                "updated_at": _now_iso(),
+            }},
+        )
+
+        num_series_csv = [f["num_serie_factura"] for f in filas]
+        base_filtro_bd: dict = {"nif_titular": nif_titular}
+        if ejercicio:
+            base_filtro_bd["ejercicio"] = str(ejercicio)
+        if periodo:
+            periodo_norm = _norm_periodo(periodo)
+            base_filtro_bd["periodo"] = {"$in": [
+                periodo_norm,
+                str(int(periodo_norm)) if periodo_norm.isdigit() else periodo_norm,
+            ]}
+
+        NS_CHUNK = 20_000
+        existentes: set[str] = set()
+        for i in range(0, len(num_series_csv), NS_CHUNK):
+            chunk_ns = num_series_csv[i : i + NS_CHUNK]
+            filtro_bd = dict(base_filtro_bd)
+            filtro_bd["num_serie_factura"] = {"$in": chunk_ns}
+            async for d in _db.facturas_sii.find(filtro_bd, {"_id": 0, "num_serie_factura": 1}):
+                existentes.add(d["num_serie_factura"])
+
+        faltantes = [f for f in filas if f["num_serie_factura"] not in existentes]
+        total_faltantes = len(faltantes)
+
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "progress.faltantes_total": total_faltantes,
+                "progress.ya_en_bd": len(existentes),
+                "progress.phase": "inserting",
+                "updated_at": _now_iso(),
+            }},
+        )
+
+        # Insert por lotes con actualización del progreso cada lote.
+        batch_size = 2000
+        insertadas = 0
+        for i in range(0, total_faltantes, batch_size):
+            chunk = faltantes[i : i + batch_size]
+            await upsert_facturas_bulk(
+                "facturas_sii", chunk, "conciliacion_newman",
+            )
+            insertadas += len(chunk)
+            await _db.jobs.update_one(
+                {"id": job_id},
+                {"$set": {
+                    "progress.processed": insertadas,
+                    "updated_at": _now_iso(),
+                }},
+            )
+
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "done",
+                "result": {
+                    "filtro": {"nif_titular": nif_titular, "ejercicio": ejercicio, "periodo": periodo},
+                    "total_csv": len(filas),
+                    "ya_en_bd": len(existentes),
+                    "insertadas": insertadas,
+                    "errores_csv": errores[:50],
+                },
+                "finished_at": _now_iso(),
+                "updated_at": _now_iso(),
+                "progress.phase": "done",
+            }},
+        )
+    except Exception as e:  # noqa: BLE001
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "error",
+                "error_message": f"{type(e).__name__}: {e}",
+                "finished_at": _now_iso(),
+                "updated_at": _now_iso(),
+            }},
+        )
+
+
+@router.post("/sii/conciliar-newman/importar-faltantes-async")
+async def conciliar_newman_importar_async(
+    file: UploadFile = File(...),
+    nif_titular: str = Form(...),
+    nombre_titular: str = Form(""),
+    ejercicio: Optional[str] = Form(None),
+    periodo: Optional[str] = Form(None),
+):
+    """Versión asíncrona de `/importar-faltantes`. Encola un job en background
+    y devuelve un `job_id` que el cliente consulta con `GET /api/jobs/{id}`.
+
+    Imprescindible para CSVs grandes (cientos de miles de filas) porque
+    Cloudflare corta conexiones HTTP idle a ~100s.
+    """
+    contenido = await file.read()
+    if not contenido:
+        raise HTTPException(400, "El CSV está vacío")
+
+    job_id = uuid.uuid4().hex
+    job_doc = {
+        "id": job_id,
+        "type": "conciliar-newman-import",
+        "status": "queued",
+        "progress": {
+            "processed": 0,
+            "total": 0,
+            "faltantes_total": 0,
+            "ya_en_bd": 0,
+            "phase": "queued",
+        },
+        "params": {
+            "nif_titular": nif_titular,
+            "nombre_titular": nombre_titular,
+            "ejercicio": ejercicio,
+            "periodo": periodo,
+            "file_size_bytes": len(contenido),
+        },
+        "result": None,
+        "error_message": None,
+        "created_at": _now_iso(),
+        "started_at": None,
+        "finished_at": None,
+        "updated_at": _now_iso(),
+    }
+    await _db.jobs.insert_one(job_doc)
+    asyncio.create_task(
+        _ejecutar_importar_faltantes_job(
+            job_id, contenido, nif_titular, nombre_titular, ejercicio, periodo,
+        ),
+    )
+    return {"job_id": job_id, "status": "queued"}
+
+
 @router.post("/sii/conciliar-newman/importar-lote")
 async def conciliar_newman_importar_lote(payload: dict):
     """Variante ligera del importador: recibe un JSON con la lista de facturas

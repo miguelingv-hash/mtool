@@ -241,6 +241,18 @@
   - Frontend: barra de progreso con dos fases visibles: "Subiendo CSV X%" → "Servidor procesando…".
   - Nginx prod: `client_max_body_size 512m` (era 25m), `proxy_read_timeout 1800s` (era 120s), `proxy_request_buffering off` para streaming de subidas grandes.
 
+### Feb 2026 — Fix CRÍTICO: import async para evitar HTTP 502 Cloudflare con CSVs gigantes
+- **Síntoma**: el import de 862.933 facturas (CSV 180MB) devolvía HTTP 502 desde Cloudflare con mensaje "The origin web server returned an invalid or incomplete response. This typically indicates the origin is overloaded or misconfigured."
+- **Causa**: Cloudflare (proxy del preview Emergent) corta conexiones HTTP idle a ~100s. El backend sigue procesando pero la respuesta nunca llega al cliente.
+- **Fix adicional encontrado en el camino**: `pymongo.errors.DocumentTooLarge` — el `$in` de 862k num_serie_factura excedía el límite de 16MB de BSON. Solución: trocear la query en chunks de 20.000 IDs.
+- **Solución final**: nuevo endpoint async `POST /api/sii/conciliar-newman/importar-faltantes-async` que:
+  1. Recibe el CSV multipart.
+  2. Crea un job en `jobs` con `type: "conciliar-newman-import"`.
+  3. Lanza el procesamiento con `asyncio.create_task` y devuelve `{job_id, status: "queued"}` inmediatamente (< 1s, sin riesgo CF timeout).
+  4. El worker actualiza `progress.{phase, processed, total, faltantes_total, ya_en_bd}` y `status` (`queued`/`running`/`done`/`error`).
+- **Frontend**: el botón "Importar" ahora encola el job y hace polling cada 2s a `/api/jobs/{id}`. Barra de progreso con 4 fases distintas: upload → parsing → matching → inserting. Muestra contador real (`processed / faltantes_total`).
+- **Validado E2E** con CSV sintético de 50k filas: job encolado en < 1s, procesado en background, status `done` con `result.insertadas` correcto.
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.

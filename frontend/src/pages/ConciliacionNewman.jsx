@@ -150,48 +150,68 @@ export default function ConciliacionNewman() {
     }
     setImporting(true);
     setImportError(null);
-    setImportProgress({ hechas: 0, total: reporte?.faltantes_en_bd || 0, fase: "upload" });
+    setImportProgress({ hechas: 0, total: reporte?.faltantes_en_bd || 0, fase: "upload", pctUpload: 0 });
     // eslint-disable-next-line no-console
     console.log(
-      `[Conciliacion] Import server-side de ${reporte?.faltantes_en_bd || "?"} faltantes via /importar-faltantes`,
+      `[Conciliacion] Encolando job async de ${reporte?.faltantes_en_bd || "?"} faltantes`,
     );
     const t0 = performance.now();
     try {
-      // Reutilizamos el endpoint server-side que sube el CSV una sola vez y
-      // procesa todo el insert en backend (en lotes de 2000 internamente).
-      // Esto evita devolver al cliente las cientos de miles de facturas y
-      // luego re-postearlas — todo se hace en una sola request.
-      const { data } = await api.post(
-        "/sii/conciliar-newman/importar-faltantes",
+      // 1) Subimos el CSV al endpoint async, que crea un job y devuelve job_id.
+      const { data: enqueue } = await api.post(
+        "/sii/conciliar-newman/importar-faltantes-async",
         buildForm(true),
         {
           headers: { "Content-Type": "multipart/form-data" },
           maxBodyLength: 512 * 1024 * 1024,
           maxContentLength: 512 * 1024 * 1024,
-          timeout: 1800_000, // 30 min — CSVs gigantes
+          timeout: 600_000, // 10 min sólo para subir
           onUploadProgress: (ev) => {
             if (ev.total) {
               const pct = Math.round((ev.loaded / ev.total) * 100);
-              setImportProgress({
-                hechas: ev.loaded,
-                total: ev.total,
+              setImportProgress((prev) => ({
+                ...(prev || {}),
                 fase: pct < 100 ? "upload" : "procesando",
                 pctUpload: pct,
-              });
+              }));
             }
           },
         },
       );
-      const ms = Math.round(performance.now() - t0);
+      const jobId = enqueue?.job_id;
+      if (!jobId) throw new Error("Backend no devolvió job_id");
       // eslint-disable-next-line no-console
-      console.log(`[Conciliacion] Import completo en ${ms}ms ·`, data);
-      toast.success(
-        `Importadas ${(data.insertadas || 0).toLocaleString("es-ES")} facturas en ${(ms / 1000).toFixed(1)} s`,
-      );
-      await analizar();
+      console.log(`[Conciliacion] Job encolado: ${jobId}. Iniciando polling…`);
+
+      // 2) Polling cada 2s al endpoint /api/jobs/{job_id}
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const { data: job } = await api.get(`/jobs/${jobId}`, { timeout: 30_000 });
+        const p = job?.progress || {};
+        setImportProgress({
+          fase: p.phase || "procesando",
+          procesadas: p.processed || 0,
+          totalFaltantes: p.faltantes_total || 0,
+          totalCsv: p.total || 0,
+          pctUpload: 100,
+        });
+        if (job.status === "done") {
+          const ms = Math.round(performance.now() - t0);
+          const ins = job.result?.insertadas || 0;
+          toast.success(
+            `Importadas ${ins.toLocaleString("es-ES")} facturas en ${(ms / 1000).toFixed(1)} s`,
+          );
+          await analizar();
+          break;
+        }
+        if (job.status === "error") {
+          throw new Error(job.error_message || "Job terminó con error");
+        }
+      }
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.error("[Conciliacion] Error en import:", e);
+      console.error("[Conciliacion] Error en import async:", e);
       const detalle =
         e?.response?.data?.detail || e?.response?.statusText || e?.code || e?.message || "Error desconocido";
       const status = e?.response?.status;
@@ -304,22 +324,57 @@ export default function ConciliacionNewman() {
             <Alert data-testid="rec-import-progress">
               <Loader2 className="h-4 w-4 animate-spin" />
               <AlertDescription>
-                <div className="font-medium">
-                  {importProgress.fase === "upload"
-                    ? `Subiendo CSV al servidor… ${importProgress.pctUpload ?? 0}%`
-                    : "Servidor procesando el CSV e insertando faltantes. Esto puede tardar varios minutos…"}
-                </div>
-                {importProgress.fase === "upload" && importProgress.pctUpload !== undefined ? (
-                  <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-slate-900 transition-all duration-200"
-                      style={{ width: `${importProgress.pctUpload}%` }}
-                    />
-                  </div>
+                {importProgress.fase === "upload" ? (
+                  <>
+                    <div className="font-medium">
+                      Subiendo CSV al servidor… {importProgress.pctUpload ?? 0}%
+                    </div>
+                    <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-slate-900 transition-all duration-200"
+                        style={{ width: `${importProgress.pctUpload ?? 0}%` }}
+                      />
+                    </div>
+                  </>
+                ) : importProgress.fase === "parsing" ? (
+                  <>
+                    <div className="font-medium">Parseando CSV en el servidor…</div>
+                    <div className="text-xs mt-1 text-slate-600">Esto puede tardar 1–2 minutos con ficheros grandes.</div>
+                    <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                      <div className="h-full bg-slate-900 animate-pulse" style={{ width: "33%" }} />
+                    </div>
+                  </>
+                ) : importProgress.fase === "matching" ? (
+                  <>
+                    <div className="font-medium">
+                      Comparando contra BD… ({(importProgress.totalCsv || 0).toLocaleString("es-ES")} filas en CSV)
+                    </div>
+                    <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                      <div className="h-full bg-slate-900 animate-pulse" style={{ width: "66%" }} />
+                    </div>
+                  </>
+                ) : importProgress.fase === "inserting" || importProgress.fase === "procesando" ? (
+                  <>
+                    <div className="font-medium">
+                      Insertando faltantes en BD…{" "}
+                      {(importProgress.procesadas || 0).toLocaleString("es-ES")} de{" "}
+                      {(importProgress.totalFaltantes || 0).toLocaleString("es-ES")}
+                    </div>
+                    <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-slate-900 transition-all duration-200"
+                        style={{
+                          width: `${
+                            importProgress.totalFaltantes
+                              ? Math.round((importProgress.procesadas / importProgress.totalFaltantes) * 100)
+                              : 0
+                          }%`,
+                        }}
+                      />
+                    </div>
+                  </>
                 ) : (
-                  <div className="mt-2 h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
-                    <div className="h-full bg-slate-900 animate-pulse" style={{ width: "100%" }} />
-                  </div>
+                  <div className="font-medium">Procesando…</div>
                 )}
               </AlertDescription>
             </Alert>
