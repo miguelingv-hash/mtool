@@ -261,6 +261,14 @@
 - **Frontend** `Configuracion.jsx`: nuevo toggle `Switch` "Excluir líneas comerciales con tipo_impositivo vacío o = 0" justo debajo del existente "Excluir base_imponible = 0". Persistido vía `PUT /comparativa/config`.
 - **Tests**: 1 test nuevo `test_excluir_comercial_tipo_iva_cero_filtra_lineas` que prueba ambos comportamientos (flag on / off). Test pre-existente `test_cuota_null_sii_equivale_cero_comercial` actualizado para pasar el flag a `False` (mantiene su semántica original). 13/13 verdes.
 
+### Feb 2026 — Fix completo: exclusión tipo_imp=0/null debe recalcular cabecera comercial
+- **Síntoma**: usuario reportó factura `26TAAYN000009029` (SII base=7.21/cuota=1.51 vs COM SAP -7.18/-1.51 con detalle_iva de 2 líneas: tipo=21 base=-7.21 + tipo=null base=0.03) seguía mostrando "Discrepancia" con flag activo, debería ser "Coincide" tras filtrar la línea null.
+- **Causa**: el fix anterior filtraba `detalle_iva` pero NO recalculaba `base_imponible` / `cuota_repercutida` a nivel cabecera del comercial. Como SII no tenía desglose, la comparación caía a cabecera y usaba el valor pre-filtrado (-7.18 = -7.21 + 0.03).
+- **Fix**:
+  - `factura_model.diff_facturas`: tras filtrar `b.detalle_iva`, recalcula `b.base_imponible` y `b.cuota_repercutida` con la suma del detalle filtrado (round 2 decimales).
+  - `router_facturas._aplicar_exclusion_tipo_iva_cero` (nuevo helper): aplica el mismo filtro + recálculo al doc comercial que se devuelve al frontend via `/api/comparativa`. Garantiza coherencia visual: la columna Comercial del detail Sheet ahora muestra los valores recalculados.
+- **Validado por testing agent (iteration_16.json)**: 3 tests E2E verdes que inyectan el escenario exacto del bug. 22 tests previos verdes (sin regresiones). Comercial.base recalculado correctamente. % conciliación 100%.
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.

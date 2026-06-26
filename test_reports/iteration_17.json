@@ -1,0 +1,34 @@
+{
+  "summary": "E2E verification (backend + frontend) of the nif_titular first-level filter and the CSV export streaming refactor in Comparativa SII↔Comercial. Backend: 8/8 new pytest cases PASS — /api/comparativa/nifs-titulares returns {nifs_titulares:['A95000295'], comercial_sin_nif:4731}; /api/comparativa, /comparativa/totales, /comparativa/resumen-origenes y /comparativa/periodos aceptan y propagan nif_titular; /api/comparativa/export devuelve 200 con Content-Type text/csv; charset=utf-8, Content-Disposition attachment; filename=comparativa_A95000295_2025_01.csv, BOM UTF-8 y cabeceras correctas. El export grande (sin ejercicio) devuelve 180.684.912 bytes en ~50s vía streaming sin 502/524. Frontend: navegación a /comparativa con cookie de auth, selector Sociedad visible (data-testid='nif-titular-selector'), botón nif-toggle-A95000295 renderizado y AUTOSELECCIONADO (clase bg-slate-900 text-white, único NIF en BD), nif-toggle-all OMITIDO correctamente (>1 NIF no se cumple), badge '⚠ 4731 comerciales sin NIF' visible, resumen-totales y resumen-origenes presentes, botón export-comparativa habilitado (2516 resultados), click dispara descarga via axios+blob (NO window.location.href), Content-Disposition aplicado, toast 'Exportación lista comparativa_A95000295.csv descargado.' confirmado.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_comparativa_nif_titular_e2e.py",
+    "/app/test_reports/pytest/iteration_17_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "router_facturas.py L2976-2979 (comparativa_export, branch incluir_solo_sii): la condición `estado == 'solo_sii' or (estado is None and (only_diffs or not only_diffs))` simplifica a `estado in (None, 'solo_sii')`. El `(only_diffs or not only_diffs)` es siempre True — código muerto que confunde la intención. Sugerencia: `incluir_solo_sii = estado in (None, 'solo_sii')`.",
+    "router_facturas.py comparativa_export: aunque ahora es streaming, sigue cargando TODO el comercial (com_docs to_list(length=None)) y TODOS los matches SII en memoria antes del primer yield. Para los datos actuales (4731 comerciales) es trivial, pero si el comercial creciera a 100k+ habría que paginar. Documentar el límite implícito.",
+    "router_facturas.py L2868-2871 (comparativa_nifs_titulares): el sort se hace sobre un set, perdiendo el orden de descubrimiento. Con 2 NIFs no importa, pero si en futuro hay más sería buena UX devolver primero los más usados (sort by count).",
+    "Comparativa.jsx L462-517 (exportar): bien implementado — usa api.get con responseType:'blob', timeout 10min, parsea Content-Disposition con regex, toast de loading + success/error diferenciando 401. ✅",
+    "Comparativa.jsx L395-397: autoseleccionar el único NIF disponible es un buen UX pero potencialmente sorprendente si el backend devuelve >1 NIF en el futuro (queda en '__all__'). El comportamiento actual es correcto pero conviene documentarlo en el código."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_comparativa_nif_titular_e2e.py"
+  ],
+  "success_rate": {"backend": "100% (8/8 new tests passing)", "frontend": "100% (selector + autoselect + export download verified)"},
+  "test_credentials": "Admin miguelingv@gmail.com vía JWT minted con auth.create_access_token() + JWT_SECRET (cookie monitorsii_access). Mismo patrón que test_tipo_impositivo_regression.py.",
+  "seed_data_creation": "Ninguna — se ejecutó sobre datos reales (862933 SII docs con nif_titular='A95000295' y 4731 comerciales legacy con nif_titular=null).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "El filtro nif_titular y el export streaming están verificados end-to-end. Si en el futuro se backfillea el nif_titular en facturas_comercial (los 4731 docs legacy), el aviso '⚠ comerciales sin NIF' desaparecerá automáticamente y el filtro $in:[nif, null] del backend dejará de necesitar el null — se podría simplificar a un match plano. La suite /app/backend/tests/test_comparativa_nif_titular_e2e.py es regresión válida para cualquier futuro cambio en los endpoints de comparativa.",
+  "rca of the issue": "N/A — feature addition + bug fix, no incidencias detectadas. El bug del export (window.location.href sin Authorization + carga full en memoria) está resuelto vía axios+blob (Bearer en cookie/header) + StreamingResponse con async generator que rinde fila a fila tras BOM y cabeceras."
+}

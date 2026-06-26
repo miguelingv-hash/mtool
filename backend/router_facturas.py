@@ -2197,6 +2197,7 @@ async def _build_filtros(
     periodo: Optional[str],
     num_serie: Optional[str],
     excluir_base_cero: bool = False,
+    nif_titular: Optional[str] = None,
 ) -> tuple[dict, dict]:
     """Construye filtros Mongo para SII y comercial a partir de los parámetros
     de consulta. No aplica restricciones implícitas: el universo SII se acota
@@ -2205,6 +2206,11 @@ async def _build_filtros(
     Si `excluir_base_cero=True`, excluye en el filtro comercial las facturas
     con `base_imponible == 0` (o `null`). Útil para descartar anulaciones y
     asientos contables que no aportan a la conciliación.
+
+    Si `nif_titular` viene informado, restringe ambos universos a esa sociedad.
+    Para `facturas_comercial` se aceptan también docs sin `nif_titular`
+    (cargados antes de añadir el campo) — así no se pierde data legacy hasta
+    que el usuario haga backfill explícito vía la subida comercial.
     """
     import re
 
@@ -2220,6 +2226,11 @@ async def _build_filtros(
         regex_ns = {"$regex": re.escape(num_serie), "$options": "i"}
         filtro_sii["num_serie_factura"] = regex_ns
         filtro_com["num_serie_factura"] = regex_ns
+    if nif_titular:
+        nif_norm = str(nif_titular).strip().upper()
+        filtro_sii["nif_titular"] = nif_norm
+        # `null` en $in matchea también docs sin el campo (legacy compat).
+        filtro_com["nif_titular"] = {"$in": [nif_norm, None]}
     if excluir_base_cero:
         # `$ne: 0` excluye exactamente 0; ausencia o null se mantienen porque
         # el comercial ya almacena `base_imponible` como número tras el parser.
@@ -2234,6 +2245,7 @@ async def _comparativa_data(
     only_diffs: bool,
     num_serie: Optional[str] = None,
     estado: Optional[str] = None,
+    nif_titular: Optional[str] = None,
 ) -> list[dict]:
     """Versión legacy (carga todo en memoria). Mantenida para `/export` y
     en escenarios sin necesidad de paginación a nivel BD.
@@ -2243,6 +2255,7 @@ async def _comparativa_data(
     filtro_sii, filtro_com = await _build_filtros(
         ejercicio, periodo, num_serie,
         excluir_base_cero=config["excluir_comercial_base_cero"],
+        nif_titular=nif_titular,
     )
 
     sii_docs = await _db.facturas_sii.find(
@@ -2279,11 +2292,12 @@ async def comparativa(
     estado: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_dir: str = "desc",
+    nif_titular: Optional[str] = None,
 ):
     """Compara facturas SII vs Comercial por `num_serie_factura`.
 
     Filtros: `ejercicio`, `periodo`, `num_serie` (contiene), `estado`
-    (coincide | discrepancia | solo_sii | solo_comercial).
+    (coincide | discrepancia | solo_sii | solo_comercial), `nif_titular`.
     Paginación: `skip` / `limit` (default 50).
 
     Optimización: para evitar cargar millones de facturas SII en memoria,
@@ -2296,6 +2310,7 @@ async def comparativa(
     filtro_sii, filtro_com = await _build_filtros(
         ejercicio, periodo, num_serie,
         excluir_base_cero=config["excluir_comercial_base_cero"],
+        nif_titular=nif_titular,
     )
 
     # 1) Universo comercial completo en scope (siempre pequeño)
@@ -2439,6 +2454,7 @@ async def comparativa_totales(
     ejercicio: Optional[str] = None,
     periodo: Optional[str] = None,
     num_serie: Optional[str] = None,
+    nif_titular: Optional[str] = None,
 ):
     """Devuelve totales agregados de Base Imponible y Cuota de IVA para:
       - SII (universo completo del filtro).
@@ -2461,6 +2477,7 @@ async def comparativa_totales(
     filtro_sii, filtro_com = await _build_filtros(
         ejercicio, periodo, num_serie,
         excluir_base_cero=config["excluir_comercial_base_cero"],
+        nif_titular=nif_titular,
     )
 
     excluir_tipo_iva_cero = config.get("excluir_comercial_tipo_iva_cero", True)
@@ -2639,6 +2656,7 @@ async def comparativa_totales(
             "ejercicio": ejercicio,
             "periodo": periodo,
             "num_serie": num_serie,
+            "nif_titular": nif_titular,
         },
     }
 
@@ -2689,26 +2707,39 @@ async def put_comparativa_config(payload: dict):
 
 
 @router.get("/comparativa/periodos")
-async def comparativa_periodos():
+async def comparativa_periodos(nif_titular: Optional[str] = None):
     """Devuelve los ejercicios/periodos distintos disponibles en `facturas_sii`
     (combinados con los de `facturas_comercial`) para poblar los filtros.
+
+    Si se aporta `nif_titular`, sólo considera facturas de esa sociedad.
+    En `facturas_comercial` se aceptan también docs sin `nif_titular` para
+    no perder periodos de data legacy.
 
     Usa aggregation con `$group` apoyado en el índice compuesto
     (ejercicio, periodo) → segundos en lugar de minutos sobre 1M+ docs.
     """
-    async def _distinct_eje_per(col):
-        cursor = col.aggregate([
-            {"$group": {
-                "_id": {"ejercicio": "$ejercicio", "periodo": "$periodo"},
-            }},
-        ])
+    sii_match: dict = {}
+    com_match: dict = {}
+    if nif_titular:
+        nif_norm = str(nif_titular).strip().upper()
+        sii_match["nif_titular"] = nif_norm
+        com_match["nif_titular"] = {"$in": [nif_norm, None]}
+
+    async def _distinct_eje_per(col, match: dict):
+        pipeline = []
+        if match:
+            pipeline.append({"$match": match})
+        pipeline.append({"$group": {
+            "_id": {"ejercicio": "$ejercicio", "periodo": "$periodo"},
+        }})
+        cursor = col.aggregate(pipeline)
         docs = await cursor.to_list(length=None)
         eje = {d["_id"].get("ejercicio") for d in docs if d["_id"].get("ejercicio")}
         per = {d["_id"].get("periodo") for d in docs if d["_id"].get("periodo")}
         return eje, per
 
-    sii_eje, sii_per = await _distinct_eje_per(_db.facturas_sii)
-    com_eje, com_per = await _distinct_eje_per(_db.facturas_comercial)
+    sii_eje, sii_per = await _distinct_eje_per(_db.facturas_sii, sii_match)
+    com_eje, com_per = await _distinct_eje_per(_db.facturas_comercial, com_match)
     ejercicios = sorted({str(e) for e in (sii_eje | com_eje)})
     periodos = sorted({str(p) for p in (sii_per | com_per)})
     return {"ejercicios": ejercicios, "periodos": periodos}
@@ -2719,6 +2750,7 @@ async def comparativa_resumen_origenes(
     ejercicio: Optional[str] = None,
     periodo: Optional[str] = None,
     num_serie: Optional[str] = None,
+    nif_titular: Optional[str] = None,
 ):
     """Resumen agregado por `origen_comercial` (SAP / SIGLO / desconocido).
 
@@ -2729,8 +2761,8 @@ async def comparativa_resumen_origenes(
       - discrepancias / coincidencias (sólo entre las que tienen match)
 
     Soporta los mismos filtros que `/comparativa`: ejercicio, periodo,
-    num_serie (contiene). Pensado para una banda de tarjetas KPI encima
-    de la tabla.
+    num_serie (contiene), nif_titular. Pensado para una banda de tarjetas KPI
+    encima de la tabla.
     """
     import re
 
@@ -2744,6 +2776,11 @@ async def comparativa_resumen_origenes(
         filtro_com["num_serie_factura"] = {
             "$regex": re.escape(num_serie), "$options": "i",
         }
+    if nif_titular:
+        nif_norm = str(nif_titular).strip().upper()
+        filtro_com["nif_titular"] = {"$in": [nif_norm, None]}
+    else:
+        nif_norm = None
     if config["excluir_comercial_base_cero"]:
         filtro_com["base_imponible"] = {"$nin": [0, 0.0, None]}
 
@@ -2786,6 +2823,8 @@ async def comparativa_resumen_origenes(
                 sii_filter["ejercicio"] = str(ejercicio)
             if periodo:
                 sii_filter["periodo"] = str(periodo)
+            if nif_norm:
+                sii_filter["nif_titular"] = nif_norm
             sii_docs = await _db.facturas_sii.find(
                 sii_filter, {"_id": 0, "versiones": 0}
             ).to_list(length=None)
@@ -2818,6 +2857,32 @@ async def comparativa_resumen_origenes(
     return {"items": resultados}
 
 
+@router.get("/comparativa/nifs-titulares")
+async def comparativa_nifs_titulares():
+    """Devuelve la lista distinct de `nif_titular` presentes en SII y comercial.
+
+    Útil para construir el toggle de "Sociedad" en la UI. Si en el comercial
+    existen docs sin nif_titular (data legacy), se devuelve adicionalmente el
+    contador `comercial_sin_nif` para que la UI pueda avisar al usuario.
+    """
+    sii_nifs = await _db.facturas_sii.distinct("nif_titular")
+    com_nifs = await _db.facturas_comercial.distinct("nif_titular")
+    nifs = sorted(
+        {str(n).upper() for n in (sii_nifs or []) + (com_nifs or []) if n}
+    )
+    comercial_sin_nif = await _db.facturas_comercial.count_documents(
+        {"$or": [
+            {"nif_titular": None},
+            {"nif_titular": ""},
+            {"nif_titular": {"$exists": False}},
+        ]}
+    )
+    return {
+        "nifs_titulares": nifs,
+        "comercial_sin_nif": comercial_sin_nif,
+    }
+
+
 @router.get("/comparativa/export")
 async def comparativa_export(
     only_diffs: bool = True,
@@ -2825,13 +2890,27 @@ async def comparativa_export(
     periodo: Optional[str] = None,
     num_serie: Optional[str] = None,
     estado: Optional[str] = None,
+    nif_titular: Optional[str] = None,
 ):
-    """Exporta la comparativa completa (sin paginar) a CSV (UTF-8 BOM) abrible
-    directamente en Excel/LibreOffice."""
-    resultados = await _comparativa_data(
-        ejercicio, periodo, only_diffs, num_serie, estado
+    """Exporta la comparativa filtrada a CSV (UTF-8 BOM) abrible en Excel.
+
+    Implementación **streaming**: escribe filas conforme se generan en lugar
+    de bufferizar todo en memoria. Mismas heurísticas que el listado
+    paginado (`/comparativa`):
+      - Universo construido desde comercial (pequeño) + matches SII.
+      - `solo_sii` se itera mediante cursor en `facturas_sii`.
+
+    Esto evita que exports grandes (cientos de miles de filas) saturen
+    memoria del backend o el límite de 100s de Cloudflare.
+    """
+    config = await _load_comparativa_config()
+    filtro_sii, filtro_com = await _build_filtros(
+        ejercicio, periodo, num_serie,
+        excluir_base_cero=config["excluir_comercial_base_cero"],
+        nif_titular=nif_titular,
     )
 
+    # Cabeceras CSV
     headers = ["num_serie_factura", "estado", "campos_con_diferencias"]
     for c in CAMPOS_CANONICOS:
         if c == "num_serie_factura":
@@ -2839,12 +2918,8 @@ async def comparativa_export(
         headers.append(f"sii_{c}")
         headers.append(f"com_{c}")
 
-    buf = io.StringIO()
-    buf.write("\ufeff")  # BOM para Excel
-    writer = csv.writer(buf, delimiter=";", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(headers)
-    for r in resultados:
-        row = [
+    def _row_to_cells(r: dict) -> list:
+        cells = [
             r["num_serie_factura"],
             r["estado"],
             ",".join(r["diferencias"].keys()),
@@ -2854,11 +2929,73 @@ async def comparativa_export(
         for c in CAMPOS_CANONICOS:
             if c == "num_serie_factura":
                 continue
-            row.append(sii.get(c, "") if sii.get(c) is not None else "")
-            row.append(com.get(c, "") if com.get(c) is not None else "")
-        writer.writerow(row)
+            cells.append(sii.get(c, "") if sii.get(c) is not None else "")
+            cells.append(com.get(c, "") if com.get(c) is not None else "")
+        return cells
+
+    def _writerow_to_str(cells: list) -> str:
+        buf = io.StringIO()
+        writer = csv.writer(buf, delimiter=";", quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(cells)
+        return buf.getvalue()
+
+    async def _generate():
+        # BOM para Excel + cabecera
+        yield ("\ufeff" + _writerow_to_str(headers)).encode("utf-8")
+
+        # 1) Universo comercial completo (pequeño)
+        com_docs = await _db.facturas_comercial.find(
+            filtro_com, {"_id": 0, "versiones": 0}
+        ).to_list(length=None)
+        com_map = {d["num_serie_factura"]: d for d in com_docs}
+        com_keys = list(com_map.keys())
+
+        # 2) Matches SII por num_serie ∈ comercial
+        sii_match_docs = []
+        if com_keys:
+            sii_match_docs = await _db.facturas_sii.find(
+                {**filtro_sii, "num_serie_factura": {"$in": com_keys}},
+                {"_id": 0, "versiones": 0},
+            ).to_list(length=None)
+        sii_match_map = {d["num_serie_factura"]: d for d in sii_match_docs}
+
+        # 3) Filas comerciales (coincide / discrepancia / solo_comercial)
+        for ns in com_keys:
+            r = _build_row_from_docs(
+                sii_match_map.get(ns), com_map.get(ns), ns, config,
+            )
+            if estado and r["estado"] != estado:
+                continue
+            if estado is None and only_diffs and r["estado"] == "coincide":
+                continue
+            yield _writerow_to_str(_row_to_cells(r)).encode("utf-8")
+
+        # 4) Filas solo_sii: cursor incremental en SII fuera de comercial.
+        #    Sólo si el usuario las quiere ver (estado=solo_sii o estado=None
+        #    con only_diffs=False/True; "diffs" incluye solo_sii por defecto).
+        incluir_solo_sii = (
+            estado == "solo_sii"
+            or (estado is None and (only_diffs or not only_diffs))
+        )
+        if incluir_solo_sii:
+            solo_sii_filter = dict(filtro_sii)
+            ns_clause = dict(solo_sii_filter.get("num_serie_factura") or {})
+            ns_clause["$nin"] = com_keys
+            solo_sii_filter["num_serie_factura"] = ns_clause
+            cursor = _db.facturas_sii.find(
+                solo_sii_filter, {"_id": 0, "versiones": 0}
+            )
+            async for d in cursor:
+                r = _build_row_from_docs(
+                    d, None, d["num_serie_factura"], config,
+                )
+                if estado and r["estado"] != estado:
+                    continue
+                yield _writerow_to_str(_row_to_cells(r)).encode("utf-8")
 
     filename = "comparativa"
+    if nif_titular:
+        filename += f"_{nif_titular}"
     if ejercicio:
         filename += f"_{ejercicio}"
     if periodo:
@@ -2866,7 +3003,7 @@ async def comparativa_export(
     filename += ".csv"
 
     return StreamingResponse(
-        io.BytesIO(buf.getvalue().encode("utf-8")),
+        _generate(),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )

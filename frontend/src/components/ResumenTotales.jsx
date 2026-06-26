@@ -123,8 +123,9 @@ export default function ResumenTotales({ filtros, refreshKey }) {
     if (filtros?.ejercicio) q.set("ejercicio", filtros.ejercicio);
     if (filtros?.periodo) q.set("periodo", filtros.periodo);
     if (filtros?.num_serie) q.set("num_serie", filtros.num_serie);
+    if (filtros?.nif_titular) q.set("nif_titular", filtros.nif_titular);
     return q.toString();
-  }, [filtros?.ejercicio, filtros?.periodo, filtros?.num_serie]);
+  }, [filtros?.ejercicio, filtros?.periodo, filtros?.num_serie, filtros?.nif_titular]);
 
   const load = async () => {
     setLoading(true);

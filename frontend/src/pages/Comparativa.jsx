@@ -303,6 +303,12 @@ export default function Comparativa() {
   const [filtroNumSerie, setFiltroNumSerie] = useState(initialNumSerie);
   const [filtroNumSerieDebounced, setFiltroNumSerieDebounced] = useState(initialNumSerie);
   const [filtroEstado, setFiltroEstado] = useState(initialNumSerie ? "all" : "diffs"); // diffs|all|coincide|discrepancia|solo_sii|solo_comercial
+  // Toggle de "Sociedad" (NIF titular). Se rellena dinámicamente al montar:
+  // si sólo hay 1 NIF en BD se autoselecciona; si hay 2+ el usuario alterna.
+  const [filtroNif, setFiltroNif] = useState("__all__");
+  const [nifsDisponibles, setNifsDisponibles] = useState([]);
+  const [comercialSinNif, setComercialSinNif] = useState(0);
+  const [exporting, setExporting] = useState(false);
   const [periodosDisponibles, setPeriodosDisponibles] = useState({
     ejercicios: [],
     periodos: [],
@@ -353,6 +359,7 @@ export default function Comparativa() {
       if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
       if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
       if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
+      if (filtroNif !== "__all__") params.nif_titular = filtroNif;
       if (sortBy) {
         params.sort_by = sortBy;
         params.sort_dir = sortDir;
@@ -368,33 +375,53 @@ export default function Comparativa() {
 
   useEffect(() => {
     api
-      .get("/comparativa/periodos")
+      .get("/comparativa/periodos", {
+        params: filtroNif !== "__all__" ? { nif_titular: filtroNif } : {},
+      })
       .then((r) => setPeriodosDisponibles(r.data))
+      .catch(() => {});
+  }, [filtroNif]);
+
+  // Carga la lista de NIFs titulares disponibles (sociedades) para construir
+  // el selector de primer nivel. Se llama una vez al montar.
+  useEffect(() => {
+    api
+      .get("/comparativa/nifs-titulares")
+      .then((r) => {
+        const lst = r.data?.nifs_titulares || [];
+        setNifsDisponibles(lst);
+        setComercialSinNif(r.data?.comercial_sin_nif || 0);
+        // Si sólo hay un NIF, autoseleccionarlo para evitar fricción.
+        if (lst.length === 1) {
+          setFiltroNif(lst[0]);
+        }
+      })
       .catch(() => {});
   }, []);
 
   // Carga el resumen agregado por origen comercial (SAP / SIGLO / desconocido)
-  // cuando cambian los filtros de ejercicio / periodo / num_serie.
+  // cuando cambian los filtros de ejercicio / periodo / num_serie / nif.
   useEffect(() => {
     const params = {};
     if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
     if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
     if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
+    if (filtroNif !== "__all__") params.nif_titular = filtroNif;
     api
       .get("/comparativa/resumen-origenes", { params })
       .then((r) => setResumenOrigenes(r.data.items || []))
       .catch(() => setResumenOrigenes([]));
-  }, [filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced]);
+  }, [filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced, filtroNif]);
 
   useEffect(() => {
     load();
     // eslint-disable-next-line
-  }, [filtroEstado, page, pageSize, filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced, sortBy, sortDir]);
+  }, [filtroEstado, page, pageSize, filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced, sortBy, sortDir, filtroNif]);
 
   // Reset paginación al cambiar filtros
   useEffect(() => {
     setPage(1);
-  }, [filtroEstado, filtroEjercicio, filtroPeriodo, pageSize, filtroNumSerieDebounced]);
+  }, [filtroEstado, filtroEjercicio, filtroPeriodo, pageSize, filtroNumSerieDebounced, filtroNif]);
 
   // Debounce 300ms para el filtro de num_serie (evita request por keystroke)
   useEffect(() => {
@@ -432,20 +459,61 @@ export default function Comparativa() {
     };
   }, []);
 
-  const exportar = () => {
-    const params = new URLSearchParams();
+  const exportar = async () => {
+    const params = {};
     if (filtroEstado === "diffs") {
-      params.set("only_diffs", "true");
+      params.only_diffs = true;
     } else if (filtroEstado === "all") {
-      params.set("only_diffs", "false");
+      params.only_diffs = false;
     } else {
-      params.set("only_diffs", "false");
-      params.set("estado", filtroEstado);
+      params.only_diffs = false;
+      params.estado = filtroEstado;
     }
-    if (filtroEjercicio !== "__all__") params.set("ejercicio", filtroEjercicio);
-    if (filtroPeriodo !== "__all__") params.set("periodo", filtroPeriodo);
-    if (filtroNumSerieDebounced.trim()) params.set("num_serie", filtroNumSerieDebounced.trim());
-    window.location.href = `${API}/comparativa/export?${params.toString()}`;
+    if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
+    if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
+    if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
+    if (filtroNif !== "__all__") params.nif_titular = filtroNif;
+
+    setExporting(true);
+    const toastId = toast.loading("Preparando exportación CSV…", {
+      description: "Streaming desde el servidor; puede tardar unos segundos.",
+    });
+    try {
+      const resp = await api.get("/comparativa/export", {
+        params,
+        responseType: "blob",
+        timeout: 1000 * 60 * 10, // 10 minutos por si el dataset es grande
+      });
+      // Construye filename desde Content-Disposition (si está) o uno genérico
+      const cd = resp.headers?.["content-disposition"] || "";
+      const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+      const filename = m ? decodeURIComponent(m[1]) : "comparativa.csv";
+
+      const blob = new Blob([resp.data], { type: "text/csv;charset=utf-8" });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+
+      toast.success("Exportación lista", {
+        id: toastId,
+        description: `${filename} descargado.`,
+      });
+    } catch (e) {
+      toast.error("No se pudo exportar la comparativa", {
+        id: toastId,
+        description:
+          e?.response?.status === 401
+            ? "Sesión expirada — vuelve a iniciar sesión."
+            : (e?.message || "Error desconocido"),
+      });
+    } finally {
+      setExporting(false);
+    }
   };
 
   const lanzarMensual = async () => {
@@ -1023,6 +1091,58 @@ export default function Comparativa() {
         </div>
       )}
 
+      {/* Selector de Sociedad (NIF titular) — primer nivel */}
+      {nifsDisponibles.length > 0 && (
+        <div
+          className="border border-slate-200 bg-white px-4 py-3 mb-4 flex items-center flex-wrap gap-3"
+          data-testid="nif-titular-selector"
+        >
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-500 font-semibold">
+            Sociedad
+          </div>
+          <div className="flex items-center flex-wrap gap-1">
+            {nifsDisponibles.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setFiltroNif("__all__")}
+                data-testid="nif-toggle-all"
+                className={`text-xs font-mono px-3 py-1.5 border transition-colors ${
+                  filtroNif === "__all__"
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-slate-300 bg-white text-slate-700 hover:border-slate-500"
+                }`}
+              >
+                Todas
+              </button>
+            )}
+            {nifsDisponibles.map((nif) => (
+              <button
+                key={nif}
+                type="button"
+                onClick={() => setFiltroNif(nif)}
+                data-testid={`nif-toggle-${nif}`}
+                className={`text-xs font-mono px-3 py-1.5 border transition-colors ${
+                  filtroNif === nif
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-slate-300 bg-white text-slate-700 hover:border-slate-500"
+                }`}
+              >
+                {nif}
+              </button>
+            ))}
+          </div>
+          {comercialSinNif > 0 && filtroNif !== "__all__" && (
+            <span
+              className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1"
+              data-testid="comercial-sin-nif-warning"
+              title="Hay facturas comerciales sin NIF titular asignado. Se incluyen al filtrar por cualquier sociedad."
+            >
+              ⚠ {comercialSinNif.toLocaleString("es-ES")} comerciales sin NIF
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Tabla de comparativa */}
       <div className="border border-slate-200 bg-slate-50/40 p-4 mb-4 flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3 text-sm flex-wrap">
@@ -1127,10 +1247,14 @@ export default function Comparativa() {
             className="rounded-none"
             onClick={exportar}
             data-testid="export-comparativa"
-            disabled={total === 0}
+            disabled={total === 0 || exporting}
           >
-            <Download className="h-4 w-4 mr-2" />
-            Exportar
+            {exporting ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <Download className="h-4 w-4 mr-2" />
+            )}
+            {exporting ? "Exportando…" : "Exportar"}
           </Button>
           <Button
             variant="outline"
@@ -1151,6 +1275,7 @@ export default function Comparativa() {
           ejercicio: filtroEjercicio !== "__all__" ? filtroEjercicio : undefined,
           periodo: filtroPeriodo !== "__all__" ? filtroPeriodo : undefined,
           num_serie: filtroNumSerieDebounced.trim() || undefined,
+          nif_titular: filtroNif !== "__all__" ? filtroNif : undefined,
         }}
       />
 
