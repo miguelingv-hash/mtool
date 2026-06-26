@@ -314,6 +314,10 @@ export default function Comparativa() {
   const [sortBy, setSortBy] = useState(null);   // 'num_serie_factura' | 'estado' | 'importe_sii' | 'importe_comercial' | 'fecha_expedicion' | null
   const [sortDir, setSortDir] = useState("desc"); // 'asc' | 'desc'
   const [detail, setDetail] = useState(null);
+  // Contador que se incrementa cada vez que se recargan los items de la
+  // tabla. Lo usamos como prop refreshKey en ResumenTotales para que el
+  // resumen se vuelva a calcular tras imports/recargas.
+  const [refreshTick, setRefreshTick] = useState(0);
 
   // Form consulta mensual
   const [mes, setMes] = useState({
@@ -352,6 +356,7 @@ export default function Comparativa() {
       const { data } = await api.get("/comparativa", { params });
       setItems(data.items);
       setTotal(data.total);
+      setRefreshTick((t) => t + 1);
     } finally {
       setLoading(false);
     }
@@ -1177,6 +1182,7 @@ export default function Comparativa() {
       </div>
 
       <ResumenTotales
+        refreshKey={refreshTick}
         filtros={{
           ejercicio: filtroEjercicio !== "__all__" ? filtroEjercicio : undefined,
           periodo: filtroPeriodo !== "__all__" ? filtroPeriodo : undefined,

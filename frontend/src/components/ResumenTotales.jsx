@@ -113,7 +113,7 @@ function ColumnaTotales({ titulo, sub, base, cuota, n, ultimaFecha, diff, testId
   );
 }
 
-export default function ResumenTotales({ filtros }) {
+export default function ResumenTotales({ filtros, refreshKey }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -145,7 +145,7 @@ export default function ResumenTotales({ filtros }) {
 
   useEffect(() => {
     load();
-  }, [params]);
+  }, [params, refreshKey]);
 
   const sii = data?.sii;
   const total = data?.comercial_total;
