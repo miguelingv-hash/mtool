@@ -358,7 +358,32 @@ def diff_facturas(
                     return float(t) != 0
                 except (TypeError, ValueError):
                     return True
-            b = {**b, "detalle_iva": [l for l in det_b if _tipo_no_cero(l)]}
+            det_filtrado = [l for l in det_b if _tipo_no_cero(l)]
+            # Si filtramos algo, recalculamos también `base_imponible` y
+            # `cuota_repercutida` a nivel cabecera con la suma del detalle
+            # filtrado. Es CRÍTICO porque cuando SII no tiene desglose, la
+            # comparación cae a cabecera y los valores pre-calculados del
+            # comercial seguirían incluyendo las líneas excluidas.
+            if len(det_filtrado) != len(det_b):
+                def _sum_field(lineas, campo):
+                    s = 0.0
+                    for l in lineas:
+                        v = l.get(campo)
+                        if v is None:
+                            continue
+                        try:
+                            s += float(v)
+                        except (TypeError, ValueError):
+                            pass
+                    return round(s, 2)
+                b = {
+                    **b,
+                    "detalle_iva": det_filtrado,
+                    "base_imponible": _sum_field(det_filtrado, "base_imponible"),
+                    "cuota_repercutida": _sum_field(det_filtrado, "cuota_repercutida"),
+                }
+            else:
+                b = {**b, "detalle_iva": det_filtrado}
 
     # ¿Aplicamos comparación línea a línea?
     detalle_mode = _hay_desglose(a) and _hay_desglose(b)

@@ -2117,12 +2117,58 @@ async def detalle_factura(fuente: str, num_serie: str):
     return doc
 
 
+def _aplicar_exclusion_tipo_iva_cero(com: dict, config: Optional[dict]) -> dict:
+    """Si el flag `excluir_comercial_tipo_iva_cero` está activo en config y el
+    doc comercial tiene `detalle_iva`, filtra las líneas con tipo_impositivo
+    vacío o cero y recalcula `base_imponible` / `cuota_repercutida` a nivel
+    cabecera con la suma del detalle filtrado.
+
+    Devuelve un dict NUEVO (no muta el original).
+    """
+    if not com or not (config or {}).get("excluir_comercial_tipo_iva_cero", True):
+        return com
+    det = com.get("detalle_iva")
+    if not isinstance(det, list) or not det:
+        return com
+    def _tipo_no_cero(linea):
+        t = linea.get("tipo_impositivo")
+        if t is None:
+            return False
+        try:
+            return float(t) != 0
+        except (TypeError, ValueError):
+            return True
+    det_filtrado = [l for l in det if _tipo_no_cero(l)]
+    if len(det_filtrado) == len(det):
+        return com
+
+    def _sum_field(lineas, campo):
+        s = 0.0
+        for l in lineas:
+            v = l.get(campo)
+            if v is None:
+                continue
+            try:
+                s += float(v)
+            except (TypeError, ValueError):
+                pass
+        return round(s, 2)
+
+    return {
+        **com,
+        "detalle_iva": det_filtrado,
+        "base_imponible": _sum_field(det_filtrado, "base_imponible"),
+        "cuota_repercutida": _sum_field(det_filtrado, "cuota_repercutida"),
+    }
+
+
 def _build_row_from_docs(
     sii: Optional[dict],
     com: Optional[dict],
     ns: str,
     config: Optional[dict] = None,
 ) -> dict:
+    com = _aplicar_exclusion_tipo_iva_cero(com, config)
     if sii and com:
         d = diff_facturas(sii, com, config)
         return {

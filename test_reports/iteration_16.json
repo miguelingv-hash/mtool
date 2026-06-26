@@ -1,0 +1,33 @@
+{
+  "summary": "Backend-only E2E verification of the 'excluir_comercial_tipo_iva_cero' bug fix. Created new pytest file with 3 integration tests that inject synthetic SII + COMERCIAL docs reproducing the exact scenario from factura 26TAAYN000009029 (SII base=7.21/cuota=1.51 vs COM SAP detalle_iva con línea tipo=21 y línea tipo=null). All 3 E2E tests PASS: (1) GET /api/comparativa devuelve estado='coincide', diferencias={}, comercial.detalle_iva con 1 línea, comercial.base_imponible=-7.21 y cuota_repercutida=-1.51 recalculadas; (2) GET /api/comparativa/totales agrega comercial_por_origen.SAP.base=7.21 (línea null filtrada + invertida por SAP=True) y diferencias.base=0; (3) PUT/GET /api/comparativa/config persiste el flag correctamente en ambos sentidos (False y True). Regresión: 22 tests previos siguen verdes (test_diff_tramos_iva 9/9, test_comparativa_integration 6/6+1 skip, test_precision_detalle_iva 6/6). Cleanup automático de seed data en teardown del fixture.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_excluir_tipo_iva_cero_e2e.py",
+    "/app/test_reports/pytest/iteration_16_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "factura_model.py L344-386: el filtro recalcula base_imponible/cuota_repercutida con round(sum,2) tras filtrar el detalle_iva — correcto y crítico porque cuando SII no tiene desglose la comparación cae a cabecera. Sin este recalculo el bug reportado persistía.",
+    "router_facturas.py L2120-2162 (_aplicar_exclusion_tipo_iva_cero): duplica la lógica de filtrado de factura_model.diff_facturas pero con un propósito distinto (devolver al frontend el doc YA filtrado, no solo el diff). Aceptable pero podría extraerse a un helper compartido en factura_model.py para DRY.",
+    "router_facturas.py L2493-2519 (_sum_doc_comercial dentro de /comparativa/totales): aplica el filtro al sumar; nota interesante L2514-2516: si el doc no tiene detalle_iva pero la cabecera tiene tipo_impositivo vacío/cero Y el flag está activo, el doc entero contribuye 0. Comportamiento explícitamente documentado, OK.",
+    "Endpoint PUT /api/comparativa/config (L2646-2688): no valida tipos estrictos del payload (usa dict raw). Aceptable para admin-only pero un Pydantic model daría errores 422 más claros."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_excluir_tipo_iva_cero_e2e.py"
+  ],
+  "success_rate": {"backend": "100% (3/3 E2E nuevos + 22/22 regresión)", "frontend": "N/A (backend-only)"},
+  "test_credentials": "Admin: miguelingv@gmail.com — JWT minted vía auth.create_access_token() + JWT_SECRET de .env (mismo patrón que test_tipo_impositivo_regression.py).",
+  "seed_data_creation": "Seed sintético TESTSEXCL001 (1 doc SII + 1 doc COMERCIAL SAP) insertado en facturas_sii y facturas_comercial, limpiado automáticamente en teardown del fixture seeded_docs (db.delete_many por num_serie_factura). Config previo guardado y restaurado en teardown del fixture previous_config.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "El fix está completo y verificado E2E. La nueva suite /app/backend/tests/test_excluir_tipo_iva_cero_e2e.py es la fuente de verdad para regresión del flag excluir_comercial_tipo_iva_cero. Cubre los 3 puntos críticos: cabecera recalculada en /api/comparativa, totales agregados en /api/comparativa/totales, y persistencia del toggle vía PUT/GET /api/comparativa/config. Si el frontend necesita test (UI toggle en /configuracion), correr browser_automation con data-testid='switch-excluir-tipo-iva-cero'.",
+  "rca of the issue": "RCA original (resuelto por main agent antes de esta iteración): _aplicar_exclusion_tipo_iva_cero en router_facturas.py y diff_facturas en factura_model.py filtraban detalle_iva pero NO recalculaban base_imponible/cuota_repercutida a nivel cabecera. Cuando SII tenía solo cabecera (sin desglose), la comparación caía a cabecera y comparaba SII base=7.21 contra COM base=-7.18 (raw, incluyendo línea null). Fix: tras filtrar detalle_iva, sumar los campos del detalle filtrado y reemplazar la cabecera. Reproducción exacta vía seed sintético TESTSEXCL001 con datos del caso real 26TAAYN000009029 — el primer test E2E (test_comparativa_devuelve_coincide_y_filtra_linea) lo verifica end-to-end."
+}
