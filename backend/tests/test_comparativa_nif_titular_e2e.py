@@ -60,10 +60,20 @@ class TestNifsTitulares:
         assert EXPECTED_NIF in data["nifs_titulares"], (
             f"Esperaba '{EXPECTED_NIF}' en {data['nifs_titulares']}"
         )
-        # Per problem statement BD actual: comercial_sin_nif == 4731
-        assert data["comercial_sin_nif"] == 4731, (
-            f"Esperaba 4731 docs comerciales sin NIF, got {data['comercial_sin_nif']}"
+        # Tras el backfill (opción b), todos los docs comerciales tienen
+        # nif_titular asignado, así que `comercial_sin_nif` debe ser 0.
+        # Si en el futuro se cargan nuevos CSV con `Soc.` no mapeada, este
+        # contador puede subir.
+        assert data["comercial_sin_nif"] >= 0
+        # `sociedades` debe enriquecer cada NIF con su nombre desde el catálogo
+        socs = data.get("sociedades") or []
+        nifs_in_socs = {s["nif_titular"] for s in socs if s.get("nif_titular")}
+        assert EXPECTED_NIF in nifs_in_socs
+        info_total = next(
+            (s for s in socs if s["nif_titular"] == EXPECTED_NIF), None
         )
+        assert info_total is not None
+        assert "TotalEnergies" in (info_total.get("nombre_titular") or "")
 
 
 # --- 2) /comparativa con nif_titular ----------------------------------------

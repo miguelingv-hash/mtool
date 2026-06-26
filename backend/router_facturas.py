@@ -1799,7 +1799,10 @@ async def upload_csv_comercial(file: UploadFile = File(...)):
     # firma de cabeceras. Si no coincide ninguno, cae al parser CSV genérico.
     origen_detectado = _detectar_formato_tabular(text)
     if origen_detectado:
-        registros, errores = _parsear_report_tabular(text, origen_detectado)
+        catalogo = await _cargar_catalogo_sociedades()
+        registros, errores = _parsear_report_tabular(
+            text, origen_detectado, catalogo_sociedades=catalogo,
+        )
     else:
         registros, errores = _parsear_csv_generico(text)
 
@@ -1876,6 +1879,7 @@ _FORMATOS_TABULARES: dict[str, dict] = {
         "col_tipo": ["Tp.impos."],
         "col_base": ["BaseImpon"],
         "col_imp":  ["Impto.ML"],
+        "col_soc":  ["Soc."],
     },
     "SIGLO": {
         "header_signatures": (
@@ -1888,8 +1892,42 @@ _FORMATOS_TABULARES: dict[str, dict] = {
         "col_tipo": ["Tp.impos."],
         "col_base": ["BaseImpon"],
         "col_imp":  ["Impto.ML"],
+        "col_soc":  ["Soc."],
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Catálogo de Sociedades (Soc. → NIF titular + nombre)
+# ---------------------------------------------------------------------------
+
+# Default cableado para arranque limpio. El cliente puede sobreescribir/ampliar
+# vía `PUT /api/admin/sociedades` (se persiste en `_db.sociedades_catalogo`).
+_SOCIEDADES_DEFAULT: dict[str, dict] = {
+    "4432": {"nif_titular": "A95000295", "nombre_titular": "TotalEnergies Clientes S.A.U."},
+    "2239": {"nif_titular": "A74251836", "nombre_titular": "BASER"},
+}
+
+
+async def _cargar_catalogo_sociedades() -> dict[str, dict]:
+    """Devuelve el catálogo {soc: {nif_titular, nombre_titular}} combinando el
+    default cableado con los overrides persistidos en BD.
+
+    El doc en BD tiene formato:
+      `{_id: "default", entries: {"4432": {nif_titular, nombre_titular}, ...}}`
+    """
+    doc = await _db.sociedades_catalogo.find_one({"_id": "default"}) or {}
+    persisted = doc.get("entries") or {}
+    merged: dict[str, dict] = {}
+    for soc, info in _SOCIEDADES_DEFAULT.items():
+        merged[str(soc)] = dict(info)
+    for soc, info in persisted.items():
+        if isinstance(info, dict) and info.get("nif_titular"):
+            merged[str(soc)] = {
+                "nif_titular": str(info["nif_titular"]).strip().upper(),
+                "nombre_titular": str(info.get("nombre_titular") or "").strip(),
+            }
+    return merged
 
 
 def _detectar_formato_tabular(text: str) -> Optional[str]:
@@ -1939,6 +1977,7 @@ def _parsear_fecha_sap(valor: str) -> Optional[str]:
 
 def _parsear_report_tabular(
     text: str, origen: str,
+    catalogo_sociedades: Optional[dict[str, dict]] = None,
 ) -> tuple[list[dict], list[dict]]:
     """Parsea un report tabular SAP-style (SAP FI o SIGLO).
 
@@ -1951,6 +1990,10 @@ def _parsear_report_tabular(
 
     Difiere sólo en los nombres de las columnas, definidos en
     `_FORMATOS_TABULARES[origen]`.
+
+    `catalogo_sociedades` mapea `Soc.` (string sin padding) → `{nif_titular,
+    nombre_titular}`. Si una `Soc.` no está en el catálogo, el registro queda
+    sin `nif_titular` (se carga pero no aparece en filtros de sociedad).
     """
     spec = _FORMATOS_TABULARES[origen]
     lines = text.splitlines()
@@ -1985,6 +2028,7 @@ def _parsear_report_tabular(
     idx_tipo = _idx(spec["col_tipo"])
     idx_base = _idx(spec["col_base"])
     idx_imp  = _idx(spec["col_imp"])
+    idx_soc  = _idx(spec.get("col_soc") or [], 0)
 
     faltan = [n for n, v in [
         ("Nº (oficial)", idx_num), ("Tp.impos.", idx_tipo),
@@ -1997,7 +2041,9 @@ def _parsear_report_tabular(
                       f"{', '.join(faltan)}",
         }]
 
+    catalogo = catalogo_sociedades or {}
     registros_por_num: dict[str, dict] = {}
+    soc_no_mapeadas: set[str] = set()
     errores: list[dict] = []
     for i, line in enumerate(lines[header_idx + 1 :], start=header_idx + 2):
         s = line.rstrip()
@@ -2018,6 +2064,14 @@ def _parsear_report_tabular(
             tipo = _parsear_numero_sap(cells[idx_tipo])
             base = _parsear_numero_sap(cells[idx_base])
             cuota = _parsear_numero_sap(cells[idx_imp])
+            soc = (
+                cells[idx_soc].strip()
+                if idx_soc is not None and idx_soc < len(cells)
+                else ""
+            )
+            mapping = catalogo.get(soc) if soc else None
+            if soc and not mapping:
+                soc_no_mapeadas.add(soc)
             ejercicio = fexp.split("-")[-1] if fexp else None
             periodo = fexp.split("-")[1] if fexp else None
             # Una misma factura puede aparecer en varias filas (una por tramo
@@ -2036,6 +2090,9 @@ def _parsear_report_tabular(
                     "tipo_impositivo": None,
                     "detalle_iva": [],
                     "origen_comercial": origen,
+                    "soc_origen": soc or None,
+                    "nif_titular": (mapping or {}).get("nif_titular"),
+                    "nombre_titular": (mapping or {}).get("nombre_titular"),
                 }
                 registros_por_num[num] = agg
             if base is not None:
@@ -2050,6 +2107,17 @@ def _parsear_report_tabular(
             })
         except Exception as e:  # noqa: BLE001
             errores.append({"fila": i, "motivo": str(e), "raw": s[:200]})
+
+    if soc_no_mapeadas:
+        errores.append({
+            "fila": -1,
+            "motivo": (
+                f"Sociedades en CSV no encontradas en el catálogo: "
+                f"{sorted(soc_no_mapeadas)}. Los registros se cargan pero sin "
+                f"nif_titular asignado. Actualiza el catálogo en "
+                f"/api/admin/sociedades."
+            ),
+        })
 
     # Para el `tipo_impositivo` agregado: si la factura tiene una sola línea
     # de IVA, usamos su tipo; si tiene varios tramos lo dejamos a None para
@@ -2859,7 +2927,8 @@ async def comparativa_resumen_origenes(
 
 @router.get("/comparativa/nifs-titulares")
 async def comparativa_nifs_titulares():
-    """Devuelve la lista distinct de `nif_titular` presentes en SII y comercial.
+    """Devuelve la lista distinct de `nif_titular` presentes en SII y comercial,
+    enriquecida con el `nombre_titular` desde el catálogo de sociedades.
 
     Útil para construir el toggle de "Sociedad" en la UI. Si en el comercial
     existen docs sin nif_titular (data legacy), se devuelve adicionalmente el
@@ -2877,8 +2946,21 @@ async def comparativa_nifs_titulares():
             {"nif_titular": {"$exists": False}},
         ]}
     )
+    # Enriquecer con nombre_titular desde el catálogo
+    catalogo = await _cargar_catalogo_sociedades()
+    nif_to_nombre: dict[str, str] = {}
+    for soc, info in catalogo.items():
+        nif_to_nombre[info["nif_titular"]] = info.get("nombre_titular") or ""
+    sociedades = [
+        {
+            "nif_titular": n,
+            "nombre_titular": nif_to_nombre.get(n, ""),
+        }
+        for n in nifs
+    ]
     return {
         "nifs_titulares": nifs,
+        "sociedades": sociedades,
         "comercial_sin_nif": comercial_sin_nif,
     }
 

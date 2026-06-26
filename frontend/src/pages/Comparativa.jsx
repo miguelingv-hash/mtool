@@ -307,6 +307,7 @@ export default function Comparativa() {
   // si sólo hay 1 NIF en BD se autoselecciona; si hay 2+ el usuario alterna.
   const [filtroNif, setFiltroNif] = useState("__all__");
   const [nifsDisponibles, setNifsDisponibles] = useState([]);
+  const [sociedadesMap, setSociedadesMap] = useState({}); // {nif: nombre}
   const [comercialSinNif, setComercialSinNif] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [periodosDisponibles, setPeriodosDisponibles] = useState({
@@ -389,7 +390,13 @@ export default function Comparativa() {
       .get("/comparativa/nifs-titulares")
       .then((r) => {
         const lst = r.data?.nifs_titulares || [];
+        const sociedades = r.data?.sociedades || [];
         setNifsDisponibles(lst);
+        const mp = {};
+        sociedades.forEach((s) => {
+          if (s.nif_titular) mp[s.nif_titular] = s.nombre_titular || "";
+        });
+        setSociedadesMap(mp);
         setComercialSinNif(r.data?.comercial_sin_nif || 0);
         // Si sólo hay un NIF, autoseleccionarlo para evitar fricción.
         if (lst.length === 1) {
@@ -1115,21 +1122,36 @@ export default function Comparativa() {
                 Todas
               </button>
             )}
-            {nifsDisponibles.map((nif) => (
-              <button
-                key={nif}
-                type="button"
-                onClick={() => setFiltroNif(nif)}
-                data-testid={`nif-toggle-${nif}`}
-                className={`text-xs font-mono px-3 py-1.5 border transition-colors ${
-                  filtroNif === nif
-                    ? "border-slate-900 bg-slate-900 text-white"
-                    : "border-slate-300 bg-white text-slate-700 hover:border-slate-500"
-                }`}
-              >
-                {nif}
-              </button>
-            ))}
+            {nifsDisponibles.map((nif) => {
+              const nombre = sociedadesMap[nif];
+              return (
+                <button
+                  key={nif}
+                  type="button"
+                  onClick={() => setFiltroNif(nif)}
+                  data-testid={`nif-toggle-${nif}`}
+                  className={`text-xs px-3 py-1.5 border transition-colors flex items-center gap-2 ${
+                    filtroNif === nif
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-300 bg-white text-slate-700 hover:border-slate-500"
+                  }`}
+                  title={nombre ? `${nombre} (${nif})` : nif}
+                >
+                  {nombre && (
+                    <span className="font-semibold tracking-tight">
+                      {nombre}
+                    </span>
+                  )}
+                  <span
+                    className={`font-mono ${
+                      nombre ? "opacity-70 text-[10px]" : ""
+                    }`}
+                  >
+                    {nif}
+                  </span>
+                </button>
+              );
+            })}
           </div>
           {comercialSinNif > 0 && filtroNif !== "__all__" && (
             <span

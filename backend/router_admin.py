@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -333,11 +333,29 @@ SII_WIPE_COLLECTIONS = (
     "jobs",
 )
 
+# Selección granular de qué colecciones se vacían según `scope`:
+#   - "todo"      → SII + Comercial + consultas SOAP + jobs async
+#   - "sii"       → sólo facturas_sii + consultas (el log SOAP es SII-only)
+#   - "comercial" → sólo facturas_comercial (SAP FI + SIGLO viven aquí)
+SII_WIPE_SCOPES: dict[str, tuple[str, ...]] = {
+    "todo": ("facturas_sii", "facturas_comercial", "consultas", "jobs"),
+    "sii": ("facturas_sii", "consultas"),
+    "comercial": ("facturas_comercial",),
+}
+
 
 class WipeSIIIn(BaseModel):
     confirmacion: str = Field(
         ...,
         description="Debe ser exactamente 'VACIAR' para confirmar la operación.",
+    )
+    scope: Literal["todo", "sii", "comercial"] = Field(
+        default="todo",
+        description=(
+            "Ámbito a vaciar. `todo`: SII + Comercial + logs + jobs. "
+            "`sii`: sólo facturas_sii + log de consultas SOAP. "
+            "`comercial`: sólo facturas_comercial (SAP FI + SIGLO)."
+        ),
     )
 
 
@@ -348,25 +366,33 @@ async def vaciar_modulo_sii(
     dry_run: bool = False,
     _: dict = Depends(require_permission("sii.wipe")),
 ):
-    """Vacía las colecciones del módulo SII: `facturas_sii`, `facturas_comercial`,
-    `consultas`, `jobs`. **Operación irreversible**.
+    """Vacía colecciones del módulo SII de forma selectiva según `scope`.
 
-    No toca: `users`, `roles`, `comparativa_config`, `tasas_*`, `users_mfa`,
-    `login_attempts`, `activation_tokens`.
+    Scopes soportados:
+      - `todo`:      `facturas_sii`, `facturas_comercial`, `consultas`, `jobs`
+      - `sii`:       `facturas_sii`, `consultas`  (las consultas SOAP son SII)
+      - `comercial`: `facturas_comercial`         (SAP FI + SIGLO)
+
+    No toca nunca: `users`, `roles`, `comparativa_config`, `sociedades_catalogo`,
+    `tasas_*`, `users_mfa`, `login_attempts`, `activation_tokens`.
 
     Requisitos:
       - Permiso `sii.wipe` (solo admin por defecto).
       - Body con `confirmacion = "VACIAR"`.
-      - `dry_run=true` para sólo contar sin borrar.
+      - `dry_run=true` (query param) para sólo contar sin borrar.
     """
     if payload.confirmacion != "VACIAR":
         raise HTTPException(
             400,
             "Confirmación inválida. El campo 'confirmacion' debe ser exactamente 'VACIAR'.",
         )
+    collections = SII_WIPE_SCOPES.get(payload.scope)
+    if not collections:
+        raise HTTPException(400, f"Scope inválido: {payload.scope!r}")
+
     db = _db(request)
     resumen: dict[str, dict[str, int]] = {}
-    for col in SII_WIPE_COLLECTIONS:
+    for col in collections:
         antes = await db[col].count_documents({})
         if dry_run:
             resumen[col] = {"antes": antes, "borrados": 0, "despues": antes}
@@ -380,7 +406,197 @@ async def vaciar_modulo_sii(
             }
     return {
         "dry_run": dry_run,
-        "colecciones_afectadas": list(SII_WIPE_COLLECTIONS),
+        "scope": payload.scope,
+        "colecciones_afectadas": list(collections),
         "resumen": resumen,
     }
 
+
+
+# ============================================================================
+# Catálogo de Sociedades (Soc. → NIF titular + nombre)
+# ============================================================================
+
+# Default seed mirrored from router_facturas._SOCIEDADES_DEFAULT. Lo
+# duplicamos aquí para no acoplar imports — si cambia uno hay que actualizar
+# el otro (los tests cubren la coherencia mínima).
+_SOCIEDADES_SEED: dict[str, dict] = {
+    "4432": {"nif_titular": "A95000295", "nombre_titular": "TotalEnergies Clientes S.A.U."},
+    "2239": {"nif_titular": "A74251836", "nombre_titular": "BASER"},
+}
+
+
+class SociedadIn(BaseModel):
+    nif_titular: str = Field(..., min_length=1, max_length=20)
+    nombre_titular: str = Field(default="", max_length=200)
+
+
+class SociedadesPutIn(BaseModel):
+    entries: dict[str, SociedadIn] = Field(
+        default_factory=dict,
+        description="Mapa {soc: {nif_titular, nombre_titular}}. Reemplaza por completo los overrides existentes.",
+    )
+
+
+@router.get("/sociedades")
+async def get_sociedades(
+    request: Request,
+    _: dict = Depends(require_permission("sii.wipe")),
+):
+    """Devuelve el catálogo Soc → NIF/Nombre.
+
+    Combina los `_SOCIEDADES_SEED` (defaults cableados) con los overrides
+    persistidos en `sociedades_catalogo._id="default".entries`.
+    """
+    db = _db(request)
+    doc = await db.sociedades_catalogo.find_one({"_id": "default"}) or {}
+    persisted = doc.get("entries") or {}
+    merged: dict[str, dict] = {}
+    for soc, info in _SOCIEDADES_SEED.items():
+        merged[str(soc)] = dict(info)
+    for soc, info in persisted.items():
+        if isinstance(info, dict) and info.get("nif_titular"):
+            merged[str(soc)] = {
+                "nif_titular": str(info["nif_titular"]).strip().upper(),
+                "nombre_titular": str(info.get("nombre_titular") or "").strip(),
+            }
+    return {
+        "sociedades": merged,
+        "seed": _SOCIEDADES_SEED,
+        "persisted": persisted,
+    }
+
+
+@router.put("/sociedades")
+async def put_sociedades(
+    request: Request,
+    payload: SociedadesPutIn,
+    _: dict = Depends(require_permission("sii.wipe")),
+):
+    """Reemplaza por completo los overrides persistidos del catálogo de
+    sociedades. Los seeds cableados se mantienen — para "anular" un seed,
+    aporta un override con el mismo `soc` y el `nif_titular` correcto.
+    """
+    db = _db(request)
+    entries_norm: dict[str, dict] = {}
+    for soc, info in payload.entries.items():
+        soc_clean = str(soc).strip()
+        if not soc_clean:
+            continue
+        entries_norm[soc_clean] = {
+            "nif_titular": info.nif_titular.strip().upper(),
+            "nombre_titular": (info.nombre_titular or "").strip(),
+        }
+    await db.sociedades_catalogo.update_one(
+        {"_id": "default"},
+        {"$set": {
+            "entries": entries_norm,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
+    return {"ok": True, "count": len(entries_norm), "entries": entries_norm}
+
+
+class BackfillNifPorSocIn(BaseModel):
+    dry_run: bool = False
+    # Modo "asignación masiva": ignora `soc_origen` y asigna TODOS los docs
+    # comerciales sin `nif_titular` al NIF aportado. Útil para data legacy
+    # que se cargó antes de que el parser leyera el campo `Soc.`.
+    fallback_nif_titular: Optional[str] = None
+    fallback_nombre_titular: Optional[str] = None
+
+
+@router.post("/comercial/asignar-nif-titular-por-soc")
+async def backfill_nif_titular_por_soc(
+    request: Request,
+    payload: BackfillNifPorSocIn,
+    _: dict = Depends(require_permission("sii.wipe")),
+):
+    """Asigna `nif_titular` + `nombre_titular` a los docs de
+    `facturas_comercial` que aún no lo tienen.
+
+    Estrategia:
+      1) Match por `soc_origen` contra el catálogo (recomendado, requiere
+         que los docs hayan sido cargados con el parser nuevo que captura
+         `Soc.`).
+      2) Si `fallback_nif_titular` está informado, los docs sin
+         `soc_origen` (o con `soc_origen` no mapeable) se asignan al NIF
+         de fallback. Útil para la migración inicial.
+
+    Si `dry_run=true`, sólo cuenta sin escribir.
+    """
+    db = _db(request)
+    doc = await db.sociedades_catalogo.find_one({"_id": "default"}) or {}
+    persisted = doc.get("entries") or {}
+    catalogo: dict[str, dict] = {}
+    for soc, info in _SOCIEDADES_SEED.items():
+        catalogo[str(soc)] = dict(info)
+    for soc, info in persisted.items():
+        if isinstance(info, dict) and info.get("nif_titular"):
+            catalogo[str(soc)] = {
+                "nif_titular": str(info["nif_titular"]).strip().upper(),
+                "nombre_titular": str(info.get("nombre_titular") or "").strip(),
+            }
+
+    sin_nif_filter = {"$or": [
+        {"nif_titular": None},
+        {"nif_titular": ""},
+        {"nif_titular": {"$exists": False}},
+    ]}
+
+    resumen: dict[str, int] = {"por_soc": 0, "fallback": 0, "sin_asignar": 0}
+    detalle_por_soc: dict[str, int] = {}
+
+    # 1) Match por soc_origen
+    for soc, info in catalogo.items():
+        flt = {**sin_nif_filter, "soc_origen": soc}
+        count = await db.facturas_comercial.count_documents(flt)
+        if count == 0:
+            continue
+        detalle_por_soc[soc] = count
+        resumen["por_soc"] += count
+        if not payload.dry_run:
+            await db.facturas_comercial.update_many(
+                flt,
+                {"$set": {
+                    "nif_titular": info["nif_titular"],
+                    "nombre_titular": info["nombre_titular"],
+                }},
+            )
+
+    # 2) Fallback para los que sigan sin nif_titular
+    if payload.fallback_nif_titular:
+        nif_fb = payload.fallback_nif_titular.strip().upper()
+        nombre_fb = (payload.fallback_nombre_titular or "").strip()
+        flt = dict(sin_nif_filter)
+        count = await db.facturas_comercial.count_documents(flt)
+        resumen["fallback"] = count
+        if count > 0 and not payload.dry_run:
+            await db.facturas_comercial.update_many(
+                flt,
+                {"$set": {
+                    "nif_titular": nif_fb,
+                    "nombre_titular": nombre_fb,
+                }},
+            )
+
+    # 3) Reporte de los que aún quedarán sin asignar (con dry_run respeta)
+    if payload.dry_run:
+        # Para dry_run el conteo "sin_asignar" se calcula simulando los
+        # updates anteriores: total sin NIF − (asignados por soc) − fallback.
+        total_sin_nif = await db.facturas_comercial.count_documents(sin_nif_filter)
+        resumen["sin_asignar"] = max(
+            0, total_sin_nif - resumen["por_soc"] - resumen["fallback"]
+        )
+    else:
+        resumen["sin_asignar"] = await db.facturas_comercial.count_documents(
+            sin_nif_filter
+        )
+
+    return {
+        "dry_run": payload.dry_run,
+        "resumen": resumen,
+        "detalle_por_soc": detalle_por_soc,
+        "fallback_aplicado": bool(payload.fallback_nif_titular),
+    }

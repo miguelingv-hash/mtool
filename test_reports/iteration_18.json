@@ -1,0 +1,31 @@
+{
+  "summary": "Full E2E verification (backend + frontend) of the 3 new pieces: (1) SAP/SIGLO parser reading `Soc.` column → soc_origen/nif_titular/nombre_titular (with unmapped-Soc errors); (2) backfill endpoint dry_run for facturas_comercial; (3) selective wipe with scope=todo|sii|comercial. Also verified GET/PUT /api/admin/sociedades catalog (seed + persisted merge + override + cleanup) and GET /api/comparativa/nifs-titulares enriched with `sociedades[]`. Backend: 10/10 NEW pytest cases PASS + 8/8 regression PASS. Frontend: /admin/mantenimiento renders the 3 cards (todo/sii/comercial) with their data-testids; dry-run on `comercial` returns ONLY facturas_comercial row (5016 docs, scope isolation OK) — NO real wipe executed. /comparativa toggle now shows nombre + NIF (e.g. 'TotalEnergies Clientes S.A.U. / A95000295' and 'BASER / A74251836') with title tooltip 'TotalEnergies Clientes S.A.U. (A95000295)'.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_sociedades_wipe_e2e.py",
+    "/app/backend/tests/test_comparativa_nif_titular_e2e.py",
+    "/app/test_reports/pytest/iteration_18_sociedades.xml",
+    "/app/test_reports/pytest/iteration_18_regression.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "router_admin.py L423-426: `_SOCIEDADES_SEED` is duplicated from router_facturas._SOCIEDADES_DEFAULT. Comment acknowledges it but in production any drift creates silent inconsistencies between parser and admin UI. Consider centralizing in a shared module (e.g. `/app/backend/catalogos.py`) and importing from both. The current shape is acceptable while only 2 sociedades exist.",
+    "router_admin.py L508-595 (backfill endpoint): in non-dry-run mode the loop iterates the catalog and runs `update_many` per soc — fine for a 2-entry catalog but each iteration triggers a `count_documents({...soc})` even when count=0. Minor; not a blocker.",
+    "router_admin.py L562-591 (fallback branch in non-dry-run): after `update_many` with `fallback_nif_titular`, the second `count_documents(sin_nif_filter)` at L593 will always be 0 (the update zeroed them). The `resumen[\"sin_asignar\"]` ends up correct in practice, but the dry-run vs non-dry-run paths compute it through divergent logic — slight asymmetry that could be unified.",
+    "router_admin.py PUT /sociedades L490-497: persists `entries` as a complete replacement (no merge), so a typo in the client payload wipes the override map. UX-friendly to keep, but the docstring should warn 'reemplaza por completo' — it already does ✓.",
+    "router_facturas.py L1906-1908 (_SOCIEDADES_DEFAULT) and L1870-1897 (_FORMATOS_TABULARES.col_soc): the parser depends on the EXACT column header `Soc.` (with the trailing dot). Worth a smoke test if SAP exports vary the column header across modules/locales — currently uncovered.",
+    "router_facturas.py _parsear_report_tabular L2113-2120: the unmapped-soc error uses fila=-1 (sentinel) which downstream consumers must understand. The motivo string is helpful but downstream UIs that bucket errors by fila could mis-group them.",
+    "AdminMantenimiento.jsx: irreversible action protected only by an AlertDialog with type-to-confirm. Good UX but no second factor / per-environment guard — recommend adding an env flag (e.g. `REACT_APP_ALLOW_WIPE`) that disables the button entirely in production. Not blocking."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_sociedades_wipe_e2e.py (new)"
+  ],
+  "success_rate": {"backend": "100% (10/10 new + 8/8 regression)", "frontend": "100% (3 cards + dryrun isolation + nombre-en-toggle)"},
+  "test_credentials": "Admin miguelingv@gmail.com via JWT minted with auth.create_access_token (cookie monitorsii_access), same pattern as iteration_17.",
+  "seed_data_creation": "None on persisted data. The PUT /api/admin/sociedades test wrote a TEST_NEW (Soc=5555 → B12345678) override and cleaned it (entries={}) within the same test — verified empty post-cleanup.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backfill already applied: facturas_comercial=5016 all with nif_titular=A95000295 (legacy, soc_origen=None). comercial_sin_nif=0. The wipe endpoint scope=todo/sii/comercial is verified via dry_run only — NO test invokes the real destructive path. Pydantic Literal correctly rejects unknown scope with 422. The /comparativa nif-toggle UI relies on `sociedadesMap` populated from the new `sociedades[]` field in /comparativa/nifs-titulares; if that field is removed the toggle reverts to NIF-only without breaking.",
+  "rca of the issue": "N/A — feature addition. No incidencias detectadas."
+}
