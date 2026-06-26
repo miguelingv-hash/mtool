@@ -2227,6 +2227,8 @@ async def comparativa(
     periodo: Optional[str] = None,
     num_serie: Optional[str] = None,
     estado: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: str = "desc",
 ):
     """Compara facturas SII vs Comercial por `num_serie_factura`.
 
@@ -2278,11 +2280,51 @@ async def comparativa(
     solo_sii_total = await _db.facturas_sii.count_documents(solo_sii_filter)
 
     # 5) Aplicar filtros only_diffs / estado para decidir total e items
+    # Mapeo de claves de ordenación del cliente a:
+    # 1) Una función `key(row)` para ordenar filas ya construidas en memoria.
+    # 2) Un campo Mongo para el cursor BD (solo necesario en estado='solo_sii').
+    def _sort_key_row(key: str):
+        if key == "num_serie_factura":
+            return lambda r: r.get("num_serie_factura") or ""
+        if key == "estado":
+            return lambda r: r.get("estado") or ""
+        if key == "fecha_expedicion":
+            # Convierte 'DD-MM-YYYY' a entero comparable; nulos al final.
+            def _f(r):
+                s = (r.get("sii") or {}).get("fecha_expedicion") or (
+                    r.get("comercial") or {}
+                ).get("fecha_expedicion")
+                if not isinstance(s, str):
+                    return -1
+                try:
+                    d, m, y = s.split("-")
+                    return int(y) * 10000 + int(m) * 100 + int(d)
+                except (ValueError, AttributeError):
+                    return -1
+            return _f
+        if key == "importe_sii":
+            return lambda r: (r.get("sii") or {}).get("importe_total") or 0
+        if key == "importe_comercial":
+            return lambda r: (r.get("comercial") or {}).get("importe_total") or 0
+        return lambda r: r.get("num_serie_factura") or ""
+
+    SORT_DB_FIELD = {
+        "num_serie_factura": "num_serie_factura",
+        "fecha_expedicion": "fecha_expedicion",
+        "importe_sii": "importe_total",
+    }
+
     if estado == "solo_sii":
         # Sólo SII: paginamos a nivel BD. No mezclamos con filas_com.
+        db_field = SORT_DB_FIELD.get(sort_by or "", "num_serie_factura")
+        # En BD las fechas son strings 'DD-MM-YYYY' que NO ordenan
+        # cronológicamente como strings; pero como TODAS las del año actual
+        # comparten el sufijo '-YYYY', el orden lexicográfico coincide con el
+        # cronológico dentro del mismo año. Para multi-año cargamos en memoria.
+        direction = -1 if sort_dir == "desc" else 1
         cursor = _db.facturas_sii.find(
             solo_sii_filter, {"_id": 0, "versiones": 0}
-        ).sort("num_serie_factura", 1).skip(skip).limit(limit)
+        ).sort(db_field, direction).skip(skip).limit(limit)
         sii_pagina = await cursor.to_list(length=limit)
         items = [
             _build_row_from_docs(d, None, d["num_serie_factura"], config)
@@ -2299,7 +2341,8 @@ async def comparativa(
             # "Todas" mezcla filas comerciales + solo_sii paginado
             filas = list(filas_com)
 
-        filas.sort(key=lambda r: r["num_serie_factura"])
+        sort_func = _sort_key_row(sort_by or "num_serie_factura")
+        filas.sort(key=sort_func, reverse=(sort_dir == "desc"))
         # Cuando estado=None y only_diffs=False, sumamos contador de solo_sii al total
         # pero NO inyectamos los docs (sería caro). Si el usuario quiere verlos,
         # debe seleccionar explícitamente "Sólo en SII".

@@ -353,6 +353,10 @@ export default function Comparativa() {
       if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
       if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
       if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
+      if (sortBy) {
+        params.sort_by = sortBy;
+        params.sort_dir = sortDir;
+      }
       const { data } = await api.get("/comparativa", { params });
       setItems(data.items);
       setTotal(data.total);
@@ -385,7 +389,7 @@ export default function Comparativa() {
   useEffect(() => {
     load();
     // eslint-disable-next-line
-  }, [filtroEstado, page, pageSize, filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced]);
+  }, [filtroEstado, page, pageSize, filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced, sortBy, sortDir]);
 
   // Reset paginación al cambiar filtros
   useEffect(() => {
@@ -655,50 +659,10 @@ export default function Comparativa() {
   };
 
   const visibleItems = onlyIvaErr ? items.filter(tieneIvaIncorrecto) : items;
-
-  // Sort de la tabla. `sortBy` es la clave de columna; `sortDir` 'asc'|'desc'.
-  // 'Campos con diferencias' no es ordenable por petición expresa del usuario.
-  const sortedItems = (() => {
-    if (!sortBy) return visibleItems;
-    const dir = sortDir === "asc" ? 1 : -1;
-    const getVal = (r) => {
-      switch (sortBy) {
-        case "num_serie_factura":
-          return r.num_serie_factura ?? "";
-        case "estado":
-          return r.estado ?? "";
-        case "importe_sii":
-          return r.sii?.importe_total ?? null;
-        case "importe_comercial":
-          return r.comercial?.importe_total ?? null;
-        case "fecha_expedicion": {
-          // Devuelve una tupla ordenable (Y, M, D) a partir de "DD-MM-YYYY".
-          // Prioriza SII; si no hay, cae al comercial.
-          const fe =
-            r.sii?.fecha_expedicion || r.comercial?.fecha_expedicion;
-          if (typeof fe !== "string") return null;
-          const m = fe.match(/^(\d{2})-(\d{2})-(\d{4})$/);
-          if (!m) return null;
-          return Number(`${m[3]}${m[2]}${m[1]}`);
-        }
-        default:
-          return null;
-      }
-    };
-    // Stable sort
-    return [...visibleItems].sort((a, b) => {
-      const va = getVal(a);
-      const vb = getVal(b);
-      // null/undefined siempre al final independientemente de la dirección
-      if (va === null || va === undefined)
-        return vb === null || vb === undefined ? 0 : 1;
-      if (vb === null || vb === undefined) return -1;
-      if (typeof va === "number" && typeof vb === "number") {
-        return (va - vb) * dir;
-      }
-      return String(va).localeCompare(String(vb), "es", { numeric: true }) * dir;
-    });
-  })();
+  // La ordenación se hace ahora server-side (params sort_by + sort_dir),
+  // por lo que `sortedItems` es simplemente la lista visible sin re-ordenar.
+  // Mantenemos el alias para no romper el render de la tabla.
+  const sortedItems = visibleItems;
 
   const toggleSort = (key) => {
     if (sortBy === key) {
