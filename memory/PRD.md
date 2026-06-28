@@ -290,23 +290,39 @@
 
 ### Feb 2026 — Soc. → NIF en parser + Vaciado SELECTIVO + Sociedad con nombre
 - **Parser SAP/SIGLO** ahora lee la columna `Soc.` de cada fila y mapea con un catálogo `_SOCIEDADES_DEFAULT` (4432→A95000295 TotalEnergies Clientes S.A.U., 2239→A74251836 BASER). Cada doc en `facturas_comercial` se persiste con `soc_origen`, `nif_titular` y `nombre_titular`. `Soc.` no mapeadas se cargan pero quedan sin NIF y aparecen en `errores` con `fila=-1` y motivo descriptivo.
-- **Catálogo Soc→NIF editable**: nuevos endpoints admin `GET/PUT /api/admin/sociedades` con merge seed + overrides persistidos en `sociedades_catalogo._id="default".entries`. Permite añadir/editar sociedades sin redeploy.
-- **Backfill** de los 5 016 docs comerciales legacy (sin `Soc.` capturado en imports antiguos): nuevo `POST /api/admin/comercial/asignar-nif-titular-por-soc` con `dry_run` + matcheo por `soc_origen` + opción `fallback_nif_titular` para asignación masiva. Ejecutado con `fallback="A95000295"/"TotalEnergies Clientes S.A.U."` → 5 016 docs actualizados, `comercial_sin_nif=0`.
-- **Vaciado selectivo en `/mantenimiento`**: la acción "Vaciar SII" se separó en 3 ámbitos:
-  - `todo` → facturas_sii + facturas_comercial + consultas + jobs (reset total)
-  - `sii` → sólo facturas_sii + consultas (log SOAP es SII-only) — para reset de Newman
-  - `comercial` → sólo facturas_comercial (cargas SAP FI + SIGLO)
-  Backend: modelo `WipeSIIIn.scope: Literal["todo","sii","comercial"]` con tabla `SII_WIPE_SCOPES`. Pydantic rechaza scopes inválidos con 422.
-  Frontend: `AdminMantenimiento.jsx` rediseñado a 3 tarjetas (color-coded rose/amber/sky), cada una con dry-run + diálogo "VACIAR" independiente, sin riesgo de pulsar el ámbito equivocado.
-- **Toggle de Sociedad en Comparativa** ahora muestra el **nombre** además del NIF (`TotalEnergies Clientes S.A.U. / A95000295`). El endpoint `/comparativa/nifs-titulares` devuelve un campo extra `sociedades[]` enriquecido desde el catálogo.
-- **Validado por testing agent (iteration_18.json)**: 10/10 nuevos pytest + 8/8 regresión + smoke E2E frontend. Sin regresiones. Sin acción de borrado real ejecutada.
+- **Catálogo Soc→NIF editable** vía `GET/PUT /api/admin/sociedades` (seeds + overrides persistidos en `sociedades_catalogo`).
+- **Backfill** ejecutado a los 5 016 docs comerciales legacy → A95000295/TotalEnergies (`comercial_sin_nif=0`).
+- **Vaciado SELECTIVO en `/mantenimiento`**: 3 ámbitos — `todo`, `sii`, `comercial`.
+- **Toggle Sociedad** muestra nombre + NIF.
+- Validado por testing agent (iteration_18.json): 10/10 nuevos pytest + 8/8 regresión + frontend E2E.
+
+### Feb 2026 — Reorganización: "Carga de datos" + filtro Periodo Q/M multi-select
+- **Nueva pantalla `/carga-datos`** con 3 tabs (Radix Tabs sincronizados con `?tab=`):
+  1. **Conciliación Newman** (default — flujo principal del usuario, carga masiva)
+  2. **Comercial (SAP / SIGLO)** — extraído de Comparativa a `components/CargaComercialCSV.jsx`
+  3. **Consulta mensual SII** — extraído a `components/CargaMensualSII.jsx` con job recovery + polling propios
+- **`ProtectedRoute`** ahora soporta `requiresAny={[...]}` (OR de permisos). `/carga-datos` exige al menos uno de: `conciliacion.view`, `conciliacion.import`, `comercial.import`, `consultas.mensual`. El rol `usuario` por defecto NO entra; el admin sí.
+- **`ConciliacionNewman`** acepta prop `embedded` para suprimir su H1 cuando se renderiza dentro del tab.
+- **Sidebar**:
+  - Renombrado `Comparativa SII↔CSV` → `Comparativa SII`
+  - Añadida entrada `Carga de datos` (con `permAny`)
+  - Eliminada `Conciliación Newman` (sus contenidos ahora viven en /carga-datos)
+- **Back-compat**: `/conciliacion` redirige a `/carga-datos?tab=newman` para no romper bookmarks.
+- **Pantalla Comparativa limpia**: eliminados los bloques "Consulta mensual SII" y "Importar fichero comercial", el panel lateral "Jobs en background", y todo el state/handlers asociados (~430 líneas). El archivo bajó de 1 852 a ~1 230 líneas.
+- **Filtro de Periodo rediseñado**:
+  - Backend (`router_facturas._build_filtros` + `comparativa_resumen_origenes`): `periodo` acepta CSV ("01,02,03") → split + `$in` en Mongo. Tolera espacios.
+  - Frontend Comparativa: nuevo selector con 2 líneas — `Quarter` (Q1-Q4 con tooltip de meses) y `Mes` (01-12 con label Ene-Dic). **Mutex**: marcar un quarter limpia meses y viceversa. Multi-select dentro de cada línea. Pill resumen `Filtrando: Q2 + Q3 (6 meses)` con botón `✕ limpiar`. La línea inactiva se renderiza grisada (no deshabilitada — click sustituye la otra).
+- **Bug encontrado y arreglado durante self-test**: `CargaMensualSII` importaba `PERIODOS` de `@/lib/api` (array de `{value,label}`) y renderizaba los objetos directamente → React error "Objects are not valid as a React child". Sustituido por una constante local plana `["01"…"12"]`.
+- **Validado por testing agent (iteration_19.json)**: 6/6 backend tests verde (periodo CSV + $in + tolerancia espacios). ~95% frontend (19/20 — el faltante era precisamente el bug del PERIODOS, ya arreglado y reverificado por screenshot).
 
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.
-- **P2** Centralizar `_SOCIEDADES_DEFAULT` / `_SOCIEDADES_SEED` en un módulo compartido `/app/backend/catalogos.py` para evitar drift entre router_admin y router_facturas (señalado en code review iter18).
-- **P2** UI admin para editar el catálogo de Sociedades (Soc→NIF→Nombre) — endpoints ya listos, falta la pantalla.
-- **P2** Componetizar `Comparativa.jsx` (archivo enorme, ~1 800 líneas).
-- **P2** Salvaguarda extra para `/mantenimiento` en producción: env flag `REACT_APP_ALLOW_WIPE=false` que oculte el botón.
-- **P2** Alinear estilos de páginas Tasas con patrón Shadcn UI del resto.
-- **P2** Verificación de dominio en Resend para invitaciones a usuarios externos.
+- **P2** Centralizar `_SOCIEDADES_DEFAULT` / `_SOCIEDADES_SEED` en `backend/catalogos.py`.
+- **P2** UI admin para editar el catálogo de Sociedades (Soc→NIF→Nombre).
+- **P2** `useMemo(effectivePeriodo)` + `AbortController` en las 3 llamadas paralelas de Comparativa (iter19 code review).
+- **P2** `CargaDatos.tab` controlado por searchParams en cada render (back/forward — iter19).
+- **P2** Componetizar `Comparativa.jsx` (~1 230 líneas).
+- **P2** Salvaguarda env flag `REACT_APP_ALLOW_WIPE=false` para `/mantenimiento`.
+- **P2** Alinear estilos páginas Tasas con Shadcn UI.
+- **P2** Verificación de dominio en Resend.

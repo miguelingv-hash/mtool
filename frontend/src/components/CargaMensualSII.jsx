@@ -20,7 +20,11 @@ import {
 import { toast } from "sonner";
 import CertUploader from "@/components/CertUploader";
 import { useEnv } from "@/contexts/EnvContext";
-import { PERIODOS } from "@/lib/api";
+
+// Lista plana de periodos AEAT con padding: "01".."12". Se define local porque
+// `PERIODOS` en `@/lib/api` es un array de objetos {value,label} pensado para
+// otros selectores (incluye 1T-4T) — aquí queremos sólo meses.
+const PERIODOS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
 
 /**
  * Sección "Consulta mensual SII".
