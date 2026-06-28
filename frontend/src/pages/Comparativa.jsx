@@ -585,12 +585,27 @@ export default function Comparativa() {
           data-testid="resumen-origenes"
         >
           {resumenOrigenes.map((o) => {
-            const pctMatch = o.total_facturas
-              ? Math.round((o.matches_sii / o.total_facturas) * 100)
-              : 0;
-            const pctCoincide = o.matches_sii
-              ? Math.round((o.coincidencias / o.matches_sii) * 100)
-              : 0;
+            // Helper: nunca redondear hacia arriba a 100% si no es exacto.
+            // Si `num === den` devolvemos 100 limpio; en cualquier otro caso
+            // usamos Math.floor con 1 decimal para que 99,96% no aparezca
+            // como 100% (lo que era engañoso cuando había 2 discrepancias).
+            const pct = (num, den) => {
+              if (!den) return 0;
+              if (num === den) return 100;
+              return Math.floor((num / den) * 1000) / 10;
+            };
+            // Métrica PRINCIPAL (la que se muestra grande): coincidencia
+            // EXACTA sobre el universo comercial completo. Esto refleja la
+            // realidad de conciliación: incluye al numerador SÓLO las
+            // facturas que (a) tienen contrapartida en SII y (b) cuadran
+            // campo a campo. Las discrepancias y las "sólo comercial"
+            // bajan el porcentaje — como debe ser.
+            const pctConciliacion = pct(o.coincidencias, o.total_facturas);
+            const pctConciliacionExact =
+              o.coincidencias === o.total_facturas;
+            // Métricas secundarias para el desglose:
+            const pctMatch = pct(o.matches_sii, o.total_facturas);
+            const pctCoincide = pct(o.coincidencias, o.matches_sii);
             const accent =
               o.origen === "SAP"
                 ? "border-l-blue-500"
@@ -637,15 +652,26 @@ export default function Comparativa() {
                 </div>
                 <div className="mt-3 pt-3 border-t border-slate-100 text-xs space-y-1">
                   <div className="flex items-center justify-between">
-                    <span className="text-slate-500">Conciliación</span>
-                    <span className="font-mono tabular-nums text-slate-700">
-                      {pctMatch}%
+                    <span className="text-slate-500">
+                      Conciliación exacta
+                    </span>
+                    <span
+                      className={`font-mono tabular-nums ${
+                        pctConciliacionExact
+                          ? "text-emerald-700 font-semibold"
+                          : "text-slate-700"
+                      }`}
+                      data-testid={`resumen-${o.origen}-conciliacion-pct`}
+                    >
+                      {pctConciliacion}%
                     </span>
                   </div>
                   <div className="h-1.5 bg-slate-100">
                     <div
-                      className="h-full bg-slate-700"
-                      style={{ width: `${pctMatch}%` }}
+                      className={`h-full ${
+                        pctConciliacionExact ? "bg-emerald-600" : "bg-slate-700"
+                      }`}
+                      style={{ width: `${pctConciliacion}%` }}
                     />
                   </div>
                   <div className="flex items-center justify-between pt-1 text-[11px]">
@@ -659,11 +685,31 @@ export default function Comparativa() {
                       {o.sin_match_sii.toLocaleString("es-ES")} sólo com.
                     </span>
                   </div>
-                  {o.matches_sii > 0 && (
-                    <div className="text-[11px] text-slate-500 pt-1">
-                      De las {o.matches_sii.toLocaleString("es-ES")} con
-                      contrapartida en SII, {pctCoincide}% coinciden
-                      exactamente.
+                  {/* Desglose: dos métricas secundarias claramente etiquetadas
+                      para que el usuario entienda por qué la métrica principal
+                      es la que es (cuando no llega al 100%). */}
+                  {!pctConciliacionExact && (
+                    <div
+                      className="text-[11px] text-slate-500 pt-1 leading-snug space-y-0.5"
+                      data-testid={`resumen-${o.origen}-desglose`}
+                    >
+                      <div>
+                        <span className="font-mono">{pctMatch}%</span> con
+                        contrapartida en SII (
+                        {o.matches_sii.toLocaleString("es-ES")} /{" "}
+                        {o.total_facturas.toLocaleString("es-ES")}).
+                      </div>
+                      <div>
+                        De ésas,{" "}
+                        <span className="font-mono">{pctCoincide}%</span>{" "}
+                        coinciden campo a campo.
+                      </div>
+                    </div>
+                  )}
+                  {pctConciliacionExact && (
+                    <div className="text-[11px] text-emerald-700 pt-1">
+                      Todas las {o.total_facturas.toLocaleString("es-ES")}{" "}
+                      facturas tienen contrapartida exacta en SII.
                     </div>
                   )}
                 </div>
