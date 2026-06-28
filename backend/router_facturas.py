@@ -2288,8 +2288,17 @@ async def _build_filtros(
         filtro_sii["ejercicio"] = str(ejercicio)
         filtro_com["ejercicio"] = str(ejercicio)
     if periodo:
-        filtro_sii["periodo"] = str(periodo)
-        filtro_com["periodo"] = str(periodo)
+        # Acepta valor único ("01") o lista separada por comas ("01,02,03").
+        # Multi: aplica $in en ambas colecciones.
+        periodos_list = [
+            p.strip() for p in str(periodo).split(",") if p.strip()
+        ]
+        if len(periodos_list) == 1:
+            filtro_sii["periodo"] = periodos_list[0]
+            filtro_com["periodo"] = periodos_list[0]
+        elif len(periodos_list) > 1:
+            filtro_sii["periodo"] = {"$in": periodos_list}
+            filtro_com["periodo"] = {"$in": periodos_list}
     if num_serie:
         regex_ns = {"$regex": re.escape(num_serie), "$options": "i"}
         filtro_sii["num_serie_factura"] = regex_ns
@@ -2839,7 +2848,13 @@ async def comparativa_resumen_origenes(
     if ejercicio:
         filtro_com["ejercicio"] = str(ejercicio)
     if periodo:
-        filtro_com["periodo"] = str(periodo)
+        periodos_list = [
+            p.strip() for p in str(periodo).split(",") if p.strip()
+        ]
+        if len(periodos_list) == 1:
+            filtro_com["periodo"] = periodos_list[0]
+        elif len(periodos_list) > 1:
+            filtro_com["periodo"] = {"$in": periodos_list}
     if num_serie:
         filtro_com["num_serie_factura"] = {
             "$regex": re.escape(num_serie), "$options": "i",
@@ -2890,7 +2905,13 @@ async def comparativa_resumen_origenes(
             if ejercicio:
                 sii_filter["ejercicio"] = str(ejercicio)
             if periodo:
-                sii_filter["periodo"] = str(periodo)
+                periodos_list = [
+                    p.strip() for p in str(periodo).split(",") if p.strip()
+                ]
+                if len(periodos_list) == 1:
+                    sii_filter["periodo"] = periodos_list[0]
+                elif len(periodos_list) > 1:
+                    sii_filter["periodo"] = {"$in": periodos_list}
             if nif_norm:
                 sii_filter["nif_titular"] = nif_norm
             sii_docs = await _db.facturas_sii.find(

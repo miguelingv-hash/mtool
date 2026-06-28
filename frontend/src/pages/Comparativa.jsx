@@ -24,20 +24,15 @@ import {
   SheetContent,
   SheetHeader,
   SheetTitle,
-  SheetDescription,
 } from "@/components/ui/sheet";
 import {
-  Upload,
   Download,
   RefreshCw,
   CheckCircle2,
   AlertTriangle,
   CircleHelp,
   Eye,
-  CalendarRange,
   Loader2,
-  ListTodo,
-  PlayCircle,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
@@ -47,8 +42,6 @@ import {
   ArrowUpDown,
 } from "lucide-react";
 import { toast } from "sonner";
-import CertUploader from "@/components/CertUploader";
-import { useEnv } from "@/contexts/EnvContext";
 import { labelOrigenComercial } from "@/lib/origenes";
 import ResumenTotales from "@/components/ResumenTotales";
 
@@ -68,6 +61,18 @@ const ESTADO_PILL = {
 };
 
 const PERIODOS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
+
+// Mapa de Quarter → meses (formato AEAT con padding "01".."12").
+// Se usa para expandir la selección de trimestres a una lista de periodos
+// que el backend entiende vía `$in`.
+const QUARTERS_TO_MONTHS = {
+  Q1: ["01", "02", "03"],
+  Q2: ["04", "05", "06"],
+  Q3: ["07", "08", "09"],
+  Q4: ["10", "11", "12"],
+};
+const QUARTERS = ["Q1", "Q2", "Q3", "Q4"];
+const MONTH_LABELS = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 
 // Etiqueta visible del origen comercial: ver helper en @/lib/origenes.
 
@@ -292,14 +297,20 @@ function SortableHead({ label, sortKey, sortBy, sortDir, onClick, align }) {
 }
 
 export default function Comparativa() {
-  const { entorno } = useEnv();
   const location = useLocation();
   const initialNumSerie = new URLSearchParams(location.search).get("num_serie") || "";
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [onlyIvaErr, setOnlyIvaErr] = useState(false);
   const [filtroEjercicio, setFiltroEjercicio] = useState("__all__");
-  const [filtroPeriodo, setFiltroPeriodo] = useState("__all__");
+  // Filtro de periodo en dos líneas mutuamente excluyentes:
+  //   `quartersSel`: subset de {"Q1","Q2","Q3","Q4"} (multi)
+  //   `monthsSel`  : subset de {"01"…"12"}            (multi)
+  // Si una está poblada, la otra se borra al togglear. El valor que se envía
+  // al backend en el parámetro `periodo` es siempre una lista CSV de meses
+  // (expandiendo los trimestres a sus tres meses correspondientes).
+  const [quartersSel, setQuartersSel] = useState([]);
+  const [monthsSel, setMonthsSel] = useState([]);
   const [filtroNumSerie, setFiltroNumSerie] = useState(initialNumSerie);
   const [filtroNumSerieDebounced, setFiltroNumSerieDebounced] = useState(initialNumSerie);
   const [filtroEstado, setFiltroEstado] = useState(initialNumSerie ? "all" : "diffs"); // diffs|all|coincide|discrepancia|solo_sii|solo_comercial
@@ -326,19 +337,45 @@ export default function Comparativa() {
   // resumen se vuelva a calcular tras imports/recargas.
   const [refreshTick, setRefreshTick] = useState(0);
 
-  // Form consulta mensual
-  const [mes, setMes] = useState({
-    nif_titular: "A95000295",
-    nombre_titular: "TotalEnergies Clientes S.A.U.",
-    ejercicio: String(new Date().getFullYear()),
-    periodo: "01",
-  });
-  const [maxPaginas, setMaxPaginas] = useState("1"); // "1"…"10" o "all"
-  const [loadingMes, setLoadingMes] = useState(false);
-  const [runningJob, setRunningJob] = useState(null);
-  const [csvFile, setCsvFile] = useState(null);
-  const [loadingCsv, setLoadingCsv] = useState(false);
-  const [cert, setCert] = useState({ enabled: false, file: null, password: "" });
+  // NOTA: el estado y los handlers de "Consulta mensual SII" y de
+  // "Importar fichero comercial" se movieron a /carga-datos (componentes
+  // CargaMensualSII y CargaComercialCSV). Esta pantalla queda enfocada
+  // únicamente en mostrar la comparativa.
+
+  // Valor efectivo del filtro de periodo enviado al backend (CSV de meses):
+  //   - si hay meses seleccionados → ["01","03"] → "01,03"
+  //   - si hay quarters seleccionados → se expanden y se ordenan
+  //   - si no hay nada → "" (no se filtra por periodo)
+  const effectivePeriodo = (() => {
+    if (monthsSel.length > 0) {
+      return [...monthsSel].sort().join(",");
+    }
+    if (quartersSel.length > 0) {
+      const months = new Set();
+      quartersSel.forEach((q) => QUARTERS_TO_MONTHS[q].forEach((m) => months.add(m)));
+      return [...months].sort().join(",");
+    }
+    return "";
+  })();
+
+  // Toggle handlers: marcar un quarter limpia meses, marcar un mes limpia
+  // quarters. Cumplen la regla de exclusividad mutua entre las dos líneas.
+  const toggleQuarter = (q) => {
+    setMonthsSel([]);
+    setQuartersSel((prev) =>
+      prev.includes(q) ? prev.filter((x) => x !== q) : [...prev, q],
+    );
+  };
+  const toggleMonth = (m) => {
+    setQuartersSel([]);
+    setMonthsSel((prev) =>
+      prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m],
+    );
+  };
+  const limpiarPeriodos = () => {
+    setQuartersSel([]);
+    setMonthsSel([]);
+  };
 
   const load = async () => {
     setLoading(true);
@@ -358,7 +395,7 @@ export default function Comparativa() {
         params.estado = filtroEstado;
       }
       if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
-      if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
+      if (effectivePeriodo) params.periodo = effectivePeriodo;
       if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
       if (filtroNif !== "__all__") params.nif_titular = filtroNif;
       if (sortBy) {
@@ -411,24 +448,24 @@ export default function Comparativa() {
   useEffect(() => {
     const params = {};
     if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
-    if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
+    if (effectivePeriodo) params.periodo = effectivePeriodo;
     if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
     if (filtroNif !== "__all__") params.nif_titular = filtroNif;
     api
       .get("/comparativa/resumen-origenes", { params })
       .then((r) => setResumenOrigenes(r.data.items || []))
       .catch(() => setResumenOrigenes([]));
-  }, [filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced, filtroNif]);
+  }, [filtroEjercicio, effectivePeriodo, filtroNumSerieDebounced, filtroNif]);
 
   useEffect(() => {
     load();
     // eslint-disable-next-line
-  }, [filtroEstado, page, pageSize, filtroEjercicio, filtroPeriodo, filtroNumSerieDebounced, sortBy, sortDir, filtroNif]);
+  }, [filtroEstado, page, pageSize, filtroEjercicio, effectivePeriodo, filtroNumSerieDebounced, sortBy, sortDir, filtroNif]);
 
   // Reset paginación al cambiar filtros
   useEffect(() => {
     setPage(1);
-  }, [filtroEstado, filtroEjercicio, filtroPeriodo, pageSize, filtroNumSerieDebounced, filtroNif]);
+  }, [filtroEstado, filtroEjercicio, effectivePeriodo, pageSize, filtroNumSerieDebounced, filtroNif]);
 
   // Debounce 300ms para el filtro de num_serie (evita request por keystroke)
   useEffect(() => {
@@ -436,35 +473,8 @@ export default function Comparativa() {
     return () => clearTimeout(t);
   }, [filtroNumSerie]);
 
-  // Al montar la página, comprobamos si hay un job de consulta mensual
-  // activo (queued/running) o terminado recientemente. Esto permite que el
-  // usuario cierre el navegador / pestaña / equipo durante horas y, al
-  // reabrir, vea el estado actual sin perder seguimiento del proceso.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { data } = await api.get("/jobs", { params: { limit: 10 } });
-        if (cancelled) return;
-        const activos = (data.items || []).filter((j) =>
-          ["queued", "running"].includes(j.status),
-        );
-        if (activos.length > 0) {
-          // El más reciente
-          setRunningJob(activos[0]);
-          toast.info("Recuperado job en curso", {
-            description: `Job ${activos[0].id.slice(0, 8)}… (${activos[0].status})`,
-            duration: 6000,
-          });
-        }
-      } catch (e) {
-        // ignoramos silenciosamente — no es crítico
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // El recovery de jobs activos al montar y el polling de /jobs/{id} se han
+  // movido al componente CargaMensualSII (vive en /carga-datos).
 
   const exportar = async () => {
     const params = {};
@@ -477,7 +487,7 @@ export default function Comparativa() {
       params.estado = filtroEstado;
     }
     if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
-    if (filtroPeriodo !== "__all__") params.periodo = filtroPeriodo;
+    if (effectivePeriodo) params.periodo = effectivePeriodo;
     if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
     if (filtroNif !== "__all__") params.nif_titular = filtroNif;
 
@@ -523,215 +533,6 @@ export default function Comparativa() {
     }
   };
 
-  const lanzarMensual = async () => {
-    if (!mes.nif_titular || !mes.nombre_titular) {
-      toast.error("Completa NIF y nombre titular");
-      return;
-    }
-    if (cert.enabled && !cert.file) {
-      toast.error("Aporta el .pfx o desactiva el modo real");
-      return;
-    }
-    setLoadingMes(true);
-    try {
-      const fd = new FormData();
-      Object.entries(mes).forEach(([k, v]) => fd.append(k, v));
-      fd.append("entorno", entorno);
-      if (maxPaginas !== "all") fd.append("max_paginas", maxPaginas);
-      if (cert.enabled && cert.file) {
-        fd.append("mode", "real");
-        fd.append("certificate", cert.file);
-        if (cert.password) fd.append("cert_password", cert.password);
-      }
-      const { data } = await api.post("/sii/consulta-mensual", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      toast.success(
-        `Consulta mensual · ${data.total} facturas actualizadas`,
-      );
-      load();
-    } catch (e) {
-      const d = e.response?.data?.detail;
-      const msg = typeof d === "string" ? d : "Error en consulta mensual";
-      toast.error("Consulta mensual fallida", {
-        description: msg,
-        duration: 12000,
-        className: "whitespace-pre-line",
-      });
-    } finally {
-      setLoadingMes(false);
-    }
-  };
-
-  const lanzarMensualAsync = async () => {
-    if (!mes.nif_titular || !mes.nombre_titular) {
-      toast.error("Completa NIF y nombre titular");
-      return;
-    }
-    if (cert.enabled && !cert.file) {
-      toast.error("Aporta el .pfx o desactiva el modo real");
-      return;
-    }
-    try {
-      const fd = new FormData();
-      Object.entries(mes).forEach(([k, v]) => fd.append(k, v));
-      fd.append("entorno", entorno);
-      if (maxPaginas !== "all") fd.append("max_paginas", maxPaginas);
-      if (cert.enabled && cert.file) {
-        fd.append("mode", "real");
-        fd.append("certificate", cert.file);
-        if (cert.password) fd.append("cert_password", cert.password);
-      }
-      const { data } = await api.post("/sii/consulta-mensual-async", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      setRunningJob({
-        id: data.job_id,
-        status: "queued",
-        progress: { page: 0, invoices: 0 },
-      });
-      toast.success("Consulta lanzada en background", {
-        description: `Job ${data.job_id.slice(0, 8)}… en cola`,
-      });
-    } catch (e) {
-      const d = e.response?.data?.detail;
-      toast.error("No se pudo lanzar el job", {
-        description: typeof d === "string" ? d : "Error en consulta mensual",
-      });
-    }
-  };
-
-  // Polling del job en background cada 1.5s mientras no esté en estado final.
-  useEffect(() => {
-    if (!runningJob || ["completed", "failed"].includes(runningJob.status)) {
-      return undefined;
-    }
-    const interval = setInterval(async () => {
-      try {
-        const { data } = await api.get(`/jobs/${runningJob.id}`);
-        setRunningJob(data);
-        if (data.status === "completed") {
-          toast.success("Consulta mensual completada", {
-            description: `${data.result?.total ?? 0} facturas actualizadas`,
-          });
-          load();
-        } else if (data.status === "failed") {
-          toast.error("Consulta mensual fallida", {
-            description: data.error_message || "Error desconocido",
-            duration: 12000,
-            className: "whitespace-pre-line",
-          });
-        }
-      } catch (err) {
-        // Si falla el polling, no abortamos — reintentaremos en el siguiente tick.
-      }
-    }, 1500);
-    return () => clearInterval(interval);
-    // eslint-disable-next-line
-  }, [runningJob?.id, runningJob?.status]);
-
-  const limpiarJob = () => setRunningJob(null);
-
-  const cancelarJob = async (id) => {
-    try {
-      await api.post(`/jobs/${id}/cancel`);
-      toast.info("Cancelación solicitada", {
-        description: "El job se detendrá tras la página en curso. Las facturas descargadas hasta ahora se conservan.",
-        duration: 8000,
-      });
-    } catch (e) {
-      toast.error("No se pudo cancelar el job", {
-        description: e.response?.data?.detail || "Error",
-      });
-    }
-  };
-
-  const reanudarJob = async (id) => {
-    try {
-      const fd = new FormData();
-      if (resumeForm.file) {
-        fd.append("certificate", resumeForm.file);
-        if (resumeForm.password) fd.append("cert_password", resumeForm.password);
-      }
-      const { data } = await api.post(`/jobs/${id}/resume`, fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      toast.success("Job reanudado", {
-        description: `Continúa desde la página ${data.start_from_page + 1} (nuevo job ${data.job_id.slice(0, 8)}…)`,
-        duration: 8000,
-      });
-      setResumeForm({ jobId: null, file: null, password: "" });
-      cargarJobs();
-      const { data: jdoc } = await api.get(`/jobs/${data.job_id}`);
-      setRunningJob(jdoc);
-    } catch (e) {
-      toast.error("No se pudo reanudar el job", {
-        description: e.response?.data?.detail || "Error",
-        duration: 10000,
-      });
-    }
-  };
-
-  const [jobsOpen, setJobsOpen] = useState(false);
-  const [jobsList, setJobsList] = useState([]);
-  const [jobsLoading, setJobsLoading] = useState(false);
-  const [resumeForm, setResumeForm] = useState({ jobId: null, file: null, password: "" });
-  const cargarJobs = async () => {
-    setJobsLoading(true);
-    try {
-      const { data } = await api.get("/jobs", { params: { limit: 20 } });
-      setJobsList(data.items || []);
-    } finally {
-      setJobsLoading(false);
-    }
-  };
-  useEffect(() => {
-    if (jobsOpen) cargarJobs();
-  }, [jobsOpen]);
-
-  const subirCsv = async () => {
-    if (!csvFile) {
-      toast.error("Selecciona un CSV");
-      return;
-    }
-    setLoadingCsv(true);
-    try {
-      const fd = new FormData();
-      fd.append("file", csvFile);
-      const { data } = await api.post("/comercial/csv", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      const desc = [
-        `${data.total.toLocaleString("es-ES")} facturas importadas`,
-        data.origen && `formato ${data.origen}`,
-        data.matches_sii != null &&
-          `${data.matches_sii.toLocaleString("es-ES")} ya en SII · ${data.sin_match_sii.toLocaleString("es-ES")} sin match`,
-        data.errores?.length && `${data.errores.length} errores`,
-      ]
-        .filter(Boolean)
-        .join(" · ");
-      toast.success("CSV comercial procesado", {
-        description: desc,
-        duration: 8000,
-      });
-      setCsvFile(null);
-      load();
-      // Recargar el resumen de orígenes (los counts pueden haber cambiado)
-      const rsParams = {};
-      if (filtroEjercicio !== "__all__") rsParams.ejercicio = filtroEjercicio;
-      if (filtroPeriodo !== "__all__") rsParams.periodo = filtroPeriodo;
-      if (filtroNumSerieDebounced.trim()) rsParams.num_serie = filtroNumSerieDebounced.trim();
-      api
-        .get("/comparativa/resumen-origenes", { params: rsParams })
-        .then((r) => setResumenOrigenes(r.data.items || []))
-        .catch(() => {});
-    } catch (e) {
-      const d = e.response?.data?.detail;
-      toast.error(typeof d === "string" ? d : "Error al subir CSV");
-    } finally {
-      setLoadingCsv(false);
-    }
-  };
 
   const visibleItems = onlyIvaErr ? items.filter(tieneIvaIncorrecto) : items;
   // La ordenación se hace ahora server-side (params sort_by + sort_dir),
@@ -760,7 +561,7 @@ export default function Comparativa() {
           Conciliación
         </div>
         <h1 className="font-display text-4xl font-bold tracking-tight text-slate-900">
-          Comparativa SII ↔ Comercial
+          Comparativa SII
         </h1>
         <p className="text-sm text-slate-600 mt-2 max-w-3xl">
           Compara las facturas reportadas al SII con las del sistema comercial.
@@ -770,237 +571,11 @@ export default function Comparativa() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-        {/* Consulta mensual SII */}
-        <div className="border border-slate-200 p-5">
-          <div className="flex items-center gap-2 mb-4">
-            <CalendarRange className="h-4 w-4 text-slate-500" />
-            <h2 className="font-display text-lg font-bold tracking-tight">
-              Consulta mensual SII
-            </h2>
-          </div>
-          <p className="text-xs text-slate-500 mb-4">
-            Trae todas las facturas del periodo desde el SII y las actualiza en BD.
-          </p>
-          <div className="grid grid-cols-2 gap-3">
-            <Input
-              placeholder="NIF Titular"
-              value={mes.nif_titular}
-              onChange={(e) =>
-                setMes({ ...mes, nif_titular: e.target.value.toUpperCase() })
-              }
-              className="rounded-none font-mono text-sm"
-              data-testid="mes-nif"
-            />
-            <Input
-              placeholder="Nombre Titular"
-              value={mes.nombre_titular}
-              onChange={(e) =>
-                setMes({ ...mes, nombre_titular: e.target.value })
-              }
-              className="rounded-none text-sm"
-              data-testid="mes-nombre"
-            />
-            <Input
-              placeholder="Ejercicio"
-              value={mes.ejercicio}
-              onChange={(e) => setMes({ ...mes, ejercicio: e.target.value })}
-              className="rounded-none font-mono text-sm"
-              data-testid="mes-ejercicio"
-            />
-            <Select
-              value={mes.periodo}
-              onValueChange={(v) => setMes({ ...mes, periodo: v })}
-            >
-              <SelectTrigger className="rounded-none text-sm" data-testid="mes-periodo">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {PERIODOS.map((p) => (
-                  <SelectItem key={p} value={p}>
-                    {p}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="mt-4">
-            <CertUploader value={cert} onChange={setCert} testIdPrefix="mes-cert" />
-          </div>
-          <div className="mt-4 flex items-center gap-3">
-            <Label className="text-xs uppercase tracking-wider text-slate-600 whitespace-nowrap">
-              Máx. páginas
-            </Label>
-            <Select value={maxPaginas} onValueChange={setMaxPaginas}>
-              <SelectTrigger
-                className="rounded-none h-8 w-full text-sm"
-                data-testid="mes-max-paginas"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {Array.from({ length: 10 }, (_, i) => String(i + 1)).map((n) => (
-                  <SelectItem key={n} value={n}>
-                    {n} {n === "1" ? "página" : "páginas"} (
-                    {(Number(n) * 10000).toLocaleString("es-ES")} máx.)
-                  </SelectItem>
-                ))}
-                <SelectItem value="all">Todas las páginas (sin límite)</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <Button
-            onClick={lanzarMensual}
-            disabled={loadingMes || !!runningJob}
-            className="rounded-none bg-slate-900 hover:bg-slate-700 text-white mt-4 w-full"
-            data-testid="lanzar-mensual"
-          >
-            {loadingMes ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            ) : (
-              <CalendarRange className="h-4 w-4 mr-2" />
-            )}
-            Consultar mes online ({entorno})
-          </Button>
-          <Button
-            onClick={lanzarMensualAsync}
-            disabled={loadingMes || !!runningJob}
-            variant="outline"
-            className="rounded-none mt-2 w-full"
-            data-testid="lanzar-mensual-async"
-          >
-            <PlayCircle className="h-4 w-4 mr-2" />
-            Lanzar en background (con progreso)
-          </Button>
-
-          {/* Progreso del job background */}
-          {runningJob && (
-            <div
-              className="mt-3 border border-slate-200 bg-slate-50 px-3 py-2 text-xs"
-              data-testid="job-progress-card"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {["queued", "running"].includes(runningJob.status) && (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-500" />
-                  )}
-                  {runningJob.status === "completed" && (
-                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                  )}
-                  {runningJob.status === "failed" && (
-                    <AlertTriangle className="h-3.5 w-3.5 text-rose-600" />
-                  )}
-                  <span className="font-mono text-[11px] uppercase tracking-wider text-slate-600">
-                    Job {runningJob.id?.slice(0, 8)} · {runningJob.status}
-                  </span>
-                </div>
-                {["completed", "failed", "cancelled"].includes(runningJob.status) && (
-                  <button
-                    onClick={limpiarJob}
-                    className="text-slate-400 hover:text-slate-900 text-[11px]"
-                    data-testid="job-clear"
-                  >
-                    cerrar
-                  </button>
-                )}
-                {["queued", "running"].includes(runningJob.status) &&
-                  !runningJob.cancel_requested && (
-                    <button
-                      onClick={() => cancelarJob(runningJob.id)}
-                      className="text-rose-600 hover:text-rose-800 text-[11px] font-semibold"
-                      data-testid="job-cancel"
-                    >
-                      Cancelar
-                    </button>
-                  )}
-                {runningJob.cancel_requested && (
-                  <span className="text-amber-600 text-[11px]" data-testid="job-cancel-pending">
-                    cancelando…
-                  </span>
-                )}
-              </div>
-              <div className="mt-1.5 font-mono text-[11px] text-slate-700 tabular-nums">
-                Página {runningJob.progress?.page ?? 0} ·{" "}
-                {(runningJob.progress?.invoices ?? 0).toLocaleString("es-ES")}{" "}
-                facturas acumuladas
-                {runningJob.status === "completed" && runningJob.result && (
-                  <span className="text-emerald-700 ml-2">
-                    ✓ total {runningJob.result.total?.toLocaleString("es-ES")}
-                  </span>
-                )}
-              </div>
-              {runningJob.error_message && (
-                <div
-                  className="mt-1.5 text-[11px] text-rose-700 whitespace-pre-line"
-                  data-testid="job-error"
-                >
-                  {runningJob.error_message}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Subir CSV comercial */}
-        <div className="border border-slate-200 p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="font-display text-lg font-bold tracking-tight">
-              Importar fichero comercial
-            </h2>
-            <a
-              href={`${API}/comercial/csv-template`}
-              className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1"
-              data-testid="download-template-comercial"
-            >
-              <Download className="h-3 w-3" /> plantilla CSV
-            </a>
-          </div>
-          <p className="text-xs text-slate-500 mb-4">
-            Acepta <span className="font-mono">.csv</span> con cabeceras
-            estándar (descarga la plantilla) o <span className="font-mono">.txt</span>{" "}
-            del report de informes fiscales en dos formatos:
-            <br />
-            <span className="font-mono">· SAP FI</span> — cabeceras{" "}
-            <span className="font-mono">Soc.|Doc.causante|Nº doc.oficial|…</span>
-            <br />
-            <span className="font-mono">· SIGLO</span> — cabeceras{" "}
-            <span className="font-mono">Soc.|Doc.caus.|Nº oficial|…</span>
-            <br />
-            La clave de comparación con el SII es el{" "}
-            <span className="font-mono">Nº (doc.) oficial</span>. El origen
-            (SAP / SIGLO) queda registrado en cada factura importada.
-          </p>
-          <label
-            htmlFor="csv-com"
-            className="block border-2 border-dashed border-slate-300 hover:border-slate-400 p-6 text-center cursor-pointer bg-slate-50/40"
-            data-testid="csv-dropzone"
-          >
-            <Upload className="h-7 w-7 mx-auto text-slate-400" />
-            <div className="text-sm mt-2 text-slate-700">
-              {csvFile ? csvFile.name : "Selecciona el fichero comercial (.csv ó .txt)"}
-            </div>
-            <input
-              id="csv-com"
-              type="file"
-              accept=".csv,.txt"
-              className="hidden"
-              onChange={(e) => setCsvFile(e.target.files?.[0])}
-              data-testid="csv-input-comercial"
-            />
-          </label>
-          <Button
-            onClick={subirCsv}
-            disabled={!csvFile || loadingCsv}
-            className="rounded-none bg-slate-900 hover:bg-slate-700 text-white mt-4 w-full"
-            data-testid="upload-csv-comercial"
-          >
-            {loadingCsv ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            ) : (
-              <Upload className="h-4 w-4 mr-2" />
-            )}
-            Importar fichero
-          </Button>
-        </div>
+        {/* Las secciones "Consulta mensual SII" y "Importar fichero comercial"
+            se han movido a /carga-datos para mantener esta pantalla centrada
+            en analítica (Comparativa SII pura). Los componentes
+            CargaMensualSII y CargaComercialCSV viven ahora en
+            /app/frontend/src/components y se montan dentro de tabs. */}
       </div>
 
       {/* Dashboard resumen por origen comercial (SAP / SIGLO / desconocido) */}
@@ -1165,6 +740,137 @@ export default function Comparativa() {
         </div>
       )}
 
+      {/* Filtro de Periodo — dos líneas mutuamente excluyentes (Quarters / Meses) */}
+      <div
+        className="border border-slate-200 bg-white px-4 py-3 mb-4 space-y-3"
+        data-testid="periodo-selector"
+      >
+        {/* Línea 1: Quarters */}
+        <div className="flex items-center flex-wrap gap-3">
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-500 font-semibold min-w-[110px]">
+            Trimestre
+          </div>
+          <div className="flex items-center flex-wrap gap-1">
+            {QUARTERS.map((q) => {
+              const active = quartersSel.includes(q);
+              const disabledByMonths = monthsSel.length > 0;
+              const meses = QUARTERS_TO_MONTHS[q].join("-");
+              return (
+                <button
+                  key={q}
+                  type="button"
+                  onClick={() => toggleQuarter(q)}
+                  data-testid={`quarter-toggle-${q}`}
+                  title={
+                    disabledByMonths
+                      ? "Hay meses seleccionados — click para sustituirlos"
+                      : `${q} (meses ${meses})`
+                  }
+                  className={`text-xs px-3 py-1.5 border transition-colors flex flex-col items-center leading-tight ${
+                    active
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : disabledByMonths
+                        ? "border-slate-200 bg-slate-50 text-slate-400"
+                        : "border-slate-300 bg-white text-slate-700 hover:border-slate-500"
+                  }`}
+                >
+                  <span className="font-mono font-semibold">{q}</span>
+                  <span
+                    className={`text-[9px] mt-0.5 ${
+                      active ? "text-white/80" : "text-slate-400"
+                    }`}
+                  >
+                    {meses}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {quartersSel.length === 0 && monthsSel.length === 0 && (
+            <span className="text-[10px] text-slate-400 italic">
+              Sin filtro de periodo
+            </span>
+          )}
+        </div>
+
+        {/* Línea 2: Meses */}
+        <div className="flex items-start flex-wrap gap-3">
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-500 font-semibold min-w-[110px] mt-1">
+            Mes
+          </div>
+          <div className="flex items-center flex-wrap gap-1">
+            {PERIODOS.map((p, idx) => {
+              const active = monthsSel.includes(p);
+              const disabledByQ = quartersSel.length > 0;
+              const label = MONTH_LABELS[idx];
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => toggleMonth(p)}
+                  data-testid={`month-toggle-${p}`}
+                  title={
+                    disabledByQ
+                      ? "Hay trimestres seleccionados — click para sustituirlos"
+                      : `Mes ${p} (${label})`
+                  }
+                  className={`text-xs px-2.5 py-1.5 border transition-colors min-w-[58px] flex items-center justify-center gap-1.5 ${
+                    active
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : disabledByQ
+                        ? "border-slate-200 bg-slate-50 text-slate-400"
+                        : "border-slate-300 bg-white text-slate-700 hover:border-slate-500"
+                  }`}
+                >
+                  <span className="font-mono text-[10px] opacity-70">{p}</span>
+                  <span className="font-medium">{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Pill resumen + botón limpiar */}
+        {(quartersSel.length > 0 || monthsSel.length > 0) && (
+          <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
+            <span
+              className="text-[11px] text-slate-600 font-mono"
+              data-testid="periodo-summary"
+            >
+              {quartersSel.length > 0 ? (
+                <>
+                  Filtrando: <strong>{quartersSel.sort().join(" + ")}</strong> (
+                  {effectivePeriodo.split(",").length} meses)
+                </>
+              ) : (
+                <>
+                  Filtrando:{" "}
+                  <strong>
+                    {monthsSel
+                      .sort()
+                      .map((m) => MONTH_LABELS[parseInt(m, 10) - 1])
+                      .join(", ")}
+                  </strong>{" "}
+                  ({monthsSel.length} mes{monthsSel.length === 1 ? "" : "es"})
+                </>
+              )}
+            </span>
+            <button
+              onClick={limpiarPeriodos}
+              className="text-[11px] text-slate-500 hover:text-slate-900 underline"
+              data-testid="periodo-clear"
+            >
+              ✕ limpiar
+            </button>
+          </div>
+        )}
+
+        <p className="text-[10px] text-slate-400 leading-relaxed">
+          Multi-selección. Trimestres y meses son mutuamente excluyentes:
+          marcar un trimestre limpia los meses, y viceversa.
+        </p>
+      </div>
+
       {/* Tabla de comparativa */}
       <div className="border border-slate-200 bg-slate-50/40 p-4 mb-4 flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3 text-sm flex-wrap">
@@ -1197,20 +903,6 @@ export default function Comparativa() {
               {periodosDisponibles.ejercicios.map((e) => (
                 <SelectItem key={e} value={e}>
                   Ejercicio {e}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select value={filtroPeriodo} onValueChange={setFiltroPeriodo}>
-            <SelectTrigger className="rounded-none h-8 w-[140px] text-xs" data-testid="filter-periodo">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">Todos los periodos</SelectItem>
-              {periodosDisponibles.periodos.map((p) => (
-                <SelectItem key={p} value={p}>
-                  Periodo {p}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -1257,16 +949,6 @@ export default function Comparativa() {
             variant="outline"
             size="sm"
             className="rounded-none"
-            onClick={() => setJobsOpen(true)}
-            data-testid="open-jobs-dialog"
-          >
-            <ListTodo className="h-4 w-4 mr-2" />
-            Jobs
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="rounded-none"
             onClick={exportar}
             data-testid="export-comparativa"
             disabled={total === 0 || exporting}
@@ -1295,7 +977,7 @@ export default function Comparativa() {
         refreshKey={refreshTick}
         filtros={{
           ejercicio: filtroEjercicio !== "__all__" ? filtroEjercicio : undefined,
-          periodo: filtroPeriodo !== "__all__" ? filtroPeriodo : undefined,
+          periodo: effectivePeriodo || undefined,
           num_serie: filtroNumSerieDebounced.trim() || undefined,
           nif_titular: filtroNif !== "__all__" ? filtroNif : undefined,
         }}
@@ -1658,192 +1340,6 @@ export default function Comparativa() {
               })()}
             </>
           )}
-        </SheetContent>
-      </Sheet>
-
-      {/* Dialog: Jobs en background ------------------------------------- */}
-      <Sheet open={jobsOpen} onOpenChange={setJobsOpen}>
-        <SheetContent
-          side="right"
-          className="w-full sm:max-w-[640px] overflow-y-auto"
-          data-testid="jobs-sheet"
-        >
-          <SheetHeader>
-            <SheetTitle className="font-display tracking-tight">
-              Jobs en background
-            </SheetTitle>
-            <SheetDescription className="text-slate-500 text-xs">
-              Histórico de consultas mensuales lanzadas en background. Los
-              que están en cola o ejecutándose se pueden cancelar (la
-              cancelación es cooperativa: se aplica tras la página en curso).
-            </SheetDescription>
-          </SheetHeader>
-          <div className="mt-4 flex items-center justify-between">
-            <span className="text-xs text-slate-500">
-              {jobsLoading
-                ? "Cargando…"
-                : `${jobsList.length} job${jobsList.length === 1 ? "" : "s"}`}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              className="rounded-none h-7 text-xs"
-              onClick={cargarJobs}
-              data-testid="jobs-refresh"
-            >
-              <RefreshCw className="h-3 w-3 mr-1" /> Recargar
-            </Button>
-          </div>
-          <div className="mt-4 space-y-2" data-testid="jobs-list">
-            {jobsList.map((j) => {
-              const isActive = ["queued", "running"].includes(j.status);
-              return (
-                <div
-                  key={j.id}
-                  className="border border-slate-200 px-3 py-2 text-xs"
-                  data-testid={`jobs-item-${j.id}`}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      {j.status === "queued" && (
-                        <span className="text-slate-500">⏳</span>
-                      )}
-                      {j.status === "running" && (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />
-                      )}
-                      {j.status === "completed" && (
-                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                      )}
-                      {j.status === "failed" && (
-                        <AlertTriangle className="h-3.5 w-3.5 text-rose-600" />
-                      )}
-                      {j.status === "cancelled" && (
-                        <span className="text-amber-600">⏸</span>
-                      )}
-                      <span className="font-mono">{j.id.slice(0, 8)}…</span>
-                      <span className="uppercase tracking-wider text-[10px] text-slate-600">
-                        {j.status}
-                      </span>
-                      {j.cancel_requested && isActive && (
-                        <span className="text-amber-600 text-[10px]">
-                          cancelando…
-                        </span>
-                      )}
-                    </div>
-                    {isActive && !j.cancel_requested && (
-                      <button
-                        onClick={async () => {
-                          await cancelarJob(j.id);
-                          cargarJobs();
-                        }}
-                        className="text-rose-600 hover:text-rose-800 text-[11px] font-semibold"
-                        data-testid={`jobs-cancel-${j.id}`}
-                      >
-                        Cancelar
-                      </button>
-                    )}
-                    {["cancelled", "failed"].includes(j.status) &&
-                      j.progress?.clave_paginacion && (
-                        <button
-                          onClick={() =>
-                            setResumeForm({
-                              jobId: resumeForm.jobId === j.id ? null : j.id,
-                              file: null,
-                              password: "",
-                            })
-                          }
-                          className="text-emerald-700 hover:text-emerald-900 text-[11px] font-semibold"
-                          data-testid={`jobs-resume-${j.id}`}
-                          title={`Reanudar desde la página ${(j.progress?.page ?? 0) + 1}`}
-                        >
-                          {resumeForm.jobId === j.id ? "✕ cancelar" : "Reanudar"}
-                        </button>
-                      )}
-                  </div>
-                  <div className="mt-1 text-slate-600 font-mono text-[11px] tabular-nums">
-                    {j.params?.ejercicio}/{j.params?.periodo} ·{" "}
-                    {j.params?.entorno}
-                    {j.params?.max_paginas != null
-                      ? ` · máx ${j.params.max_paginas} pág`
-                      : " · todas las pág"}
-                  </div>
-                  <div className="mt-0.5 text-slate-700 font-mono text-[11px] tabular-nums">
-                    Página {j.progress?.page ?? 0} ·{" "}
-                    {(j.progress?.invoices ?? 0).toLocaleString("es-ES")}{" "}
-                    facturas
-                    {j.result?.total != null && (
-                      <span className="ml-2 text-emerald-700">
-                        ✓ total {j.result.total.toLocaleString("es-ES")}
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-0.5 text-[10px] text-slate-400">
-                    {j.created_at?.slice(0, 19).replace("T", " ")}
-                  </div>
-                  {j.error_message && (
-                    <div className="mt-1 text-[11px] text-rose-700 whitespace-pre-line">
-                      {j.error_message.slice(0, 240)}
-                    </div>
-                  )}
-                  {resumeForm.jobId === j.id && (
-                    <div
-                      className="mt-2 border border-emerald-200 bg-emerald-50/40 px-3 py-2 space-y-2"
-                      data-testid={`jobs-resume-form-${j.id}`}
-                    >
-                      <div className="text-[11px] text-emerald-900 font-semibold">
-                        Reanudar desde página {(j.progress?.page ?? 0) + 1}
-                      </div>
-                      <>
-                        <label className="block text-[11px] text-slate-600">
-                          Certificado .pfx <span className="text-slate-400">(opcional si está configurado en el servidor)</span>
-                          <input
-                            type="file"
-                            accept=".pfx,.p12"
-                            className="block mt-1 text-[11px] w-full file:rounded-none file:border file:border-slate-300 file:bg-white file:px-2 file:py-0.5 file:mr-2 file:text-[11px]"
-                            onChange={(e) =>
-                              setResumeForm({ ...resumeForm, file: e.target.files?.[0] || null })
-                            }
-                            data-testid={`jobs-resume-cert-${j.id}`}
-                          />
-                        </label>
-                        <label className="block text-[11px] text-slate-600">
-                          Contraseña
-                          <input
-                            type="password"
-                            value={resumeForm.password}
-                            onChange={(e) =>
-                              setResumeForm({ ...resumeForm, password: e.target.value })
-                            }
-                            placeholder="(opcional si el .pfx no la tiene)"
-                            className="block mt-1 w-full rounded-none border border-slate-300 px-2 py-1 text-[11px] font-mono"
-                            data-testid={`jobs-resume-pwd-${j.id}`}
-                          />
-                        </label>
-                        {resumeForm.file && (
-                          <div className="text-[10px] text-emerald-700 font-mono truncate">
-                            ✓ {resumeForm.file.name} ({(resumeForm.file.size / 1024).toFixed(1)} KB)
-                          </div>
-                        )}
-                      </>
-                      <Button
-                        size="sm"
-                        className="rounded-none w-full h-7 text-[11px] bg-emerald-700 hover:bg-emerald-800 text-white"
-                        onClick={() => reanudarJob(j.id)}
-                        data-testid={`jobs-resume-confirm-${j.id}`}
-                      >
-                        Lanzar reanudación
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {!jobsLoading && jobsList.length === 0 && (
-              <div className="text-center text-xs text-slate-500 py-8">
-                No hay jobs registrados
-              </div>
-            )}
-          </div>
         </SheetContent>
       </Sheet>
     </div>

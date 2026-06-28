@@ -40,7 +40,7 @@ function StatBox({ label, value, tone, icon: Icon, testId }) {
   );
 }
 
-export default function ConciliacionNewman() {
+export default function ConciliacionNewman({ embedded = false }) {
   const [file, setFile] = useState(null);
   const [nifTitular, setNifTitular] = useState("");
   const [nombreTitular, setNombreTitular] = useState("");
@@ -226,14 +226,16 @@ export default function ConciliacionNewman() {
 
   return (
     <div className="space-y-6" data-testid="page-conciliacion">
-      <header className="space-y-1">
-        <h1 className="text-3xl font-semibold tracking-tight">Conciliación con CSV de Newman</h1>
-        <p className="text-muted-foreground max-w-3xl">
-          Sube el CSV generado en local con Newman + <code>extraer_csv.py</code> y compáralo con
-          la BD para detectar facturas perdidas en jobs anteriores. Las faltantes
-          pueden insertarse con un clic, manteniendo idempotencia (clave única <code>num_serie_factura</code>).
-        </p>
-      </header>
+      {!embedded && (
+        <header className="space-y-1">
+          <h1 className="text-3xl font-semibold tracking-tight">Conciliación con CSV de Newman</h1>
+          <p className="text-muted-foreground max-w-3xl">
+            Sube el CSV generado en local con Newman + <code>extraer_csv.py</code> y compáralo con
+            la BD para detectar facturas perdidas en jobs anteriores. Las faltantes
+            pueden insertarse con un clic, manteniendo idempotencia (clave única <code>num_serie_factura</code>).
+          </p>
+        </header>
+      )}
 
       <Card>
         <CardHeader>

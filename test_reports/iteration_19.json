@@ -1,0 +1,26 @@
+{
+  "summary": "E2E iteration 19 — reorg de pantallas (Carga de datos con 3 tabs, Comparativa SII limpia, periodo multi-select Q/M). Backend 6/6 pytest PASS (periodo CSV $in en /comparativa, /totales, /resumen-origenes, /export y tolerancia a espacios). Frontend Playwright: /carga-datos renderiza H1 'Carga de datos' y 3 tabs; tab-comercial muestra carga-comercial-csv + csv-dropzone y sincroniza ?tab=comercial; deep-link funciona; /conciliacion redirige a /carga-datos?tab=newman (200). Sidebar: nav-conciliacion=0 ✓, nav-carga-datos=1 ✓, nav-comparativa texto='Comparativa SII' (visualmente en screenshot, count timing). /comparativa: H1='Comparativa SII' ✓, mes-nif y csv-input-comercial ausentes ✓, periodo-selector con 4 Q + 12 meses presentes. Multi-select Q2+Q3 muestra 'Filtrando: Q2 + Q3 (6 meses)' ✓, click month-03 limpia quarters ✓, click Q1 limpia meses ✓, periodo-clear funciona ✓. Network intercept: tras Q2 las 3 llamadas (/comparativa, /totales, /resumen-origenes) reciben periodo=04,05,06 ✓.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CargaMensualSII", "issue": "En /carga-datos?tab=mensual los data-testid 'mes-nif', 'mes-ejercicio' y 'mes-periodo' devuelven count=0 al inspeccionar tras click en tab-mensual. La URL sí cambia a ?tab=mensual y el panel-mensual debería montar CargaMensualSII; revisar si los testids esperados existen en /app/frontend/src/components/CargaMensualSII.jsx o si requieren más espera/permiso 'consultas.mensual'.", "selector": "[data-testid='mes-nif']", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_periodo_csv_iter19.py", "/app/test_reports/pytest/iteration_19_periodo.xml"],
+  "action_items": ["Verificar que CargaMensualSII.jsx expone los data-testid 'mes-nif', 'mes-ejercicio', 'mes-periodo' tal y como pide el review_request. La pantalla carga correctamente pero esos selectores no se encontraron en runtime — puede ser un naming mismatch."],
+  "critical_code_review_comments": [
+    "CargaDatos.jsx L45-49: `useState` lee `urlTab` solo en el mount inicial. Si el usuario llega con ?tab=mensual y luego navega con back/forward a un estado distinto, el state interno puede desincronizarse con la URL. Considerar derivar `tab` del searchParams en cada render (controlled) en vez de useState.",
+    "CargaDatos.jsx defaultTab: si el admin tiene wildcard '*' pero faltase el permiso 'conciliacion.view', el default sería 'comercial' silenciosamente. Está OK funcionalmente pero el comentario inline ya lo documenta.",
+    "Comparativa.jsx effectivePeriodo: se computa en cada render (IIFE). Para datasets enormes considerar useMemo para evitar recalcular en cada render — minor, no bloqueante.",
+    "Network: las 3 llamadas (comparativa, totales, resumen-origenes) se hacen en paralelo desde useEffects distintos. Si el usuario togglea quarters rápidamente, podrían llegar respuestas fuera de orden — actualmente no se cancela el request previo (AbortController)."
+  ],
+  "updated_files": ["/app/backend/tests/test_periodo_csv_iter19.py (new)"],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "~95% (19/20 checks PASS; mes-* testids requieren confirmación)"},
+  "test_credentials": "Admin miguelingv@gmail.com via JWT minted with auth.create_access_token (cookie monitorsii_access).",
+  "seed_data_creation": "Ninguno. Sólo lecturas GET.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend ya valida periodo CSV con $in (router_facturas._build_filtros y comparativa_resumen_origenes). Frontend propaga correctamente la expansión de quarters a periodo=04,05,06 (verificado por intercepción de network). Único punto pendiente: confirmar que los inputs del tab 'mensual' usan los data-testid esperados ('mes-nif', 'mes-ejercicio', 'mes-periodo'); el panel sí monta pero esos selectores no se encontraron."
+}

@@ -14,6 +14,7 @@ import {
   ScrollText,
   Settings,
   ShieldCheck,
+  Upload,
   UserCog,
   Users,
   Wrench,
@@ -53,12 +54,12 @@ const NAV_TREE = [
     testId: "nav-group-monitor-sii",
     children: [
       { to: "/", label: "Resumen", icon: LayoutDashboard, end: true, testId: "nav-dashboard" },
-      { to: "/comparativa", label: "Comparativa SII↔CSV", icon: GitCompareArrows, testId: "nav-comparativa", perm: "comparativa.view" },
+      { to: "/comparativa", label: "Comparativa SII", icon: GitCompareArrows, testId: "nav-comparativa", perm: "comparativa.view" },
+      { to: "/carga-datos", label: "Carga de datos", icon: Upload, testId: "nav-carga-datos", permAny: ["conciliacion.view", "conciliacion.import", "comercial.import", "consultas.mensual"] },
       { to: "/consulta", label: "Consulta unitaria", icon: FileSearch, testId: "nav-unit", perm: "consultas.unitaria" },
       { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch", perm: "consultas.batch" },
       { to: "/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-history" },
       { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs", perm: "logs.view" },
-      { to: "/conciliacion", label: "Conciliación Newman", icon: ShieldCheck, testId: "nav-conciliacion", perm: "conciliacion.view" },
       { to: "/configuracion", label: "Configuración", icon: Settings, testId: "nav-config", perm: "comparativa.edit_config" },
     ],
   },
@@ -93,7 +94,15 @@ function isItemAccessible(node, hasPermission) {
   if (node.children) {
     return node.children.some((c) => isItemAccessible(c, hasPermission));
   }
-  return !node.perm || hasPermission(node.perm);
+  if (node.perm && !hasPermission(node.perm)) return false;
+  if (
+    Array.isArray(node.permAny) &&
+    node.permAny.length > 0 &&
+    !node.permAny.some((p) => hasPermission(p))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function filterTree(tree, hasPermission) {
