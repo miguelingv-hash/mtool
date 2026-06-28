@@ -1105,10 +1105,42 @@ async def conciliar_newman_importar_async(
 
     Imprescindible para CSVs grandes (cientos de miles de filas) porque
     Cloudflare corta conexiones HTTP idle a ~100s.
+
+    Streaming a disco: leemos el upload en chunks de 1 MB y lo escribimos a
+    un fichero temporal, en lugar de cargar todo en memoria con
+    `await file.read()`. Esto evita OOM en hosts modestos (EC2 t3.small con
+    2 GB) cuando el CSV pesa varios cientos de MB — antes, parsear un CSV de
+    180 MB con 865 k filas disparaba el OOM-killer del kernel y el backend
+    moría a mitad de upload (axios reportaba ECONNABORTED).
     """
-    contenido = await file.read()
-    if not contenido:
-        raise HTTPException(400, "El CSV está vacío")
+    import os
+    import tempfile
+
+    # 1) Volcar el upload a un fichero temporal en chunks de 1 MB
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="newman_", suffix=".csv", delete=False,
+    )
+    total_bytes = 0
+    try:
+        chunk_size = 1024 * 1024  # 1 MB
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            tmp.write(chunk)
+            total_bytes += len(chunk)
+        tmp.flush()
+        tmp.close()
+        if total_bytes == 0:
+            raise HTTPException(400, "El CSV está vacío")
+    except Exception:
+        # Si algo falla mientras subimos, limpiamos el temporal y propagamos.
+        try:
+            tmp.close()
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
 
     job_id = uuid.uuid4().hex
     job_doc = {
@@ -1127,7 +1159,8 @@ async def conciliar_newman_importar_async(
             "nombre_titular": nombre_titular,
             "ejercicio": ejercicio,
             "periodo": periodo,
-            "file_size_bytes": len(contenido),
+            "file_size_bytes": total_bytes,
+            "tmp_path": tmp.name,
         },
         "result": None,
         "error_message": None,
@@ -1137,12 +1170,40 @@ async def conciliar_newman_importar_async(
         "updated_at": _now_iso(),
     }
     await _db.jobs.insert_one(job_doc)
+    # El worker leerá el fichero desde disco y lo eliminará al terminar.
     asyncio.create_task(
-        _ejecutar_importar_faltantes_job(
-            job_id, contenido, nif_titular, nombre_titular, ejercicio, periodo,
+        _ejecutar_importar_faltantes_job_desde_disco(
+            job_id, tmp.name, nif_titular, nombre_titular, ejercicio, periodo,
         ),
     )
-    return {"job_id": job_id, "status": "queued"}
+    return {"job_id": job_id, "status": "queued", "file_size_bytes": total_bytes}
+
+
+async def _ejecutar_importar_faltantes_job_desde_disco(
+    job_id: str,
+    tmp_path: str,
+    nif_titular: str,
+    nombre_titular: str,
+    ejercicio: Optional[str],
+    periodo: Optional[str],
+):
+    """Wrapper del worker original que primero carga el CSV desde el fichero
+    temporal y luego delega en `_ejecutar_importar_faltantes_job`. Garantiza
+    que el temporal se borre incluso si el job falla (try/finally).
+    """
+    import os
+
+    try:
+        with open(tmp_path, "rb") as f:
+            contenido = f.read()
+        await _ejecutar_importar_faltantes_job(
+            job_id, contenido, nif_titular, nombre_titular, ejercicio, periodo,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 @router.post("/sii/conciliar-newman/importar-lote")

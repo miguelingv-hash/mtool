@@ -30,6 +30,17 @@
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
+
+            # Timeouts amplios: hay endpoints que tardan (subidas de 200+ MB
+            # con redes domésticas + parser CSV de 800 k filas). Sin esto
+            # Caddy cierra la conexión al upstream y el cliente ve
+            # ECONNABORTED a mitad de upload.
+            transport http {
+                dial_timeout 30s
+                read_timeout 30m
+                write_timeout 30m
+                response_header_timeout 10m
+            }
         }
     }
 
