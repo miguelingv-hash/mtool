@@ -10,9 +10,9 @@
 3-125-115-81.sslip.io {
     encode zstd gzip
 
-    # Subidas grandes (PDFs, CSVs)
+    # Subidas grandes (PDFs, CSVs Newman de cientos de MB)
     request_body {
-        max_size 50MB
+        max_size 600MB
     }
 
     # Cache fuerte para assets con hash (no para index.html)
