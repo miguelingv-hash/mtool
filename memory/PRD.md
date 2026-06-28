@@ -296,6 +296,28 @@
 - **Toggle Sociedad** muestra nombre + NIF.
 - Validado por testing agent (iteration_18.json): 10/10 nuevos pytest + 8/8 regresión + frontend E2E.
 
+### Feb 2026 — Scripts CLI de carga directa (sin HTTP) + Fix Caddy max_size + Streaming upload
+- **Trío de mejoras** para resolver la carga masiva de CSVs grandes (~180 MB / 865 k facturas) que daba `ERR_BAD_REQUEST` y `ECONNABORTED` en producción.
+
+**1. Fix inmediato del HTTP (deploy/Caddyfile + backend)**:
+- `Caddyfile`: `request_body max_size 50MB → 600MB` para no rechazar uploads grandes en la capa de proxy.
+- `Caddyfile`: añadidos `transport http` con `read_timeout 30m`, `write_timeout 30m`, `response_header_timeout 10m` — antes Caddy cortaba uploads lentos por idle.
+- `router_facturas.conciliar_newman_importar_async`: ahora hace streaming a disco (chunks de 1 MB → `tempfile.NamedTemporaryFile`) en lugar de `await file.read()` que cargaba los 180 MB en RAM y disparaba OOM-killer en EC2 modestos.
+- Wrapper `_ejecutar_importar_faltantes_job_desde_disco` con cleanup en `finally` para borrar el temporal siempre.
+
+**2. Rotación de logs Docker (`docker-compose.yml`)**:
+- YAML anchor `&default-logging` aplicado a los 3 servicios: `max-size: 30m`, `max-file: 5`. Tope ~150 MB por contenedor, ~450 MB total. Evita llenar el disco EBS.
+
+**3. Scripts CLI de carga directa a Mongo (NUEVO — recomendado para masivos)**:
+- `backend/scripts/import_newman_sii.py`: carga CSV Newman → `facturas_sii` sin HTTP.
+- `backend/scripts/import_comercial.py`: carga SAP/SIGLO → `facturas_comercial` sin HTTP, con autodetección de formato y mapeo `Soc.` → `nif_titular` desde el catálogo.
+- Módulo compartido `scripts/_common.py`: lock file (`/tmp/import_*.lock`), bulk_upsert por lotes con progress, `get_mongo_db()` desde env vars, cleanup CSV.
+- Reutiliza los parsers oficiales del backend (`_parsear_csv_newman`, `_parsear_report_tabular`) → cero divergencia.
+- Volumen montado en `docker-compose.yml`: `/home/ec2-user/data:/data` (RW para permitir borrado tras carga OK).
+- Flags: `--dry-run`, `--only-faltantes`, `--keep-csv`, `--soc-override`, `--batch-size`.
+- Exit codes diferenciados (0/1/2/130) para integración con cron.
+- Documentación completa en `backend/scripts/CLI_IMPORTS.md` (uso, troubleshooting, ejemplo cron).
+
 ### Feb 2026 — Reorganización: "Carga de datos" + filtro Periodo Q/M multi-select
 - **Nueva pantalla `/carga-datos`** con 3 tabs (Radix Tabs sincronizados con `?tab=`):
   1. **Conciliación Newman** (default — flujo principal del usuario, carga masiva)

@@ -55,6 +55,11 @@ services:
       # Logos / certificados (móntalos desde host para fácil reemplazo)
       - ../backend/assets:/app/assets:ro
       - ../backend/certs:/app/certs:ro
+      # Carpeta de imports CLI: copia tus CSVs grandes a /home/ec2-user/data
+      # en el host y los scripts `python -m scripts.import_*` los leerán
+      # como /data dentro del contenedor. Montado RW para que los scripts
+      # puedan borrar el CSV tras una carga exitosa (--delete-after).
+      - /home/ec2-user/data:/data
     depends_on:
       mongo:
         condition: service_healthy
