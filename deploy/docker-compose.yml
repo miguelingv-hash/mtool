@@ -3,11 +3,28 @@ name: corporate-app
 # Las rutas relativas se resuelven desde el directorio donde está este archivo
 # (deploy/). Por eso `context: ..` apunta a la raíz del repo y los `volumes`
 # montados desde el host usan `../backend/...`.
+#
+# ---------------------------------------------------------------------------
+# Rotación de logs Docker (centralizada con YAML anchor `&logging`)
+# ---------------------------------------------------------------------------
+# Por defecto Docker NO rota los logs JSON: un servicio verboso podría
+# llenar el disco EBS del EC2 en semanas. Limitamos cada servicio a:
+#   - max-size: 30 MB por fichero
+#   - max-file: 5 ficheros antes de descartar el más viejo
+# → tope práctico ≈150 MB por contenedor (×4 servicios ≈600 MB máximo).
+# Si necesitas más histórico para un servicio concreto, sobreescribe la
+# clave `logging:` en ese servicio.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "30m"
+    max-file: "5"
 
 services:
   mongo:
     image: mongo:7
     restart: always
+    logging: *default-logging
     volumes:
       - mongo_data:/data/db
     # Sin puerto expuesto al host — sólo accesible desde la red interna.
@@ -25,6 +42,7 @@ services:
       context: ..
       dockerfile: deploy/backend.Dockerfile
     restart: always
+    logging: *default-logging
     env_file:
       - .env.production
     environment:
@@ -50,6 +68,7 @@ services:
         # Pon aquí tu hostname público con https://
         REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost}
     restart: always
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"
