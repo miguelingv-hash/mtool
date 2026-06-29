@@ -989,6 +989,31 @@ export default function Comparativa() {
           <span className="text-xs text-slate-500" data-testid="comp-total-count">
             · {total.toLocaleString("es-ES")} resultado{total === 1 ? "" : "s"}
           </span>
+          {/* Pista cuando el total incluye solo-SII que no aparecen en la
+              tabla por la optimización de no cargar 800k+ docs. Solo aplica
+              en modo "Todas las facturas" sin búsqueda específica. Si el
+              usuario filtra por nº de serie, el backend YA incluye solo_sii
+              en items, así que el aviso se oculta. */}
+          {filtroEstado === "all" &&
+            !filtroNumSerieDebounced.trim() &&
+            items.length > 0 &&
+            total > items.length * (page + 5) && (
+              <span
+                className="text-[11px] text-slate-500 italic hidden lg:inline"
+                data-testid="solo-sii-hint"
+                title="Para ver las facturas que sólo existen en SII (no en comercial), cambia el filtro a 'Sólo en SII'."
+              >
+                · facturas sólo en SII no listadas aquí — usa{" "}
+                <button
+                  type="button"
+                  onClick={() => setFiltroEstado("solo_sii")}
+                  className="underline hover:text-slate-900"
+                  data-testid="switch-to-solo-sii"
+                >
+                  Sólo en SII
+                </button>
+              </span>
+            )}
         </div>
         <div className="flex items-center gap-2">
           <Button

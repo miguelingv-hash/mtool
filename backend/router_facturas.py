@@ -2544,15 +2544,41 @@ async def comparativa(
             # "Todas" mezcla filas comerciales + solo_sii paginado
             filas = list(filas_com)
 
+        # ------------------------------------------------------------------
+        # Inclusión de filas "solo_sii" en los modos donde son relevantes
+        # ------------------------------------------------------------------
+        # `filas_com` se construye desde el universo comercial, así que NUNCA
+        # contiene filas con estado=solo_sii. Eso provocaba un bug confuso:
+        # al buscar por nº de serie específico, "Todas las facturas" o
+        # "Discrepancias" decían "no encontrado" si la factura solo existe en
+        # SII, mientras que "Sólo en SII" sí la encontraba.
+        #
+        # Solución: cuando hay un filtro restrictivo (`num_serie`), el
+        # universo solo_sii ya es pequeño y podemos cargarlo en memoria sin
+        # riesgo de OOM. Sin `num_serie`, mantenemos la optimización
+        # (paginar solo_sii sólo cuando el usuario lo pida explícitamente con
+        # estado="solo_sii") para no traer 800 000+ docs.
+        incluir_solo_sii = bool(estado is None and num_serie)
+        if incluir_solo_sii:
+            solo_sii_docs = await _db.facturas_sii.find(
+                solo_sii_filter, {"_id": 0, "versiones": 0}
+            ).to_list(length=None)
+            for d in solo_sii_docs:
+                filas.append(
+                    _build_row_from_docs(d, None, d["num_serie_factura"], config),
+                )
+
         sort_func = _sort_key_row(sort_by or "num_serie_factura")
         filas.sort(key=sort_func, reverse=(sort_dir == "desc"))
-        # Cuando estado=None y only_diffs=False, sumamos contador de solo_sii al total
-        # pero NO inyectamos los docs (sería caro). Si el usuario quiere verlos,
-        # debe seleccionar explícitamente "Sólo en SII".
-        if estado is None and not only_diffs:
-            total = len(filas) + solo_sii_total
-        else:
+        # Total/items:
+        #   - Si hemos incluido solo_sii en filas → total = len(filas) (real).
+        #   - Si no, y modo es "all" sin filtro restrictivo, sumamos al total
+        #     el contador solo_sii pero los docs no aparecen en items (hay
+        #     que cambiar a estado="solo_sii" para verlos). Avisamos en el UI.
+        if incluir_solo_sii or estado or only_diffs:
             total = len(filas)
+        else:
+            total = len(filas) + solo_sii_total
         items = filas[skip : skip + limit]
 
     return {
