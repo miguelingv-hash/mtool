@@ -61,6 +61,7 @@ const NAV_TREE = [
       { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch", perm: "consultas.batch" },
       { to: "/historico", label: "Histórico", icon: HistoryIcon, testId: "nav-history" },
       { to: "/logs", label: "Log de WS", icon: ScrollText, testId: "nav-logs", perm: "logs.view" },
+      { to: "/admin/imports-log", label: "Historial de importaciones", icon: ClipboardList, testId: "nav-admin-imports-log", perm: "audit.view" },
       { to: "/configuracion", label: "Configuración", icon: Settings, testId: "nav-config", perm: "comparativa.edit_config" },
     ],
   },
@@ -88,7 +89,6 @@ const NAV_TREE = [
   },
   { to: "/admin/usuarios", label: "Usuarios", icon: Users, testId: "nav-admin-users", perm: "users.manage" },
   { to: "/admin/roles", label: "Roles", icon: UserCog, testId: "nav-admin-roles", perm: "roles.manage" },
-  { to: "/admin/imports-log", label: "Historial de importaciones", icon: ClipboardList, testId: "nav-admin-imports-log", perm: "audit.view" },
   { to: "/admin/mantenimiento", label: "Mantenimiento", icon: Wrench, testId: "nav-admin-mantenimiento", perm: "sii.wipe" },
 ];
 
