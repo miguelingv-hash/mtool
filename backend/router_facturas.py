@@ -2023,6 +2023,7 @@ async def upload_csv_comercial(
             ]
 
         total = 0
+        validos: list[dict] = []
         for norm in registros:
             try:
                 FacturaDatos(**norm)
@@ -2033,8 +2034,16 @@ async def upload_csv_comercial(
                     "motivo": str(e),
                 })
                 continue
-            await upsert_factura("facturas_comercial", norm, "csv_comercial")
-            total += 1
+            validos.append(norm)
+
+        # Bulk upsert (una sola operación bulk_write en lugar de N round-trips).
+        # Para 12800 filas pasamos de ~30s a <2s. Sin esto los uploads grandes
+        # rebasaban el timeout de Cloudflare (100s) y devolvían 502.
+        if validos:
+            await upsert_facturas_bulk(
+                "facturas_comercial", validos, "csv_comercial",
+            )
+            total = len(validos)
 
         # Persistir errores en el audit trail (recortados a 100 en el módulo).
         if errores:
@@ -2082,6 +2091,276 @@ async def upload_csv_comercial(
             error_message=f"{type(exc).__name__}: {exc}",
         )
         raise
+
+
+@router.post("/comercial/csv-async")
+async def upload_csv_comercial_async(
+    file: UploadFile = File(...),
+    nif_titular_override: Optional[str] = Form(None),
+    user: dict = Depends(get_current_user),
+):
+    """Versión asíncrona de `/comercial/csv` para ficheros grandes.
+
+    Igual patrón que Newman:
+      1) Volcamos el upload a un fichero temporal en chunks de 1 MB (no RAM).
+      2) Encolamos un job en `_db.jobs` y devolvemos `job_id` + `import_id`.
+      3) Worker procesa en background (bulk_write) sin tocar el request HTTP,
+         así Cloudflare (~100s idle timeout) no corta.
+
+    El cliente hace polling con `GET /api/jobs/{job_id}` hasta ver
+    `status == "done"` o `"error"`.
+    """
+    import os
+    import tempfile
+
+    if not file.filename.lower().endswith((".csv", ".txt")):
+        raise HTTPException(400, "Debe ser un archivo .csv o .txt")
+
+    # 1) Streaming a disco (1 MB chunks) para no cargar el fichero en RAM.
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="comercial_", suffix=".csv", delete=False,
+    )
+    total_bytes = 0
+    try:
+        chunk_size = 1024 * 1024
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            tmp.write(chunk)
+            total_bytes += len(chunk)
+        tmp.flush()
+        tmp.close()
+        if total_bytes == 0:
+            raise HTTPException(400, "El CSV está vacío")
+    except Exception:
+        try:
+            tmp.close()
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+    job_id = uuid.uuid4().hex
+    import_id = await start_import(
+        _db,
+        origen="comercial",
+        fuente="ui_upload_async",
+        file_name=file.filename,
+        file_size_bytes=total_bytes,
+        user_id=user.get("_id") or user.get("id"),
+        user_email=user.get("email"),
+        nif_titular=(nif_titular_override or "").strip().upper() or None,
+        job_id=job_id,
+        extra={"nif_titular_override": bool(nif_titular_override)},
+    )
+
+    job_doc = {
+        "id": job_id,
+        "type": "comercial-csv-import",
+        "status": "queued",
+        "progress": {"processed": 0, "total": 0, "phase": "queued"},
+        "params": {
+            "file_name": file.filename,
+            "file_size_bytes": total_bytes,
+            "tmp_path": tmp.name,
+            "nif_titular_override": nif_titular_override,
+            "import_id": import_id,
+        },
+        "result": None,
+        "error_message": None,
+        "created_at": _now_iso(),
+        "started_at": None,
+        "finished_at": None,
+        "updated_at": _now_iso(),
+    }
+    await _db.jobs.insert_one(job_doc)
+    asyncio.create_task(
+        _ejecutar_comercial_csv_job(
+            job_id, tmp.name, nif_titular_override, import_id,
+        ),
+    )
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "file_size_bytes": total_bytes,
+        "import_id": import_id,
+    }
+
+
+async def _ejecutar_comercial_csv_job(
+    job_id: str,
+    tmp_path: str,
+    nif_titular_override: Optional[str],
+    import_id: str,
+):
+    """Worker background del import comercial. Espeja la lógica del endpoint
+    síncrono pero con bulk_write y sin restricción de timeout HTTP."""
+    import os
+
+    try:
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "running",
+                "started_at": _now_iso(),
+                "updated_at": _now_iso(),
+                "progress.phase": "reading",
+            }},
+        )
+
+        with open(tmp_path, "rb") as f:
+            raw = f.read()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+
+        # Validación override
+        override_info: Optional[dict] = None
+        if nif_titular_override:
+            nif_norm = nif_titular_override.strip().upper()
+            catalogo = await _cargar_catalogo_sociedades()
+            for _soc, info in catalogo.items():
+                if info.get("nif_titular") == nif_norm:
+                    override_info = {
+                        "nif_titular": nif_norm,
+                        "nombre_titular": info.get("nombre_titular") or "",
+                    }
+                    break
+            if override_info is None:
+                raise RuntimeError(
+                    f"nif_titular_override={nif_norm!r} no está en el catálogo",
+                )
+
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {"progress.phase": "parsing", "updated_at": _now_iso()}},
+        )
+
+        origen_detectado = _detectar_formato_tabular(text)
+        if origen_detectado:
+            catalogo = await _cargar_catalogo_sociedades()
+            registros, errores = _parsear_report_tabular(
+                text, origen_detectado, catalogo_sociedades=catalogo,
+            )
+        else:
+            registros, errores = _parsear_csv_generico(text)
+
+        if override_info:
+            for r in registros:
+                r["nif_titular"] = override_info["nif_titular"]
+                r["nombre_titular"] = override_info["nombre_titular"]
+            errores = [
+                e for e in errores
+                if not (
+                    e.get("fila") == -1
+                    and "no encontradas en el catálogo" in e.get("motivo", "")
+                )
+            ]
+
+        # Validación Pydantic + colecta de válidos
+        validos: list[dict] = []
+        for norm in registros:
+            try:
+                FacturaDatos(**norm)
+            except Exception as e:  # noqa: BLE001
+                errores.append({
+                    "fila": -1,
+                    "num_serie_factura": norm.get("num_serie_factura"),
+                    "motivo": str(e),
+                })
+                continue
+            validos.append(norm)
+
+        total_validos = len(validos)
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "progress.total": total_validos,
+                "progress.phase": "inserting",
+                "updated_at": _now_iso(),
+            }},
+        )
+
+        # Bulk upsert por lotes de 2000 para tener progreso incremental
+        batch_size = 2000
+        insertadas = 0
+        for i in range(0, total_validos, batch_size):
+            chunk = validos[i : i + batch_size]
+            await upsert_facturas_bulk(
+                "facturas_comercial", chunk, "csv_comercial",
+            )
+            insertadas += len(chunk)
+            await _db.jobs.update_one(
+                {"id": job_id},
+                {"$set": {
+                    "progress.processed": insertadas,
+                    "updated_at": _now_iso(),
+                }},
+            )
+
+        # Match SII para el resumen
+        nums = [r["num_serie_factura"] for r in registros if r.get("num_serie_factura")]
+        matched_count = 0
+        if nums:
+            # Chunk para no rebasar 16MB de BSON en el $in
+            for i in range(0, len(nums), 20_000):
+                chunk = nums[i : i + 20_000]
+                matched_count += await _db.facturas_sii.count_documents(
+                    {"num_serie_factura": {"$in": chunk}}
+                )
+
+        if errores:
+            await add_import_errors(_db, import_id, errores)
+
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "done",
+                "result": {
+                    "total": insertadas,
+                    "origen": origen_detectado,
+                    "matches_sii": matched_count,
+                    "sin_match_sii": max(0, len(nums) - matched_count),
+                    "errores": errores[:50],
+                    "import_id": import_id,
+                },
+                "finished_at": _now_iso(),
+                "updated_at": _now_iso(),
+                "progress.phase": "done",
+            }},
+        )
+        await finish_import(
+            _db, import_id, status="done",
+            total_procesados=insertadas,
+            insertados=insertadas,
+            actualizados=0,
+            extra={
+                "origen_detectado": origen_detectado,
+                "matches_sii": matched_count,
+                "sin_match_sii": max(0, len(nums) - matched_count),
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        await _db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "error",
+                "error_message": f"{type(e).__name__}: {e}",
+                "finished_at": _now_iso(),
+                "updated_at": _now_iso(),
+            }},
+        )
+        await finish_import(
+            _db, import_id, status="error",
+            error_message=f"{type(e).__name__}: {e}",
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _parsear_csv_generico(text: str) -> tuple[list[dict], list[dict]]:
