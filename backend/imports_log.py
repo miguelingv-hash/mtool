@@ -161,17 +161,26 @@ async def add_import_errors(
         if not isinstance(e, dict):
             normalizados.append({"motivo": str(e)[:500]})
             continue
+        # El motivo de las filas de RESUMEN (fila=-1) puede ser muy largo
+        # (listado de sociedades no mapeadas, stats de skip…) → subimos el
+        # límite para esas filas concretas y mantenemos 500 para errores por
+        # fila. Sin esto se truncaba el resumen del parser y perdíamos info.
+        motivo_raw = e.get("motivo") or ""
+        motivo_lim = 4000 if e.get("fila") == -1 else 500
         norm = {
             "fila": e.get("fila"),
             "num_serie_factura": e.get("num_serie_factura"),
-            "motivo": (e.get("motivo") or "")[:500],
+            "motivo": motivo_raw[:motivo_lim],
         }
         if "datos" in e:
-            # Guardar sólo un resumen (evitar cargar todo el dict de la fila).
             datos = e["datos"] if isinstance(e["datos"], dict) else {}
-            norm["datos"] = {
-                k: v for k, v in list(datos.items())[:6]
-            }
+            # Para las filas RESUMEN preservamos el dict completo (contiene
+            # skip_stats + skip_samples); para el resto sólo un preview de 6
+            # claves para evitar payloads gigantes por fila.
+            if e.get("fila") == -1:
+                norm["datos"] = datos
+            else:
+                norm["datos"] = {k: v for k, v in list(datos.items())[:6]}
         normalizados.append(norm)
 
     # $push con $slice para mantener máximo MAX_ERRORES_GUARDADOS y a la vez

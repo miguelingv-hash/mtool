@@ -2592,6 +2592,27 @@ def _parsear_report_tabular(
     registros_por_num: dict[str, dict] = {}
     soc_no_mapeadas: set[str] = set()
     errores: list[dict] = []
+    # Contadores de líneas saltadas por motivo — muy útil para auditar por
+    # qué un fichero de N filas genera M<<N facturas. Se devuelven al final
+    # como una entrada resumen en `errores` con fila=-1 para que el audit
+    # trail los persista en `imports_log.errores`.
+    skip_stats = {
+        "no_pipe_prefix": 0,     # líneas que no empiezan por `|`
+        "separator_line": 0,     # líneas `|---...|`
+        "too_few_cells": 0,      # menos columnas que la cabecera
+        "header_repeat": 0,      # reaparición de la cabecera
+        "empty_num": 0,          # `num_serie_factura` vacío (típico en HC30)
+        "parse_error": 0,        # excepciones al parsear la fila
+    }
+    # Ejemplos (máx 3 por motivo) de las líneas saltadas — para poder
+    # inspeccionar visualmente qué tipo de línea es cada categoría.
+    skip_samples: dict[str, list[str]] = {k: [] for k in skip_stats}
+
+    def _record_skip(motivo: str, raw: str):
+        skip_stats[motivo] += 1
+        if len(skip_samples[motivo]) < 3:
+            skip_samples[motivo].append(raw[:200])
+
     # Precomputamos el set de cells de la cabecera para detectar reapariciones
     # (algunos reports HC30 repiten la cabecera cada N líneas). También
     # detectamos líneas de título/subtotal que empiezan por `|` pero no son
@@ -2600,21 +2621,26 @@ def _parsear_report_tabular(
     for i, line in enumerate(lines[header_idx + 1 :], start=header_idx + 2):
         s = line.rstrip()
         if not s.startswith("|"):
+            _record_skip("no_pipe_prefix", s)
             continue
         # Líneas separadoras estilo `|------...|`
         if set(s) <= {"|", "-", " "}:
+            _record_skip("separator_line", s)
             continue
         cells = [c.strip() for c in s.strip("|").split("|")]
         if len(cells) < len(header_cells):
+            _record_skip("too_few_cells", s)
             continue
         # Salta la reaparición de la cabecera dentro del cuerpo del report
         # (comparación exacta contra el conjunto de la cabecera detectada).
         # Sin esto los reports HC30 provocan una "Soc." fantasma en la lista
         # de sociedades no mapeadas y contaminan `errores`.
         if header_cells_set.issubset(set(cells)):
+            _record_skip("header_repeat", s)
             continue
         num = cells[idx_num] if idx_num < len(cells) else ""
         if not num:
+            _record_skip("empty_num", s)
             continue
         try:
             fexp = _parsear_fecha_sap(cells[idx_fexp]) if idx_fexp is not None else None
@@ -2664,6 +2690,7 @@ def _parsear_report_tabular(
                 "origen": origen,
             })
         except Exception as e:  # noqa: BLE001
+            _record_skip("parse_error", s)
             errores.append({"fila": i, "motivo": str(e), "raw": s[:200]})
 
     if soc_no_mapeadas:
@@ -2676,6 +2703,33 @@ def _parsear_report_tabular(
                 f"/api/admin/sociedades."
             ),
         })
+
+    # Resumen de líneas saltadas — auditoría transparente. Se añade siempre
+    # (incluso si todas son ceros) para que el usuario pueda comprobar en el
+    # audit trail (`imports_log.errores`) cuántas líneas se descartaron y
+    # por qué motivo. Sin esto, un HC30 de 1.7M filas que se agrega a 500k
+    # facturas + genera sólo unos pocos errores puntuales deja al usuario
+    # sin forma de verificar qué pasó con la ~1.2M restante.
+    total_lineas_body = len(lines) - (header_idx + 1)
+    total_saltadas = sum(skip_stats.values())
+    lineas_datos_ok = total_lineas_body - total_saltadas
+    errores.append({
+        "fila": -1,
+        "motivo": (
+            f"[RESUMEN PARSEO {origen}] "
+            f"total_lineas_cuerpo={total_lineas_body:,} · "
+            f"lineas_datos_procesadas={lineas_datos_ok:,} · "
+            f"lineas_saltadas={total_saltadas:,} "
+            f"(no_pipe_prefix={skip_stats['no_pipe_prefix']:,}, "
+            f"separator_line={skip_stats['separator_line']:,}, "
+            f"too_few_cells={skip_stats['too_few_cells']:,}, "
+            f"header_repeat={skip_stats['header_repeat']:,}, "
+            f"empty_num={skip_stats['empty_num']:,}, "
+            f"parse_error={skip_stats['parse_error']:,}) · "
+            f"facturas_agregadas={len(registros_por_num):,}"
+        ),
+        "datos": {"skip_stats": skip_stats, "skip_samples": skip_samples},
+    })
 
     # Para el `tipo_impositivo` agregado: si la factura tiene una sola línea
     # de IVA, usamos su tipo; si tiene varios tramos lo dejamos a None para
