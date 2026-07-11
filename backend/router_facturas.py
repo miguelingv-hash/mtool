@@ -1847,7 +1847,21 @@ async def csv_template_comercial():
 
 
 @router.post("/comercial/csv")
-async def upload_csv_comercial(file: UploadFile = File(...)):
+async def upload_csv_comercial(
+    file: UploadFile = File(...),
+    nif_titular_override: Optional[str] = Form(None),
+):
+    """Sube un fichero comercial (SAP FI, SIGLO o CSV genérico) y lo guarda
+    en `facturas_comercial`.
+
+    Parámetro opcional `nif_titular_override`:
+      Fuerza el `nif_titular` + `nombre_titular` de TODAS las filas al valor
+      indicado, ignorando la columna `Soc.` del CSV. Imprescindible para
+      reports SIGLO variante HC30 (extracto de balance) donde la columna
+      `Soc.` contiene la clase de asiento (`HC30`, `NC`…) en lugar del
+      código de sociedad SAP. El NIF debe estar en el catálogo
+      `sociedades_catalogo`; en caso contrario se rechaza con 400.
+    """
     if not file.filename.lower().endswith((".csv", ".txt")):
         raise HTTPException(400, "Debe ser un archivo .csv o .txt")
     raw = await file.read()
@@ -1855,6 +1869,28 @@ async def upload_csv_comercial(file: UploadFile = File(...)):
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
+
+    # Si viene override, lo validamos AHORA (antes del parseo) para dar
+    # feedback rápido al usuario si el NIF no está en el catálogo.
+    override_info: Optional[dict] = None
+    if nif_titular_override:
+        nif_norm = nif_titular_override.strip().upper()
+        catalogo = await _cargar_catalogo_sociedades()
+        # Buscamos el mapping por NIF en el catálogo (los seeds están indexados
+        # por soc, no por NIF, así que hacemos búsqueda inversa).
+        for _soc, info in catalogo.items():
+            if info.get("nif_titular") == nif_norm:
+                override_info = {
+                    "nif_titular": nif_norm,
+                    "nombre_titular": info.get("nombre_titular") or "",
+                }
+                break
+        if override_info is None:
+            raise HTTPException(
+                400,
+                f"nif_titular_override={nif_norm!r} no está en el catálogo. "
+                f"Añádelo con PUT /api/admin/sociedades antes de subir.",
+            )
 
     # Detecta automáticamente el formato del report (SAP FI o SIGLO) por la
     # firma de cabeceras. Si no coincide ninguno, cae al parser CSV genérico.
@@ -1866,6 +1902,22 @@ async def upload_csv_comercial(file: UploadFile = File(...)):
         )
     else:
         registros, errores = _parsear_csv_generico(text)
+
+    # Aplicar el override si se pidió — reemplaza nif/nombre en TODAS las
+    # filas parseadas (incluyendo las que ya tenían un mapping desde Soc.).
+    # También limpia el aviso "Sociedades no mapeadas" del report de errores
+    # porque en modo override, la columna Soc. NO es la fuente de verdad.
+    if override_info:
+        for r in registros:
+            r["nif_titular"] = override_info["nif_titular"]
+            r["nombre_titular"] = override_info["nombre_titular"]
+        errores = [
+            e for e in errores
+            if not (
+                e.get("fila") == -1
+                and "no encontradas en el catálogo" in e.get("motivo", "")
+            )
+        ]
 
     total = 0
     for norm in registros:
@@ -1930,9 +1982,10 @@ def _parsear_csv_generico(text: str) -> tuple[list[dict], list[dict]]:
 # automáticamente.
 _FORMATOS_TABULARES: dict[str, dict] = {
     "SAP": {
+        # Cabecera SAP FI clásica. Se distingue de SIGLO por `Doc.causante`
+        # (nombre completo) frente a `Doc.caus.` (abreviado).
         "header_signatures": (
-            "Soc.", "Doc.causante", "Nº doc.oficial",
-            "Tp.impos.", "BaseImpon", "Impto.ML",
+            "Soc.", "Doc.causante", "Tp.impos.", "BaseImpon", "Impto.ML",
         ),
         "col_num":  ["Nº doc.oficial"],
         "col_fexp": ["Fe.doc.or."],          # 1ª ocurrencia
@@ -1943,11 +1996,15 @@ _FORMATOS_TABULARES: dict[str, dict] = {
         "col_soc":  ["Soc."],
     },
     "SIGLO": {
+        # Cabecera SIGLO. La distintiva es `Doc.caus.` (abreviado). Aceptamos
+        # ambos nombres para el nº de factura porque algunos exports (p.ej.
+        # HC30 de balance) traen `Nº doc.oficial` en lugar del `Nº oficial`
+        # clásico, y otras columnas intermedias (Int.cial., Dat.adic., etc.)
+        # no afectan al parser porque lo indexamos por nombre exacto de celda.
         "header_signatures": (
-            "Soc.", "Doc.caus.", "Nº oficial",
-            "Tp.impos.", "BaseImpon", "Impto.ML",
+            "Soc.", "Doc.caus.", "Tp.impos.", "BaseImpon", "Impto.ML",
         ),
-        "col_num":  ["Nº oficial"],
+        "col_num":  ["Nº oficial", "Nº doc.oficial"],
         "col_fexp": ["Fe.doc.or."],          # 1ª ocurrencia
         "col_fope": ["Fe.doc.or."],          # 2ª ocurrencia
         "col_tipo": ["Tp.impos."],
@@ -1993,12 +2050,22 @@ async def _cargar_catalogo_sociedades() -> dict[str, dict]:
 
 def _detectar_formato_tabular(text: str) -> Optional[str]:
     """Recorre las primeras 100 líneas y devuelve el nombre del primer formato
-    cuya firma de cabecera coincida (`SAP`, `SIGLO`...). None si ninguna."""
+    cuya firma de cabecera coincida (`SAP`, `SIGLO`...). None si ninguna.
+
+    Compara TOKENS exactos (split por `|` + strip) en vez de substring: así
+    `Doc.caus.` no matchea `Doc.causante` (que provocaría que SIGLO detectase
+    ficheros SAP como SIGLO), y variantes con columnas extra (p.ej. HC30 con
+    `Int.cial.`, `Dat.adic.`, `Cta.mayor`, `II`) siguen validando siempre que
+    todas las columnas obligatorias estén presentes.
+    """
     head = text.splitlines()[:100]
     for nombre, spec in _FORMATOS_TABULARES.items():
         sigs = spec["header_signatures"]
         for line in head:
-            if all(sig in line for sig in sigs):
+            if not line.strip().startswith("|"):
+                continue
+            cells = {c.strip() for c in line.strip("|").split("|")}
+            if all(sig in cells for sig in sigs):
                 return nombre
     return None
 
@@ -2061,7 +2128,13 @@ def _parsear_report_tabular(
     header_idx = None
     sigs = spec["header_signatures"]
     for i, line in enumerate(lines):
-        if all(sig in line for sig in sigs):
+        # Comparación por tokens exactos (mismo criterio que
+        # `_detectar_formato_tabular`). Evita falsos positivos y garantiza
+        # que el header_idx apunta a la fila real de cabecera.
+        if not line.strip().startswith("|"):
+            continue
+        cells_set = {c.strip() for c in line.strip("|").split("|")}
+        if all(sig in cells_set for sig in sigs):
             header_idx = i
             break
     if header_idx is None:
@@ -2106,6 +2179,11 @@ def _parsear_report_tabular(
     registros_por_num: dict[str, dict] = {}
     soc_no_mapeadas: set[str] = set()
     errores: list[dict] = []
+    # Precomputamos el set de cells de la cabecera para detectar reapariciones
+    # (algunos reports HC30 repiten la cabecera cada N líneas). También
+    # detectamos líneas de título/subtotal que empiezan por `|` pero no son
+    # filas de datos.
+    header_cells_set = set(header_cells)
     for i, line in enumerate(lines[header_idx + 1 :], start=header_idx + 2):
         s = line.rstrip()
         if not s.startswith("|"):
@@ -2115,6 +2193,12 @@ def _parsear_report_tabular(
             continue
         cells = [c.strip() for c in s.strip("|").split("|")]
         if len(cells) < len(header_cells):
+            continue
+        # Salta la reaparición de la cabecera dentro del cuerpo del report
+        # (comparación exacta contra el conjunto de la cabecera detectada).
+        # Sin esto los reports HC30 provocan una "Soc." fantasma en la lista
+        # de sociedades no mapeadas y contaminan `errores`.
+        if header_cells_set.issubset(set(cells)):
             continue
         num = cells[idx_num] if idx_num < len(cells) else ""
         if not num:

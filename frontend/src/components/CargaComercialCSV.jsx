@@ -1,6 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, API } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Upload, Download, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -12,12 +20,26 @@ import { toast } from "sonner";
  * (SAP FI vs SIGLO) por las cabeceras y mapea `Soc.` → `nif_titular` con el
  * catálogo de sociedades.
  *
+ * Selector "Forzar sociedad": para reports SIGLO variante HC30 (extracto de
+ * balance) donde la columna `Soc.` contiene la clase de asiento en lugar del
+ * código de sociedad, permite forzar el NIF titular para todas las filas.
+ *
  * Tras una carga correcta llama a `onCompleted` por si la página padre quiere
  * refrescar contadores.
  */
 export default function CargaComercialCSV({ onCompleted }) {
   const [csvFile, setCsvFile] = useState(null);
   const [loadingCsv, setLoadingCsv] = useState(false);
+  const [sociedades, setSociedades] = useState([]);
+  const [nifOverride, setNifOverride] = useState("__auto__");
+
+  // Carga las sociedades disponibles al montar
+  useEffect(() => {
+    api
+      .get("/comparativa/nifs-titulares")
+      .then((r) => setSociedades(r.data?.sociedades || []))
+      .catch(() => setSociedades([]));
+  }, []);
 
   const subirCsv = async () => {
     if (!csvFile) {
@@ -28,6 +50,9 @@ export default function CargaComercialCSV({ onCompleted }) {
     try {
       const fd = new FormData();
       fd.append("file", csvFile);
+      if (nifOverride !== "__auto__") {
+        fd.append("nif_titular_override", nifOverride);
+      }
       const { data } = await api.post("/comercial/csv", fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
@@ -70,19 +95,48 @@ export default function CargaComercialCSV({ onCompleted }) {
       </div>
       <p className="text-xs text-slate-500 mb-4">
         Acepta <span className="font-mono">.csv</span> con cabeceras estándar
-        (descarga la plantilla) o <span className="font-mono">.txt</span> del
-        report tabular en dos formatos:
+        o <span className="font-mono">.txt</span> del report tabular en dos formatos:
         <br />
-        <span className="font-mono">· SAP FI</span> — cabeceras{" "}
+        <span className="font-mono">· SAP FI</span> — cabecera{" "}
         <span className="font-mono">Soc.|Doc.causante|Nº doc.oficial|…</span>
         <br />
-        <span className="font-mono">· SIGLO</span> — cabeceras{" "}
-        <span className="font-mono">Soc.|Doc.caus.|Nº oficial|…</span>
+        <span className="font-mono">· SIGLO</span> — cabecera{" "}
+        <span className="font-mono">Soc.|Doc.caus.|Nº oficial|…</span>{" "}
+        (incluye variante HC30 con columnas extra).
         <br />
         La columna <span className="font-mono">Soc.</span> se mapea
         automáticamente a NIF + nombre de sociedad usando el catálogo
-        configurado en <span className="font-mono">/admin/sociedades</span>.
+        (<span className="font-mono">/admin/sociedades</span>). Si el report
+        no trae el código en esa columna (p.ej. HC30 muestra la clase de
+        asiento), usa el selector <strong>&quot;Forzar sociedad&quot;</strong>.
       </p>
+
+      <div className="mb-4">
+        <Label className="text-[11px] uppercase tracking-wider text-slate-600 mb-1.5 block">
+          Forzar sociedad (opcional)
+        </Label>
+        <Select value={nifOverride} onValueChange={setNifOverride}>
+          <SelectTrigger
+            className="rounded-none text-sm"
+            data-testid="csv-nif-override"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__auto__">
+              Auto-detectar por columna Soc. (recomendado)
+            </SelectItem>
+            {sociedades.map((s) => (
+              <SelectItem key={s.nif_titular} value={s.nif_titular}>
+                {s.nombre_titular
+                  ? `${s.nombre_titular} · ${s.nif_titular}`
+                  : s.nif_titular}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
       <label
         htmlFor="csv-com"
         className="block border-2 border-dashed border-slate-300 hover:border-slate-400 p-6 text-center cursor-pointer bg-slate-50/40"

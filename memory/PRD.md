@@ -296,6 +296,23 @@
 - **Toggle Sociedad** muestra nombre + NIF.
 - Validado por testing agent (iteration_18.json): 10/10 nuevos pytest + 8/8 regresión + frontend E2E.
 
+### Feb 2026 — Fix parser comercial: variante SIGLO HC30 + Override de sociedad
+- **🐛 Bug reportado**: al subir un report SIGLO HC30 real (extracto de balance de 3.2 MB, 17k líneas), la UI mostraba `0 facturas importadas · 1 error`. El parser fallaba en autodetección.
+- **🔬 Causa raíz** (3 problemas apilados):
+  1. **Cabecera híbrida**: SIGLO HC30 usa `Doc.caus.` (abreviatura SIGLO) PERO `Nº doc.oficial` (formato SAP). Ninguna de las 2 firmas de `_FORMATOS_TABULARES` cubría esta variante.
+  2. **Substring detection frágil**: `_detectar_formato_tabular` usaba `sig in line` como substring → `Doc.caus.` era substring de `Doc.causante` y SIGLO habría matcheado falsamente ficheros SAP.
+  3. **Cabecera duplicada**: los reports HC30 reinsertan la cabecera cada N líneas (paginación); el parser la trataba como fila de datos.
+  4. **Bonus**: la columna `Soc.` de HC30 contiene la clase de asiento contable (`HC30`, `NC`), NO el código SAP de sociedad. El mapeo `Soc.→NIF` fallaba obligadamente.
+- **🟢 Fixes aplicados** (`router_facturas.py`):
+  - `_FORMATOS_TABULARES.SIGLO`: firma reducida a los 5 tokens realmente distintivos y `col_num` acepta ambos aliases (`Nº oficial`, `Nº doc.oficial`).
+  - `_detectar_formato_tabular` y búsqueda de header en el parser: comparación por **tokens exactos** (`split("|") + strip`) en lugar de substring. Elimina falsos positivos y añade robustez a variantes con columnas extra.
+  - Skip de cabecera duplicada: si una fila del cuerpo tiene el mismo set de cells que `header_cells`, se ignora.
+  - **Nuevo parámetro `nif_titular_override`** en `POST /api/comercial/csv`: fuerza el NIF+nombre en TODAS las filas ignorando `Soc.`. Requiere que el NIF esté en el catálogo (400 si no); limpia además el aviso "Soc no mapeadas" del report de errores.
+  - Bandera equivalente `--nif-titular` en `scripts/import_comercial.py`.
+- **🟢 UI** (`CargaComercialCSV.jsx`): añadido `<Select>` "Forzar sociedad (opcional)" arriba del dropzone; por defecto "Auto-detectar por columna Soc.". Lista dinámica desde `/api/comparativa/nifs-titulares`.
+- **🟢 Test de regresión** (`backend/tests/test_parser_siglo_hc30.py`): mini-report HC30 sintético + validación de que SAP no se detecta como SIGLO. Ambos verdes.
+- **🟢 Verificación end-to-end** con el CSV real de 3.2 MB: **12 818 facturas SIGLO** parseadas, agrupación correcta de duplicados HC30/NC del mismo `num_serie_factura`, 0 errores, NIF `A95000295` forzado en todas.
+
 ### Feb 2026 — Scripts CLI de carga directa (sin HTTP) + Fix Caddy max_size + Streaming upload
 - **Trío de mejoras** para resolver la carga masiva de CSVs grandes (~180 MB / 865 k facturas) que daba `ERR_BAD_REQUEST` y `ECONNABORTED` en producción.
 

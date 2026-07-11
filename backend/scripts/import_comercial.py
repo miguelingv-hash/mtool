@@ -54,6 +54,13 @@ def parse_args():
         help="Forzar Soc para filas que no lo traigan en el CSV. Debe estar en "
         "el catálogo (4432, 2239, ...).",
     )
+    p.add_argument(
+        "--nif-titular", default=None,
+        help="Forzar directamente el NIF titular para TODAS las filas, "
+        "ignorando la columna Soc. del CSV. Útil para reports SIGLO HC30 "
+        "donde Soc. no es el código de sociedad. El NIF debe estar en el "
+        "catálogo de sociedades.",
+    )
     p.add_argument("--batch-size", type=int, default=1000)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument(
@@ -152,6 +159,31 @@ async def main_async(args):
         log.info(
             "Aplicado --soc-override=%s a %d/%d registros sin nif_titular.",
             soc, rellenadas, len(registros),
+        )
+
+    # --nif-titular: fuerza directamente el NIF+nombre en TODAS las filas
+    # (más simple que --soc-override cuando la columna Soc. no es fiable).
+    if args.nif_titular:
+        nif_norm = args.nif_titular.strip().upper()
+        catalogo_local = await _cargar_catalogo_sociedades()
+        mapping = None
+        for _soc, info in catalogo_local.items():
+            if info.get("nif_titular") == nif_norm:
+                mapping = info
+                break
+        if not mapping:
+            log.error(
+                "--nif-titular=%s no está en el catálogo. NIFs válidos: %s",
+                nif_norm,
+                sorted({v["nif_titular"] for v in catalogo_local.values()}),
+            )
+            sys.exit(1)
+        for r in registros:
+            r["nif_titular"] = mapping["nif_titular"]
+            r["nombre_titular"] = mapping.get("nombre_titular") or ""
+        log.info(
+            "Aplicado --nif-titular=%s (%s) a TODAS las %d filas.",
+            nif_norm, mapping.get("nombre_titular") or "", len(registros),
         )
 
     if args.dry_run:
