@@ -114,6 +114,7 @@ async def bulk_upsert(
     fuente: str,
     log: logging.Logger,
     batch_size: int = 1000,
+    import_id: str | None = None,
 ):
     """Bulk upsert por lotes con barra de progreso en stdout.
 
@@ -122,6 +123,8 @@ async def bulk_upsert(
     `upsert_facturas_bulk` del backend.
 
     Devuelve un dict con conteos: `{procesadas, insertadas, modificadas}`.
+    Si `import_id` viene informado, se actualiza el audit trail (imports_log)
+    con el progreso al final del cargue.
     """
     from datetime import datetime, timezone
     from pymongo import UpdateOne

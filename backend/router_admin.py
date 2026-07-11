@@ -57,6 +57,7 @@ PERMISSIONS_CATALOG = [
     {"key": "users.manage", "label": "Gestionar usuarios"},
     {"key": "roles.manage", "label": "Gestionar roles y permisos"},
     {"key": "sii.wipe", "label": "Vaciar módulo SII (operación destructiva)"},
+    {"key": "audit.view", "label": "Ver historial de importaciones (audit trail)"},
 ]
 
 
@@ -600,3 +601,99 @@ async def backfill_nif_titular_por_soc(
         "detalle_por_soc": detalle_por_soc,
         "fallback_aplicado": bool(payload.fallback_nif_titular),
     }
+
+
+# ============================================================================
+# Audit Trail — Historial de importaciones (imports_log)
+# ============================================================================
+@router.get("/imports-log")
+async def list_imports_log(
+    request: Request,
+    skip: int = 0,
+    limit: int = 50,
+    origen: Optional[str] = None,
+    fuente: Optional[str] = None,
+    status: Optional[str] = None,
+    user_email: Optional[str] = None,
+    nif_titular: Optional[str] = None,
+    file_name: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    _: dict = Depends(require_permission("audit.view")),
+):
+    """Listado paginado del audit trail de importaciones.
+
+    Filtros:
+      - `origen`: `sii` | `comercial`
+      - `fuente`: `ui_upload` | `cli_newman` | `cli_comercial` | `conciliacion_newman` | `conciliacion_newman_async` | `consulta_mensual_aeat` | `batch_csv`
+      - `status`: `running` | `done` | `error`
+      - `date_from` / `date_to`: ISO date (YYYY-MM-DD) — filtro por `timestamp_start`
+      - `user_email`, `nif_titular`, `file_name`: regex parcial (case-insensitive)
+    """
+    db = _db(request)
+    limit = max(1, min(limit, 200))
+    filtro: dict = {}
+    if origen:
+        filtro["origen"] = origen
+    if fuente:
+        filtro["fuente"] = fuente
+    if status:
+        filtro["status"] = status
+    if user_email:
+        filtro["user_email"] = {"$regex": user_email, "$options": "i"}
+    if nif_titular:
+        filtro["nif_titular"] = {"$regex": nif_titular, "$options": "i"}
+    if file_name:
+        filtro["file_name"] = {"$regex": file_name, "$options": "i"}
+    if date_from or date_to:
+        rango: dict[str, str] = {}
+        if date_from:
+            rango["$gte"] = date_from
+        if date_to:
+            rango["$lte"] = (
+                f"{date_to}T23:59:59.999999+00:00" if len(date_to) == 10 else date_to
+            )
+        filtro["timestamp_start"] = rango
+
+    total = await db.imports_log.count_documents(filtro)
+    cursor = (
+        db.imports_log.find(filtro, {"_id": 0, "errores": 0})
+        .sort("timestamp_start", -1)
+        .skip(skip)
+        .limit(limit)
+    )
+    items = await cursor.to_list(length=limit)
+    return {"total": total, "items": items, "skip": skip, "limit": limit}
+
+
+@router.get("/imports-log/{import_id}")
+async def get_import_log(
+    import_id: str,
+    request: Request,
+    _: dict = Depends(require_permission("audit.view")),
+):
+    """Detalle completo del audit trail — incluye lista de errores (máx 100)."""
+    db = _db(request)
+    doc = await db.imports_log.find_one({"id": import_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Registro de importación no encontrado")
+    return doc
+
+
+@router.get("/imports-log/stats/summary")
+async def imports_log_stats(
+    request: Request,
+    _: dict = Depends(require_permission("audit.view")),
+):
+    """Estadísticas agregadas del audit trail para el dashboard admin."""
+    db = _db(request)
+    pipeline = [
+        {"$group": {
+            "_id": {"origen": "$origen", "status": "$status"},
+            "count": {"$sum": 1},
+            "total_docs": {"$sum": "$total_procesados"},
+            "total_insertados": {"$sum": "$insertados"},
+        }}
+    ]
+    agg = await db.imports_log.aggregate(pipeline).to_list(length=100)
+    return {"by_origen_status": agg}

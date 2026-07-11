@@ -354,6 +354,24 @@
 - **Bug encontrado y arreglado durante self-test**: `CargaMensualSII` importaba `PERIODOS` de `@/lib/api` (array de `{value,label}`) y renderizaba los objetos directamente → React error "Objects are not valid as a React child". Sustituido por una constante local plana `["01"…"12"]`.
 - **Validado por testing agent (iteration_19.json)**: 6/6 backend tests verde (periodo CSV + $in + tolerancia espacios). ~95% frontend (19/20 — el faltante era precisamente el bug del PERIODOS, ya arreglado y reverificado por screenshot).
 
+
+## Implementado el 11 Jul 2026 — Audit Trail de importaciones (`imports_log`)
+- **Nuevo módulo** `backend/imports_log.py` con `start_import`, `finish_import`, `add_import_errors` y `ensure_indexes`. Colección MongoDB dedicada `imports_log`.
+- **Campos registrados**: `id`, `origen` (sii|comercial), `fuente` (ui_upload|conciliacion_newman[_async]|consulta_mensual_aeat|cli_newman|cli_comercial), `file_name`, `file_size_bytes`, `user_id`, `user_email`, `nif_titular`, `ejercicio`, `periodo`, `total_procesados`, `insertados`, `actualizados`, `errores_count`, `errores` (list, máx 100), `status`, `error_message`, `job_id`, `timestamp_start/end`, `duration_ms`, `extra`.
+- **Endpoints instrumentados** (todos crean/cierran automáticamente el audit log):
+  - `POST /api/comercial/csv` (UI)
+  - `POST /api/sii/conciliar-newman/importar-faltantes` (sync)
+  - `POST /api/sii/conciliar-newman/importar-faltantes-async` (async, hereda `import_id` en el job)
+  - `POST /api/sii/consulta-mensual-async` (descarga AEAT)
+  - CLI: `import_newman_sii.py`, `import_comercial.py`
+- **Nuevos endpoints admin** (permiso `audit.view`):
+  - `GET /api/admin/imports-log` — listado paginado con filtros (origen, fuente, status, user_email, nif_titular, file_name, date_from/to)
+  - `GET /api/admin/imports-log/{id}` — detalle completo con errores por fila
+  - `GET /api/admin/imports-log/stats/summary` — agregados por origen×status
+- **Nueva UI** `/admin/imports-log` (`AdminImportsLog.jsx`): tabla con status pills, filtros completos, panel de detalle en Sheet lateral con métricas + errores por fila + metadatos JSON. Ítem en sidebar `Historial de importaciones` (icono `ClipboardList`).
+- **Permiso nuevo** `audit.view` añadido al catálogo. Admin lo tiene por wildcard `*`.
+- **Validado**: 3 flujos e2e via curl (upload OK, upload con errores de fila, upload que revienta con HTTP 400 — todos generan un `imports_log` correcto con su status y errores). Screenshot con 3 filas + sheet de detalle abierto verificado.
+
 ### Backlog actual
 - **P1** Soporte SII `ConsultaLRFacturasRecibidas` (facturas recibidas): UI, backend, XML mapping.
 - **P1** Fase 2 Auth/RBAC: panel admin UI para crear/editar usuarios y asignar roles dinámicamente.

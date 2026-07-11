@@ -91,124 +91,184 @@ async def main_async(args):
         _parsear_report_tabular,
         init,
     )
+    from imports_log import (  # noqa: E402
+        add_import_errors,
+        finish_import,
+        start_import,
+    )
 
     db = get_mongo_db()
     init(db, log)
 
-    log.info("Leyendo CSV…")
-    raw = args.csv.read_bytes()
+    # Audit trail (sólo si no es dry-run)
+    import_id = None
+    if not args.dry_run:
+        import_id = await start_import(
+            db,
+            origen="comercial",
+            fuente="cli_comercial",
+            file_name=str(args.csv),
+            file_size_bytes=args.csv.stat().st_size,
+            user_id=None,
+            user_email="CLI",
+            nif_titular=(args.nif_titular or "").strip().upper() or None,
+            extra={
+                "soc_override": args.soc_override or None,
+                "nif_titular_override": bool(args.nif_titular),
+            },
+        )
+
     try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        # SAP suele exportar en latin-1
-        text = raw.decode("latin-1")
-        log.info("CSV decodificado como latin-1 (no era UTF-8).")
+        log.info("Leyendo CSV…")
+        raw = args.csv.read_bytes()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            # SAP suele exportar en latin-1
+            text = raw.decode("latin-1")
+            log.info("CSV decodificado como latin-1 (no era UTF-8).")
 
-    origen = _detectar_formato_tabular(text)
-    if origen:
-        log.info("Formato detectado: %s", origen)
-        catalogo = await _cargar_catalogo_sociedades()
-        log.info(
-            "Catálogo de sociedades cargado · %d entradas: %s",
-            len(catalogo), list(catalogo.keys()),
-        )
-        registros, errores = _parsear_report_tabular(
-            text, origen, catalogo_sociedades=catalogo,
-        )
-    else:
-        log.info(
-            "No se detectó SAP FI ni SIGLO por la cabecera; "
-            "intentando parser CSV genérico.",
-        )
-        registros, errores = _parsear_csv_generico(text)
-        # En genérico no hay catalogo applied → log de aviso
-        log.warning(
-            "Parser genérico: las facturas no llevarán nif_titular asignado. "
-            "Usa el endpoint admin /api/admin/comercial/asignar-nif-titular-por-soc "
-            "después si necesitas asignarlo.",
-        )
-
-    log.info("Parseo OK · filas válidas=%d · errores=%d", len(registros), len(errores))
-    if errores:
-        log.warning("Primeros errores (máx 5):")
-        for e in errores[:5]:
-            log.warning("  %s", e)
-    if not registros:
-        log.error("El CSV no contiene filas válidas. Abortando.")
-        sys.exit(1)
-
-    # --soc-override: rellena nif_titular para filas sin Soc/sin nif
-    if args.soc_override and origen:
-        soc = str(args.soc_override).strip()
-        catalogo_local = await _cargar_catalogo_sociedades()
-        mapping = catalogo_local.get(soc)
-        if not mapping:
-            log.error(
-                "--soc-override=%s no está en el catálogo (%s). "
-                "Añádelo con PUT /api/admin/sociedades.",
-                soc, list(catalogo_local.keys()),
+        origen = _detectar_formato_tabular(text)
+        if origen:
+            log.info("Formato detectado: %s", origen)
+            catalogo = await _cargar_catalogo_sociedades()
+            log.info(
+                "Catálogo de sociedades cargado · %d entradas: %s",
+                len(catalogo), list(catalogo.keys()),
             )
+            registros, errores = _parsear_report_tabular(
+                text, origen, catalogo_sociedades=catalogo,
+            )
+        else:
+            log.info(
+                "No se detectó SAP FI ni SIGLO por la cabecera; "
+                "intentando parser CSV genérico.",
+            )
+            registros, errores = _parsear_csv_generico(text)
+            # En genérico no hay catalogo applied → log de aviso
+            log.warning(
+                "Parser genérico: las facturas no llevarán nif_titular asignado. "
+                "Usa el endpoint admin /api/admin/comercial/asignar-nif-titular-por-soc "
+                "después si necesitas asignarlo.",
+            )
+
+        log.info("Parseo OK · filas válidas=%d · errores=%d", len(registros), len(errores))
+        if errores:
+            log.warning("Primeros errores (máx 5):")
+            for e in errores[:5]:
+                log.warning("  %s", e)
+            if import_id:
+                await add_import_errors(db, import_id, errores)
+        if not registros:
+            log.error("El CSV no contiene filas válidas. Abortando.")
+            if import_id:
+                await finish_import(
+                    db, import_id, status="error",
+                    error_message="CSV sin filas válidas",
+                )
             sys.exit(1)
-        rellenadas = 0
-        for r in registros:
-            if not r.get("nif_titular"):
+
+        # --soc-override: rellena nif_titular para filas sin Soc/sin nif
+        if args.soc_override and origen:
+            soc = str(args.soc_override).strip()
+            catalogo_local = await _cargar_catalogo_sociedades()
+            mapping = catalogo_local.get(soc)
+            if not mapping:
+                log.error(
+                    "--soc-override=%s no está en el catálogo (%s). "
+                    "Añádelo con PUT /api/admin/sociedades.",
+                    soc, list(catalogo_local.keys()),
+                )
+                if import_id:
+                    await finish_import(
+                        db, import_id, status="error",
+                        error_message=f"soc_override {soc} no está en el catálogo",
+                    )
+                sys.exit(1)
+            rellenadas = 0
+            for r in registros:
+                if not r.get("nif_titular"):
+                    r["nif_titular"] = mapping["nif_titular"]
+                    r["nombre_titular"] = mapping["nombre_titular"]
+                    r["soc_origen"] = soc
+                    rellenadas += 1
+            log.info(
+                "Aplicado --soc-override=%s a %d/%d registros sin nif_titular.",
+                soc, rellenadas, len(registros),
+            )
+
+        # --nif-titular: fuerza directamente el NIF+nombre en TODAS las filas
+        # (más simple que --soc-override cuando la columna Soc. no es fiable).
+        if args.nif_titular:
+            nif_norm = args.nif_titular.strip().upper()
+            catalogo_local = await _cargar_catalogo_sociedades()
+            mapping = None
+            for _soc, info in catalogo_local.items():
+                if info.get("nif_titular") == nif_norm:
+                    mapping = info
+                    break
+            if not mapping:
+                log.error(
+                    "--nif-titular=%s no está en el catálogo. NIFs válidos: %s",
+                    nif_norm,
+                    sorted({v["nif_titular"] for v in catalogo_local.values()}),
+                )
+                if import_id:
+                    await finish_import(
+                        db, import_id, status="error",
+                        error_message=f"nif_titular {nif_norm} no está en el catálogo",
+                    )
+                sys.exit(1)
+            for r in registros:
                 r["nif_titular"] = mapping["nif_titular"]
-                r["nombre_titular"] = mapping["nombre_titular"]
-                r["soc_origen"] = soc
-                rellenadas += 1
-        log.info(
-            "Aplicado --soc-override=%s a %d/%d registros sin nif_titular.",
-            soc, rellenadas, len(registros),
-        )
-
-    # --nif-titular: fuerza directamente el NIF+nombre en TODAS las filas
-    # (más simple que --soc-override cuando la columna Soc. no es fiable).
-    if args.nif_titular:
-        nif_norm = args.nif_titular.strip().upper()
-        catalogo_local = await _cargar_catalogo_sociedades()
-        mapping = None
-        for _soc, info in catalogo_local.items():
-            if info.get("nif_titular") == nif_norm:
-                mapping = info
-                break
-        if not mapping:
-            log.error(
-                "--nif-titular=%s no está en el catálogo. NIFs válidos: %s",
-                nif_norm,
-                sorted({v["nif_titular"] for v in catalogo_local.values()}),
+                r["nombre_titular"] = mapping.get("nombre_titular") or ""
+            log.info(
+                "Aplicado --nif-titular=%s (%s) a TODAS las %d filas.",
+                nif_norm, mapping.get("nombre_titular") or "", len(registros),
             )
-            sys.exit(1)
-        for r in registros:
-            r["nif_titular"] = mapping["nif_titular"]
-            r["nombre_titular"] = mapping.get("nombre_titular") or ""
+
+        if args.dry_run:
+            log.info(
+                "[DRY-RUN] Se habrían upserteado %d documentos en facturas_comercial.",
+                len(registros),
+            )
+            return
+
+        log.info("Insertando %d documentos en facturas_comercial…", len(registros))
+        resumen = await bulk_upsert(
+            db, "facturas_comercial", registros,
+            fuente="cli_comercial",
+            log=log,
+            batch_size=args.batch_size,
+            import_id=import_id,
+        )
+        rate = resumen["procesadas"] / resumen["duracion_s"] if resumen["duracion_s"] > 0 else 0
         log.info(
-            "Aplicado --nif-titular=%s (%s) a TODAS las %d filas.",
-            nif_norm, mapping.get("nombre_titular") or "", len(registros),
+            "✅ Carga completada · procesadas=%d · insertadas_nuevas=%d · "
+            "actualizadas=%d · duración=%.1f s · %.0f docs/s",
+            resumen["procesadas"], resumen["insertadas"],
+            resumen["modificadas"], resumen["duracion_s"], rate,
         )
 
-    if args.dry_run:
-        log.info(
-            "[DRY-RUN] Se habrían upserteado %d documentos en facturas_comercial.",
-            len(registros),
-        )
-        return
+        if import_id:
+            await finish_import(
+                db, import_id, status="done",
+                total_procesados=resumen["procesadas"],
+                insertados=resumen["insertadas"],
+                actualizados=resumen["modificadas"],
+                extra={"origen_detectado": origen},
+            )
 
-    log.info("Insertando %d documentos en facturas_comercial…", len(registros))
-    resumen = await bulk_upsert(
-        db, "facturas_comercial", registros,
-        fuente="cli_comercial",
-        log=log,
-        batch_size=args.batch_size,
-    )
-    rate = resumen["procesadas"] / resumen["duracion_s"] if resumen["duracion_s"] > 0 else 0
-    log.info(
-        "✅ Carga completada · procesadas=%d · insertadas_nuevas=%d · "
-        "actualizadas=%d · duración=%.1f s · %.0f docs/s",
-        resumen["procesadas"], resumen["insertadas"],
-        resumen["modificadas"], resumen["duracion_s"], rate,
-    )
-
-    cleanup_csv(args.csv, not args.keep_csv, log)
+        cleanup_csv(args.csv, not args.keep_csv, log)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if import_id:
+            await finish_import(
+                db, import_id, status="error",
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
+        raise
 
 
 def main():

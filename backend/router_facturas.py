@@ -26,7 +26,12 @@ import io
 import time
 import uuid
 
-from auth import require_permission
+from auth import get_current_user, require_permission
+from imports_log import (
+    add_import_errors,
+    finish_import,
+    start_import,
+)
 
 from factura_model import (
     CAMPOS_CANONICOS,
@@ -86,6 +91,9 @@ async def cleanup_orphan_jobs():
         await _db.facturas_comercial.create_index([("ejercicio", 1), ("periodo", 1)])
         await _db.jobs.create_index("id", unique=True)
         await _db.jobs.create_index([("status", 1), ("created_at", -1)])
+        # Audit trail — índices para el listado/filtros del historial de imports.
+        from imports_log import ensure_indexes as _audit_indexes  # noqa: WPS433
+        await _audit_indexes(_db)
     except Exception:  # noqa: BLE001
         _logger.exception("No se pudieron crear los índices al arranque")
 
@@ -885,6 +893,7 @@ async def conciliar_newman_importar(
     nombre_titular: str = Form(""),
     ejercicio: Optional[str] = Form(None),
     periodo: Optional[str] = Form(None),
+    user: dict = Depends(get_current_user),
 ):
     """Igual que `/sii/conciliar-newman` pero INSERTA en `facturas_sii` las
     facturas del CSV que no estén ya en BD. Usa `upsert_facturas_bulk` con
@@ -896,68 +905,106 @@ async def conciliar_newman_importar(
     if not contenido:
         raise HTTPException(400, "El CSV está vacío")
 
-    filas, errores, _debug = _parsear_csv_newman(contenido, nif_titular, nombre_titular or "")
-    if not filas:
-        raise HTTPException(
-            400, f"No se pudieron extraer filas válidas del CSV. Errores: {errores[:3]}"
+    import_id = await start_import(
+        _db,
+        origen="sii",
+        fuente="conciliacion_newman",
+        file_name=file.filename,
+        file_size_bytes=len(contenido),
+        user_id=user.get("_id") or user.get("id"),
+        user_email=user.get("email"),
+        nif_titular=nif_titular,
+        ejercicio=ejercicio,
+        periodo=periodo,
+    )
+
+    try:
+        filas, errores, _debug = _parsear_csv_newman(contenido, nif_titular, nombre_titular or "")
+        if not filas:
+            raise HTTPException(
+                400, f"No se pudieron extraer filas válidas del CSV. Errores: {errores[:3]}"
+            )
+
+        # Mismo relleno por herencia que en /sii/conciliar-newman.
+        periodo_norm_in = _norm_periodo(periodo) if periodo else ""
+        for f in filas:
+            if ejercicio and not f.get("ejercicio"):
+                f["ejercicio"] = str(ejercicio)
+            if periodo_norm_in and not f.get("periodo"):
+                f["periodo"] = periodo_norm_in
+
+        if ejercicio:
+            filas = [f for f in filas if str(f.get("ejercicio", "")) == str(ejercicio)]
+        if periodo:
+            filas = [f for f in filas if _norm_periodo(f.get("periodo")) == periodo_norm_in]
+
+        num_series_csv = [f["num_serie_factura"] for f in filas]
+
+        base_filtro_bd: dict = {"nif_titular": nif_titular}
+        if ejercicio:
+            base_filtro_bd["ejercicio"] = str(ejercicio)
+        if periodo:
+            periodo_norm = _norm_periodo(periodo)
+            base_filtro_bd["periodo"] = {"$in": [periodo_norm, str(int(periodo_norm)) if periodo_norm.isdigit() else periodo_norm]}
+
+        # Trocea la query existencial: MongoDB limita las queries a 16MB de BSON.
+        # Con un `$in` de cientos de miles de num_serie_factura el filtro supera ese
+        # límite y devuelve DocumentTooLarge. Procesamos en chunks de 20k.
+        NS_CHUNK = 20_000
+        existentes: set[str] = set()
+        for i in range(0, len(num_series_csv), NS_CHUNK):
+            chunk_ns = num_series_csv[i : i + NS_CHUNK]
+            filtro_bd = dict(base_filtro_bd)
+            filtro_bd["num_serie_factura"] = {"$in": chunk_ns}
+            async for d in _db.facturas_sii.find(filtro_bd, {"_id": 0, "num_serie_factura": 1}):
+                existentes.add(d["num_serie_factura"])
+
+        faltantes = [f for f in filas if f["num_serie_factura"] not in existentes]
+
+        if faltantes:
+            # Insertamos por lotes de 2000 para no inflar memoria con CSVs grandes.
+            batch_size = 2000
+            insertadas = 0
+            for i in range(0, len(faltantes), batch_size):
+                chunk = faltantes[i : i + batch_size]
+                await upsert_facturas_bulk(
+                    "facturas_sii", chunk, "conciliacion_newman"
+                )
+                insertadas += len(chunk)
+        else:
+            insertadas = 0
+
+        if errores:
+            await add_import_errors(_db, import_id, errores)
+
+        await finish_import(
+            _db, import_id, status="done",
+            total_procesados=len(filas),
+            insertados=insertadas,
+            actualizados=0,
+            extra={"ya_en_bd": len(existentes)},
         )
 
-    # Mismo relleno por herencia que en /sii/conciliar-newman.
-    periodo_norm_in = _norm_periodo(periodo) if periodo else ""
-    for f in filas:
-        if ejercicio and not f.get("ejercicio"):
-            f["ejercicio"] = str(ejercicio)
-        if periodo_norm_in and not f.get("periodo"):
-            f["periodo"] = periodo_norm_in
-
-    if ejercicio:
-        filas = [f for f in filas if str(f.get("ejercicio", "")) == str(ejercicio)]
-    if periodo:
-        filas = [f for f in filas if _norm_periodo(f.get("periodo")) == periodo_norm_in]
-
-    num_series_csv = [f["num_serie_factura"] for f in filas]
-
-    base_filtro_bd: dict = {"nif_titular": nif_titular}
-    if ejercicio:
-        base_filtro_bd["ejercicio"] = str(ejercicio)
-    if periodo:
-        periodo_norm = _norm_periodo(periodo)
-        base_filtro_bd["periodo"] = {"$in": [periodo_norm, str(int(periodo_norm)) if periodo_norm.isdigit() else periodo_norm]}
-
-    # Trocea la query existencial: MongoDB limita las queries a 16MB de BSON.
-    # Con un `$in` de cientos de miles de num_serie_factura el filtro supera ese
-    # límite y devuelve DocumentTooLarge. Procesamos en chunks de 20k.
-    NS_CHUNK = 20_000
-    existentes: set[str] = set()
-    for i in range(0, len(num_series_csv), NS_CHUNK):
-        chunk_ns = num_series_csv[i : i + NS_CHUNK]
-        filtro_bd = dict(base_filtro_bd)
-        filtro_bd["num_serie_factura"] = {"$in": chunk_ns}
-        async for d in _db.facturas_sii.find(filtro_bd, {"_id": 0, "num_serie_factura": 1}):
-            existentes.add(d["num_serie_factura"])
-
-    faltantes = [f for f in filas if f["num_serie_factura"] not in existentes]
-
-    if faltantes:
-        # Insertamos por lotes de 2000 para no inflar memoria con CSVs grandes.
-        batch_size = 2000
-        insertadas = 0
-        for i in range(0, len(faltantes), batch_size):
-            chunk = faltantes[i : i + batch_size]
-            await upsert_facturas_bulk(
-                "facturas_sii", chunk, "conciliacion_newman"
-            )
-            insertadas += len(chunk)
-    else:
-        insertadas = 0
-
-    return {
-        "filtro": {"nif_titular": nif_titular, "ejercicio": ejercicio, "periodo": periodo},
-        "total_csv": len(filas),
-        "ya_en_bd": len(existentes),
-        "insertadas": insertadas,
-        "errores_csv": errores[:50],
-    }
+        return {
+            "filtro": {"nif_titular": nif_titular, "ejercicio": ejercicio, "periodo": periodo},
+            "total_csv": len(filas),
+            "ya_en_bd": len(existentes),
+            "insertadas": insertadas,
+            "errores_csv": errores[:50],
+            "import_id": import_id,
+        }
+    except HTTPException as exc:
+        await finish_import(
+            _db, import_id, status="error",
+            error_message=f"HTTP {exc.status_code}: {exc.detail}",
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await finish_import(
+            _db, import_id, status="error",
+            error_message=f"{type(exc).__name__}: {exc}",
+        )
+        raise
 
 
 async def _ejecutar_importar_faltantes_job(
@@ -967,12 +1014,14 @@ async def _ejecutar_importar_faltantes_job(
     nombre_titular: str,
     ejercicio: Optional[str],
     periodo: Optional[str],
+    import_id: Optional[str] = None,
 ) -> None:
     """Worker en background del import masivo desde CSV Newman.
 
     Actualiza `jobs[job_id].progress.{processed, total, phase}` y `status`.
     Reusa la misma lógica del endpoint síncrono pero sin restricción de tiempo
-    HTTP (Cloudflare corta a ~100s).
+    HTTP (Cloudflare corta a ~100s). Si `import_id` viene informado, cierra
+    también el audit trail (`imports_log`) al terminar.
     """
     try:
         await _db.jobs.update_one(
@@ -1074,12 +1123,24 @@ async def _ejecutar_importar_faltantes_job(
                     "ya_en_bd": len(existentes),
                     "insertadas": insertadas,
                     "errores_csv": errores[:50],
+                    "import_id": import_id,
                 },
                 "finished_at": _now_iso(),
                 "updated_at": _now_iso(),
                 "progress.phase": "done",
             }},
         )
+
+        if import_id:
+            if errores:
+                await add_import_errors(_db, import_id, errores)
+            await finish_import(
+                _db, import_id, status="done",
+                total_procesados=len(filas),
+                insertados=insertadas,
+                actualizados=0,
+                extra={"ya_en_bd": len(existentes)},
+            )
     except Exception as e:  # noqa: BLE001
         await _db.jobs.update_one(
             {"id": job_id},
@@ -1090,6 +1151,11 @@ async def _ejecutar_importar_faltantes_job(
                 "updated_at": _now_iso(),
             }},
         )
+        if import_id:
+            await finish_import(
+                _db, import_id, status="error",
+                error_message=f"{type(e).__name__}: {e}",
+            )
 
 
 @router.post("/sii/conciliar-newman/importar-faltantes-async")
@@ -1099,6 +1165,7 @@ async def conciliar_newman_importar_async(
     nombre_titular: str = Form(""),
     ejercicio: Optional[str] = Form(None),
     periodo: Optional[str] = Form(None),
+    user: dict = Depends(get_current_user),
 ):
     """Versión asíncrona de `/importar-faltantes`. Encola un job en background
     y devuelve un `job_id` que el cliente consulta con `GET /api/jobs/{id}`.
@@ -1143,6 +1210,23 @@ async def conciliar_newman_importar_async(
         raise
 
     job_id = uuid.uuid4().hex
+
+    # Audit trail: creamos el registro AHORA para que el usuario pueda ver la
+    # importación en curso desde el historial mientras el worker corre.
+    import_id = await start_import(
+        _db,
+        origen="sii",
+        fuente="conciliacion_newman_async",
+        file_name=file.filename,
+        file_size_bytes=total_bytes,
+        user_id=user.get("_id") or user.get("id"),
+        user_email=user.get("email"),
+        nif_titular=nif_titular,
+        ejercicio=ejercicio,
+        periodo=periodo,
+        job_id=job_id,
+    )
+
     job_doc = {
         "id": job_id,
         "type": "conciliar-newman-import",
@@ -1161,6 +1245,7 @@ async def conciliar_newman_importar_async(
             "periodo": periodo,
             "file_size_bytes": total_bytes,
             "tmp_path": tmp.name,
+            "import_id": import_id,
         },
         "result": None,
         "error_message": None,
@@ -1174,9 +1259,10 @@ async def conciliar_newman_importar_async(
     asyncio.create_task(
         _ejecutar_importar_faltantes_job_desde_disco(
             job_id, tmp.name, nif_titular, nombre_titular, ejercicio, periodo,
+            import_id=import_id,
         ),
     )
-    return {"job_id": job_id, "status": "queued", "file_size_bytes": total_bytes}
+    return {"job_id": job_id, "status": "queued", "file_size_bytes": total_bytes, "import_id": import_id}
 
 
 async def _ejecutar_importar_faltantes_job_desde_disco(
@@ -1186,6 +1272,7 @@ async def _ejecutar_importar_faltantes_job_desde_disco(
     nombre_titular: str,
     ejercicio: Optional[str],
     periodo: Optional[str],
+    import_id: Optional[str] = None,
 ):
     """Wrapper del worker original que primero carga el CSV desde el fichero
     temporal y luego delega en `_ejecutar_importar_faltantes_job`. Garantiza
@@ -1198,6 +1285,7 @@ async def _ejecutar_importar_faltantes_job_desde_disco(
             contenido = f.read()
         await _ejecutar_importar_faltantes_job(
             job_id, contenido, nif_titular, nombre_titular, ejercicio, periodo,
+            import_id=import_id,
         )
     finally:
         try:
@@ -1850,6 +1938,7 @@ async def csv_template_comercial():
 async def upload_csv_comercial(
     file: UploadFile = File(...),
     nif_titular_override: Optional[str] = Form(None),
+    user: dict = Depends(get_current_user),
 ):
     """Sube un fichero comercial (SAP FI, SIGLO o CSV genérico) y lo guarda
     en `facturas_comercial`.
@@ -1870,84 +1959,129 @@ async def upload_csv_comercial(
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
 
-    # Si viene override, lo validamos AHORA (antes del parseo) para dar
-    # feedback rápido al usuario si el NIF no está en el catálogo.
-    override_info: Optional[dict] = None
-    if nif_titular_override:
-        nif_norm = nif_titular_override.strip().upper()
-        catalogo = await _cargar_catalogo_sociedades()
-        # Buscamos el mapping por NIF en el catálogo (los seeds están indexados
-        # por soc, no por NIF, así que hacemos búsqueda inversa).
-        for _soc, info in catalogo.items():
-            if info.get("nif_titular") == nif_norm:
-                override_info = {
-                    "nif_titular": nif_norm,
-                    "nombre_titular": info.get("nombre_titular") or "",
-                }
-                break
-        if override_info is None:
-            raise HTTPException(
-                400,
-                f"nif_titular_override={nif_norm!r} no está en el catálogo. "
-                f"Añádelo con PUT /api/admin/sociedades antes de subir.",
+    # Audit trail — arrancamos el log ahora, lo cerraremos al final (finally).
+    import_id = await start_import(
+        _db,
+        origen="comercial",
+        fuente="ui_upload",
+        file_name=file.filename,
+        file_size_bytes=len(raw),
+        user_id=user.get("_id") or user.get("id"),
+        user_email=user.get("email"),
+        nif_titular=(nif_titular_override or "").strip().upper() or None,
+        extra={"nif_titular_override": bool(nif_titular_override)},
+    )
+
+    try:
+        # Si viene override, lo validamos AHORA (antes del parseo) para dar
+        # feedback rápido al usuario si el NIF no está en el catálogo.
+        override_info: Optional[dict] = None
+        if nif_titular_override:
+            nif_norm = nif_titular_override.strip().upper()
+            catalogo = await _cargar_catalogo_sociedades()
+            # Buscamos el mapping por NIF en el catálogo (los seeds están indexados
+            # por soc, no por NIF, así que hacemos búsqueda inversa).
+            for _soc, info in catalogo.items():
+                if info.get("nif_titular") == nif_norm:
+                    override_info = {
+                        "nif_titular": nif_norm,
+                        "nombre_titular": info.get("nombre_titular") or "",
+                    }
+                    break
+            if override_info is None:
+                raise HTTPException(
+                    400,
+                    f"nif_titular_override={nif_norm!r} no está en el catálogo. "
+                    f"Añádelo con PUT /api/admin/sociedades antes de subir.",
+                )
+
+        # Detecta automáticamente el formato del report (SAP FI o SIGLO) por la
+        # firma de cabeceras. Si no coincide ninguno, cae al parser CSV genérico.
+        origen_detectado = _detectar_formato_tabular(text)
+        if origen_detectado:
+            catalogo = await _cargar_catalogo_sociedades()
+            registros, errores = _parsear_report_tabular(
+                text, origen_detectado, catalogo_sociedades=catalogo,
+            )
+        else:
+            registros, errores = _parsear_csv_generico(text)
+
+        # Aplicar el override si se pidió — reemplaza nif/nombre en TODAS las
+        # filas parseadas (incluyendo las que ya tenían un mapping desde Soc.).
+        # También limpia el aviso "Sociedades no mapeadas" del report de errores
+        # porque en modo override, la columna Soc. NO es la fuente de verdad.
+        if override_info:
+            for r in registros:
+                r["nif_titular"] = override_info["nif_titular"]
+                r["nombre_titular"] = override_info["nombre_titular"]
+            errores = [
+                e for e in errores
+                if not (
+                    e.get("fila") == -1
+                    and "no encontradas en el catálogo" in e.get("motivo", "")
+                )
+            ]
+
+        total = 0
+        for norm in registros:
+            try:
+                FacturaDatos(**norm)
+            except Exception as e:  # noqa: BLE001
+                errores.append({
+                    "fila": -1,
+                    "num_serie_factura": norm.get("num_serie_factura"),
+                    "motivo": str(e),
+                })
+                continue
+            await upsert_factura("facturas_comercial", norm, "csv_comercial")
+            total += 1
+
+        # Persistir errores en el audit trail (recortados a 100 en el módulo).
+        if errores:
+            await add_import_errors(_db, import_id, errores)
+
+        # Tras importar, hacemos match con facturas_sii y devolvemos un mini
+        # resumen para que el frontend muestre el resultado de la comparativa.
+        nums = [r["num_serie_factura"] for r in registros if r.get("num_serie_factura")]
+        matched_count = 0
+        if nums:
+            matched_count = await _db.facturas_sii.count_documents(
+                {"num_serie_factura": {"$in": nums}}
             )
 
-    # Detecta automáticamente el formato del report (SAP FI o SIGLO) por la
-    # firma de cabeceras. Si no coincide ninguno, cae al parser CSV genérico.
-    origen_detectado = _detectar_formato_tabular(text)
-    if origen_detectado:
-        catalogo = await _cargar_catalogo_sociedades()
-        registros, errores = _parsear_report_tabular(
-            text, origen_detectado, catalogo_sociedades=catalogo,
+        await finish_import(
+            _db, import_id,
+            status="done",
+            total_procesados=total,
+            insertados=total,  # upserts individuales, no distinguimos insert/update aquí
+            actualizados=0,
+            extra={
+                "origen_detectado": origen_detectado,
+                "matches_sii": matched_count,
+                "sin_match_sii": max(0, len(nums) - matched_count),
+            },
         )
-    else:
-        registros, errores = _parsear_csv_generico(text)
 
-    # Aplicar el override si se pidió — reemplaza nif/nombre en TODAS las
-    # filas parseadas (incluyendo las que ya tenían un mapping desde Soc.).
-    # También limpia el aviso "Sociedades no mapeadas" del report de errores
-    # porque en modo override, la columna Soc. NO es la fuente de verdad.
-    if override_info:
-        for r in registros:
-            r["nif_titular"] = override_info["nif_titular"]
-            r["nombre_titular"] = override_info["nombre_titular"]
-        errores = [
-            e for e in errores
-            if not (
-                e.get("fila") == -1
-                and "no encontradas en el catálogo" in e.get("motivo", "")
-            )
-        ]
-
-    total = 0
-    for norm in registros:
-        try:
-            FacturaDatos(**norm)
-        except Exception as e:  # noqa: BLE001
-            errores.append({
-                "fila": -1,
-                "num_serie_factura": norm.get("num_serie_factura"),
-                "motivo": str(e),
-            })
-            continue
-        await upsert_factura("facturas_comercial", norm, "csv_comercial")
-        total += 1
-
-    # Tras importar, hacemos match con facturas_sii y devolvemos un mini
-    # resumen para que el frontend muestre el resultado de la comparativa.
-    nums = [r["num_serie_factura"] for r in registros if r.get("num_serie_factura")]
-    matched_count = 0
-    if nums:
-        matched_count = await _db.facturas_sii.count_documents(
-            {"num_serie_factura": {"$in": nums}}
+        return {
+            "total": total,
+            "errores": errores,
+            "origen": origen_detectado,
+            "matches_sii": matched_count,
+            "sin_match_sii": max(0, len(nums) - matched_count),
+            "import_id": import_id,
+        }
+    except HTTPException as exc:
+        await finish_import(
+            _db, import_id, status="error",
+            error_message=f"HTTP {exc.status_code}: {exc.detail}",
         )
-    return {
-        "total": total,
-        "errores": errores,
-        "origen": origen_detectado,
-        "matches_sii": matched_count,
-        "sin_match_sii": max(0, len(nums) - matched_count),
-    }
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await finish_import(
+            _db, import_id, status="error",
+            error_message=f"{type(exc).__name__}: {exc}",
+        )
+        raise
 
 
 def _parsear_csv_generico(text: str) -> tuple[list[dict], list[dict]]:
@@ -3303,6 +3437,7 @@ async def _ejecutar_consulta_mensual_job(
     start_clave: Optional[dict] = None,
     start_pagina: int = 0,
     start_invoices: int = 0,
+    import_id: Optional[str] = None,
 ):
     """Worker que ejecuta la consulta mensual en background y va actualizando
     el documento del job en Mongo."""
@@ -3418,6 +3553,15 @@ async def _ejecutar_consulta_mensual_job(
                 },
             }},
         )
+        if import_id:
+            await finish_import(
+                _db, import_id,
+                status="done" if final_status == "completed" else "error",
+                total_procesados=len(facturas),
+                insertados=len(facturas),
+                actualizados=0,
+                error_message=None if final_status == "completed" else "Cancelado por el usuario",
+            )
     except Exception as exc:  # noqa: BLE001
         await _db.jobs.update_one(
             {"id": job_id},
@@ -3427,6 +3571,11 @@ async def _ejecutar_consulta_mensual_job(
                 "error_message": str(exc)[:2000],
             }},
         )
+        if import_id:
+            await finish_import(
+                _db, import_id, status="error",
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
     finally:
         log_entry["duration_ms"] = int(
             (datetime.now(timezone.utc) - start_ts).total_seconds() * 1000
@@ -3449,6 +3598,7 @@ async def consulta_mensual_async(
     cert_password: Optional[str] = Form(None),
     certificate: Optional[UploadFile] = File(None),
     max_paginas: Optional[int] = Form(None),
+    user: dict = Depends(get_current_user),
 ):
     """Versión asíncrona de la consulta mensual.
 
@@ -3462,6 +3612,22 @@ async def consulta_mensual_async(
         if not cert_bytes:
             cert_bytes = None
     job_id = uuid.uuid4().hex
+
+    import_id = await start_import(
+        _db,
+        origen="sii",
+        fuente="consulta_mensual_aeat",
+        file_name=None,
+        file_size_bytes=None,
+        user_id=user.get("_id") or user.get("id"),
+        user_email=user.get("email"),
+        nif_titular=nif_titular,
+        ejercicio=ejercicio,
+        periodo=periodo,
+        job_id=job_id,
+        extra={"entorno": entorno, "max_paginas": max_paginas},
+    )
+
     job_doc = {
         "id": job_id,
         "type": "consulta-mensual",
@@ -3474,6 +3640,7 @@ async def consulta_mensual_async(
             "periodo": periodo,
             "entorno": entorno,
             "max_paginas": max_paginas,
+            "import_id": import_id,
         },
         "result": None,
         "error_message": None,
@@ -3489,9 +3656,10 @@ async def consulta_mensual_async(
         _ejecutar_consulta_mensual_job(
             job_id, cert_bytes, cert_password, nif_titular, nombre_titular,
             ejercicio, periodo, entorno, max_paginas,
+            import_id=import_id,
         )
     )
-    return {"job_id": job_id, "status": "queued"}
+    return {"job_id": job_id, "status": "queued", "import_id": import_id}
 
 
 @router.get("/jobs/{job_id}")

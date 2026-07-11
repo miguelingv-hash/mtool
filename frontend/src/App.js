@@ -20,6 +20,7 @@ import ForgotPassword from "@/pages/ForgotPassword";
 import AdminUsuarios from "@/pages/AdminUsuarios";
 import AdminRoles from "@/pages/AdminRoles";
 import AdminMantenimiento from "@/pages/AdminMantenimiento";
+import AdminImportsLog from "@/pages/AdminImportsLog";
 import TasasPanel from "@/pages/tasas/TasasPanel";
 import TasasTasas from "@/pages/tasas/TasasTasas";
 import TasasMunicipios from "@/pages/tasas/TasasMunicipios";
@@ -63,6 +64,7 @@ function App() {
               <Route path="/admin/usuarios" element={<ProtectedRoute requires="users.manage"><AdminUsuarios /></ProtectedRoute>} />
               <Route path="/admin/roles" element={<ProtectedRoute requires="roles.manage"><AdminRoles /></ProtectedRoute>} />
               <Route path="/admin/mantenimiento" element={<ProtectedRoute requires="sii.wipe"><AdminMantenimiento /></ProtectedRoute>} />
+              <Route path="/admin/imports-log" element={<ProtectedRoute requires="audit.view"><AdminImportsLog /></ProtectedRoute>} />
             </Route>
           </Routes>
         </BrowserRouter>

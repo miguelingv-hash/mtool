@@ -112,106 +112,164 @@ async def main_async(args):
     # 2. Parser Newman (reutiliza el del backend)
     # ------------------------------------------------------------------
     from router_facturas import _parsear_csv_newman, init  # noqa: E402
+    from imports_log import (  # noqa: E402
+        add_import_errors,
+        finish_import,
+        start_import,
+    )
 
     db = get_mongo_db()
     init(db, log)  # inyecta _db en router_facturas para que parsers internos lo vean
 
-    log.info("Leyendo CSV en memoria…")
-    with args.csv.open("rb") as f:
-        contenido = f.read()
-
-    log.info("Parseando CSV (~%.1f MB)…", csv_size_mb)
-    filas, errores, debug = _parsear_csv_newman(
-        contenido, args.nif_titular, args.nombre or "",
-    )
-    log.info(
-        "Parseo OK · filas válidas=%d · errores=%d · debug=%s",
-        len(filas), len(errores), debug,
-    )
-    if errores:
-        log.warning("Primeros errores (máx 5):")
-        for e in errores[:5]:
-            log.warning("  %s", e)
-    if not filas:
-        log.error("El CSV no contiene filas válidas. Abortando.")
-        sys.exit(1)
-
-    # Relleno de ejercicio/periodo si el usuario lo aporta y el parser no lo
-    # pudo inferir de la fecha (algunos exports Newman no lo traen).
-    if args.ejercicio:
-        for f in filas:
-            f.setdefault("ejercicio", args.ejercicio)
-            if not f.get("ejercicio"):
-                f["ejercicio"] = args.ejercicio
-    if args.periodo:
-        for f in filas:
-            f.setdefault("periodo", args.periodo)
-            if not f.get("periodo"):
-                f["periodo"] = args.periodo
-
-    # ------------------------------------------------------------------
-    # 3. Filtro --only-faltantes (consulta BD antes)
-    # ------------------------------------------------------------------
-    if args.only_faltantes:
-        nums = [f["num_serie_factura"] for f in filas if f.get("num_serie_factura")]
-        log.info(
-            "Modo --only-faltantes: consultando cuáles de las %d facturas "
-            "ya existen en facturas_sii…",
-            len(nums),
+    # Audit trail: sólo si NO es dry-run (no queremos ensuciar el log con runs
+    # de prueba). Si es dry-run, `import_id` queda a None y todos los helpers
+    # se convierten en no-ops.
+    import_id = None
+    if not args.dry_run:
+        import_id = await start_import(
+            db,
+            origen="sii",
+            fuente="cli_newman",
+            file_name=str(args.csv),
+            file_size_bytes=args.csv.stat().st_size,
+            user_id=None,
+            user_email="CLI",
+            nif_titular=args.nif_titular,
+            ejercicio=args.ejercicio,
+            periodo=args.periodo,
+            extra={"only_faltantes": bool(args.only_faltantes)},
         )
-        existentes = set()
-        # Chunk de 5000 para no superar el límite de tamaño del operador $in.
-        for i in range(0, len(nums), 5000):
-            chunk = nums[i : i + 5000]
-            cursor = db.facturas_sii.find(
-                {"num_serie_factura": {"$in": chunk}},
-                {"num_serie_factura": 1, "_id": 0},
-            )
-            async for d in cursor:
-                existentes.add(d["num_serie_factura"])
-        antes = len(filas)
-        filas = [f for f in filas if f["num_serie_factura"] not in existentes]
-        log.info(
-            "Filtradas %d → %d filas (descartadas %d ya presentes en BD).",
-            antes, len(filas), antes - len(filas),
+
+    try:
+        log.info("Leyendo CSV en memoria…")
+        with args.csv.open("rb") as f:
+            contenido = f.read()
+
+        log.info("Parseando CSV (~%.1f MB)…", csv_size_mb)
+        filas, errores, debug = _parsear_csv_newman(
+            contenido, args.nif_titular, args.nombre or "",
         )
+        log.info(
+            "Parseo OK · filas válidas=%d · errores=%d · debug=%s",
+            len(filas), len(errores), debug,
+        )
+        if errores:
+            log.warning("Primeros errores (máx 5):")
+            for e in errores[:5]:
+                log.warning("  %s", e)
+            if import_id:
+                await add_import_errors(db, import_id, errores)
         if not filas:
-            log.info("Nada que importar — todas las facturas ya están en BD.")
-            cleanup_csv(args.csv, not args.keep_csv, log)
+            log.error("El CSV no contiene filas válidas. Abortando.")
+            if import_id:
+                await finish_import(
+                    db, import_id, status="error",
+                    error_message="CSV sin filas válidas",
+                )
+            sys.exit(1)
+
+        # Relleno de ejercicio/periodo si el usuario lo aporta y el parser no lo
+        # pudo inferir de la fecha (algunos exports Newman no lo traen).
+        if args.ejercicio:
+            for f in filas:
+                f.setdefault("ejercicio", args.ejercicio)
+                if not f.get("ejercicio"):
+                    f["ejercicio"] = args.ejercicio
+        if args.periodo:
+            for f in filas:
+                f.setdefault("periodo", args.periodo)
+                if not f.get("periodo"):
+                    f["periodo"] = args.periodo
+
+        # ------------------------------------------------------------------
+        # 3. Filtro --only-faltantes (consulta BD antes)
+        # ------------------------------------------------------------------
+        if args.only_faltantes:
+            nums = [f["num_serie_factura"] for f in filas if f.get("num_serie_factura")]
+            log.info(
+                "Modo --only-faltantes: consultando cuáles de las %d facturas "
+                "ya existen en facturas_sii…",
+                len(nums),
+            )
+            existentes = set()
+            # Chunk de 5000 para no superar el límite de tamaño del operador $in.
+            for i in range(0, len(nums), 5000):
+                chunk = nums[i : i + 5000]
+                cursor = db.facturas_sii.find(
+                    {"num_serie_factura": {"$in": chunk}},
+                    {"num_serie_factura": 1, "_id": 0},
+                )
+                async for d in cursor:
+                    existentes.add(d["num_serie_factura"])
+            antes = len(filas)
+            filas = [f for f in filas if f["num_serie_factura"] not in existentes]
+            log.info(
+                "Filtradas %d → %d filas (descartadas %d ya presentes en BD).",
+                antes, len(filas), antes - len(filas),
+            )
+            if not filas:
+                log.info("Nada que importar — todas las facturas ya están en BD.")
+                cleanup_csv(args.csv, not args.keep_csv, log)
+                if import_id:
+                    await finish_import(
+                        db, import_id, status="done",
+                        total_procesados=antes,
+                        insertados=0,
+                        actualizados=0,
+                        extra={"ya_en_bd": len(existentes)},
+                    )
+                return
+
+        # ------------------------------------------------------------------
+        # 4. Dry-run: cuenta y sale sin escribir
+        # ------------------------------------------------------------------
+        if args.dry_run:
+            log.info(
+                "[DRY-RUN] Se habrían upserteado %d documentos en facturas_sii. "
+                "No se ha tocado la BD.", len(filas),
+            )
             return
 
-    # ------------------------------------------------------------------
-    # 4. Dry-run: cuenta y sale sin escribir
-    # ------------------------------------------------------------------
-    if args.dry_run:
-        log.info(
-            "[DRY-RUN] Se habrían upserteado %d documentos en facturas_sii. "
-            "No se ha tocado la BD.", len(filas),
+        # ------------------------------------------------------------------
+        # 5. Bulk upsert
+        # ------------------------------------------------------------------
+        log.info("Insertando %d documentos en facturas_sii…", len(filas))
+        resumen = await bulk_upsert(
+            db, "facturas_sii", filas,
+            fuente="cli_newman_sii",
+            log=log,
+            batch_size=args.batch_size,
+            import_id=import_id,
         )
-        return
+        rate = resumen["procesadas"] / resumen["duracion_s"] if resumen["duracion_s"] > 0 else 0
+        log.info(
+            "✅ Carga completada · procesadas=%d · insertadas_nuevas=%d · "
+            "actualizadas=%d · duración=%.1f s · %.0f docs/s",
+            resumen["procesadas"], resumen["insertadas"],
+            resumen["modificadas"], resumen["duracion_s"], rate,
+        )
 
-    # ------------------------------------------------------------------
-    # 5. Bulk upsert
-    # ------------------------------------------------------------------
-    log.info("Insertando %d documentos en facturas_sii…", len(filas))
-    resumen = await bulk_upsert(
-        db, "facturas_sii", filas,
-        fuente="cli_newman_sii",
-        log=log,
-        batch_size=args.batch_size,
-    )
-    rate = resumen["procesadas"] / resumen["duracion_s"] if resumen["duracion_s"] > 0 else 0
-    log.info(
-        "✅ Carga completada · procesadas=%d · insertadas_nuevas=%d · "
-        "actualizadas=%d · duración=%.1f s · %.0f docs/s",
-        resumen["procesadas"], resumen["insertadas"],
-        resumen["modificadas"], resumen["duracion_s"], rate,
-    )
+        if import_id:
+            await finish_import(
+                db, import_id, status="done",
+                total_procesados=resumen["procesadas"],
+                insertados=resumen["insertadas"],
+                actualizados=resumen["modificadas"],
+            )
 
-    # ------------------------------------------------------------------
-    # 6. Limpieza del CSV
-    # ------------------------------------------------------------------
-    cleanup_csv(args.csv, not args.keep_csv, log)
+        # ------------------------------------------------------------------
+        # 6. Limpieza del CSV
+        # ------------------------------------------------------------------
+        cleanup_csv(args.csv, not args.keep_csv, log)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if import_id:
+            await finish_import(
+                db, import_id, status="error",
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
+        raise
 
 
 def main():
