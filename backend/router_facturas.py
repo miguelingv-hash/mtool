@@ -67,6 +67,83 @@ def _truncar_xml(xml: str) -> str:
 _db = None
 _logger = None
 
+# ---------------------------------------------------------------------------
+# Micro-cache in-memory para /comparativa (TTL corto)
+# ---------------------------------------------------------------------------
+# El endpoint /comparativa carga TODOS los docs de `facturas_comercial` en scope
+# para construir la vista (~14s con 485k docs). Al abrir la Comparativa el
+# frontend dispara múltiples peticiones simultáneas (por totales, resumen,
+# nifs, etc.) que se solapan y saturan el pod → 502 del ingress.
+#
+# Cache con TTL=15s por tupla de parámetros: si otra petición idéntica llega
+# dentro de la ventana, sirve del cache (instantáneo). Si llega mientras se
+# está calculando la primera, espera al Future en curso (single-flight).
+import asyncio as _asyncio  # alias para no chocar con otros imports
+_COMPARATIVA_CACHE: dict[tuple, tuple[float, object]] = {}
+_COMPARATIVA_INFLIGHT: dict[tuple, "_asyncio.Future"] = {}
+_COMPARATIVA_TTL_S = 15.0
+_COMPARATIVA_MAX_ENTRIES = 32  # LRU muy pequeño; queries típicas son pocas
+
+
+def _comparativa_cache_get(key: tuple):
+    """Devuelve el valor cacheado si está vigente, o None si expiró/no está."""
+    import time
+    ent = _COMPARATIVA_CACHE.get(key)
+    if not ent:
+        return None
+    ts, val = ent
+    if time.monotonic() - ts > _COMPARATIVA_TTL_S:
+        _COMPARATIVA_CACHE.pop(key, None)
+        return None
+    return val
+
+
+def _comparativa_cache_put(key: tuple, val):
+    """Persiste el valor en cache; recorta si excedemos el máximo."""
+    import time
+    if len(_COMPARATIVA_CACHE) >= _COMPARATIVA_MAX_ENTRIES:
+        # Evict la entrada más antigua (LRU aproximado por timestamp).
+        oldest = min(_COMPARATIVA_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _COMPARATIVA_CACHE.pop(oldest, None)
+    _COMPARATIVA_CACHE[key] = (time.monotonic(), val)
+
+
+def invalidate_comparativa_cache():
+    """Vaciamos el cache tras un import (los datos cambiaron)."""
+    _COMPARATIVA_CACHE.clear()
+
+
+async def _cached_or_compute(cache_key: tuple, compute_coro_factory):
+    """Helper genérico cache + single-flight para endpoints de comparativa.
+
+    - Si la key está en cache y vigente → devuelve el valor cacheado.
+    - Si hay una computación en vuelo con la misma key → aguarda a su Future.
+    - Si no → dispara la computación, guarda el resultado, lo devuelve.
+    """
+    import time
+    hit = _comparativa_cache_get(cache_key)
+    if hit is not None:
+        return hit
+    inflight = _COMPARATIVA_INFLIGHT.get(cache_key)
+    if inflight is not None:
+        return await inflight
+    fut: _asyncio.Future = _asyncio.get_event_loop().create_future()
+    _COMPARATIVA_INFLIGHT[cache_key] = fut
+    try:
+        t0 = time.monotonic()
+        result = await compute_coro_factory()
+        dur = time.monotonic() - t0
+        if _logger and dur > 3:
+            _logger.info("[cache-miss] key=%s dur=%.2fs", cache_key, dur)
+        _comparativa_cache_put(cache_key, result)
+        fut.set_result(result)
+        return result
+    except Exception as e:
+        fut.set_exception(e)
+        raise
+    finally:
+        _COMPARATIVA_INFLIGHT.pop(cache_key, None)
+
 
 def init(db, logger):
     global _db, _logger
@@ -89,6 +166,19 @@ async def cleanup_orphan_jobs():
         # consulta tarda > 25 s y el ingress devuelve 502.
         await _db.facturas_sii.create_index([("ejercicio", 1), ("periodo", 1)])
         await _db.facturas_comercial.create_index([("ejercicio", 1), ("periodo", 1)])
+        # Índice por nif_titular — el filtro más habitual de la comparativa.
+        # Con 485k+ docs en facturas_comercial, sin este índice el collscan
+        # tarda 6-14s por request y el frontend triggerea 502 en el ingress
+        # cuando dispara varias queries en paralelo al abrir la vista.
+        await _db.facturas_sii.create_index("nif_titular")
+        await _db.facturas_comercial.create_index("nif_titular")
+        # Compuesto para la query típica del listado principal.
+        await _db.facturas_sii.create_index([
+            ("nif_titular", 1), ("ejercicio", 1), ("periodo", 1),
+        ])
+        await _db.facturas_comercial.create_index([
+            ("nif_titular", 1), ("ejercicio", 1), ("periodo", 1),
+        ])
         await _db.jobs.create_index("id", unique=True)
         await _db.jobs.create_index([("status", 1), ("created_at", -1)])
         # Audit trail — índices para el listado/filtros del historial de imports.
@@ -169,6 +259,8 @@ async def upsert_factura(coleccion: str, datos: dict, fuente: str):
         update,
         upsert=True,
     )
+    # Los datos cambiaron → invalidamos el cache in-memory de /comparativa.
+    invalidate_comparativa_cache()
 
 
 async def upsert_facturas_bulk(coleccion: str, datos_list: list, fuente: str):
@@ -199,6 +291,7 @@ async def upsert_facturas_bulk(coleccion: str, datos_list: list, fuente: str):
         )
     if ops:
         await _db[coleccion].bulk_write(ops, ordered=False)
+        invalidate_comparativa_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -2994,7 +3087,43 @@ async def comparativa(
     pequeño) y sólo cargamos SII docs cuyo `num_serie` aparece en comercial.
     El estado `solo_sii` requiere escanear SII fuera del comercial y se
     pagina a nivel BD para no consumir memoria.
+
+    Micro-cache (TTL=15s + single-flight): con 485k docs comerciales el
+    procesamiento tarda 10-14s. Cuando el frontend dispara varias peticiones
+    concurrentes (múltiples pestañas, refresh rápido, componentes hijos
+    montándose en paralelo) las duplicadas se sirven de cache/aguardan al
+    Future en vuelo, evitando saturar el pod y el 502 del ingress.
     """
+    cache_key = (
+        "comparativa",
+        skip, limit, only_diffs, ejercicio, periodo, num_serie,
+        estado, sort_by, sort_dir, nif_titular,
+    )
+    return await _cached_or_compute(
+        cache_key,
+        lambda: _comparativa_impl(
+            skip=skip, limit=limit, only_diffs=only_diffs,
+            ejercicio=ejercicio, periodo=periodo, num_serie=num_serie,
+            estado=estado, sort_by=sort_by, sort_dir=sort_dir,
+            nif_titular=nif_titular,
+        ),
+    )
+
+
+async def _comparativa_impl(
+    skip: int = 0,
+    limit: int = 50,
+    only_diffs: bool = True,
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+    num_serie: Optional[str] = None,
+    estado: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: str = "desc",
+    nif_titular: Optional[str] = None,
+):
+    """Implementación real de `/comparativa`. Separada del endpoint para
+    poder envolverla con cache + single-flight sin duplicar la firma."""
     config = await _load_comparativa_config()
     filtro_sii, filtro_com = await _build_filtros(
         ejercicio, periodo, num_serie,
@@ -3187,7 +3316,25 @@ async def comparativa_totales(
 
     Para SII usa el desglose `detalle_iva` cuando existe (sumando los tramos);
     si no, cae al top-level `base_imponible` / `cuota_repercutida`.
+
+    Cacheado con TTL=15s + single-flight igual que `/comparativa`.
     """
+    cache_key = ("totales", ejercicio, periodo, num_serie, nif_titular)
+    return await _cached_or_compute(
+        cache_key,
+        lambda: _comparativa_totales_impl(
+            ejercicio=ejercicio, periodo=periodo,
+            num_serie=num_serie, nif_titular=nif_titular,
+        ),
+    )
+
+
+async def _comparativa_totales_impl(
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+    num_serie: Optional[str] = None,
+    nif_titular: Optional[str] = None,
+):
     config = await _load_comparativa_config()
     filtro_sii, filtro_com = await _build_filtros(
         ejercicio, periodo, num_serie,
@@ -3478,7 +3625,25 @@ async def comparativa_resumen_origenes(
     Soporta los mismos filtros que `/comparativa`: ejercicio, periodo,
     num_serie (contiene), nif_titular. Pensado para una banda de tarjetas KPI
     encima de la tabla.
+
+    Cacheado con TTL=15s + single-flight igual que `/comparativa`.
     """
+    cache_key = ("resumen-origenes", ejercicio, periodo, num_serie, nif_titular)
+    return await _cached_or_compute(
+        cache_key,
+        lambda: _comparativa_resumen_origenes_impl(
+            ejercicio=ejercicio, periodo=periodo,
+            num_serie=num_serie, nif_titular=nif_titular,
+        ),
+    )
+
+
+async def _comparativa_resumen_origenes_impl(
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+    num_serie: Optional[str] = None,
+    nif_titular: Optional[str] = None,
+):
     import re
 
     config = await _load_comparativa_config()
