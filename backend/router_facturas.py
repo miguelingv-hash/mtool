@@ -81,8 +81,11 @@ _logger = None
 import asyncio as _asyncio  # alias para no chocar con otros imports
 _COMPARATIVA_CACHE: dict[tuple, tuple[float, object]] = {}
 _COMPARATIVA_INFLIGHT: dict[tuple, "_asyncio.Future"] = {}
-_COMPARATIVA_TTL_S = 15.0
-_COMPARATIVA_MAX_ENTRIES = 32  # LRU muy pequeño; queries típicas son pocas
+# TTL de 60s: los datos de comparativa sólo cambian tras un import
+# (el propio import invalida el cache expresamente via `invalidate_comparativa_cache`).
+# Un TTL agresivo daría poco margen al warmup y al uso concurrente.
+_COMPARATIVA_TTL_S = 60.0
+_COMPARATIVA_MAX_ENTRIES = 64  # LRU pequeño; queries típicas son pocas
 
 
 def _comparativa_cache_get(key: tuple):
@@ -200,6 +203,66 @@ async def cleanup_orphan_jobs():
         _logger.warning(
             "Limpiados %d jobs huérfanos al arranque", res.modified_count
         )
+    # Warm-up asíncrono del cache de la Comparativa. Corre en background sin
+    # bloquear el startup. Precalcula las combinaciones más usadas para que
+    # la primera visita del usuario a la Comparativa no dispare 3-5 queries
+    # pesadas en paralelo (17s+) que saturan el event loop y hacen que el
+    # ingress devuelva 502.
+    _asyncio.create_task(_warmup_comparativa_cache())
+
+
+async def _warmup_comparativa_cache():
+    """Precalienta el cache in-memory de los endpoints pesados de la
+    Comparativa para el conjunto de NIFs presentes en BD.
+
+    Se ejecuta al arranque (invocada desde `cleanup_orphan_jobs`) y va poblando
+    el cache secuencialmente (no en paralelo) para no saturar el event loop.
+    Ignora errores silenciosamente — es puramente una optimización.
+    """
+    if _db is None:
+        return
+    try:
+        # Pequeño retardo para dejar que la app termine el startup por completo
+        # antes de meterle carga (evita competir con los seeds/índices).
+        await _asyncio.sleep(3)
+        # NIFs presentes en BD (los que verá el usuario en el toggle).
+        nifs = await _db.facturas_comercial.distinct("nif_titular")
+        nifs = [n for n in nifs if n] + [None]  # None = "todas las sociedades"
+        _logger.info(
+            "[warmup] precalentando cache de la Comparativa para %d NIF(s)…",
+            len(nifs),
+        )
+        for nif in nifs:
+            try:
+                # Los 3 endpoints más pesados; los otros (nifs-titulares y
+                # periodos) son suficientemente rápidos y se cachearán al vuelo.
+                await _cached_or_compute(
+                    ("comparativa", 0, 50, True, None, None, None, None, None, "desc", nif),
+                    lambda n=nif: _comparativa_impl(
+                        skip=0, limit=50, only_diffs=True, ejercicio=None,
+                        periodo=None, num_serie=None, estado=None,
+                        sort_by=None, sort_dir="desc", nif_titular=n,
+                    ),
+                )
+                await _cached_or_compute(
+                    ("totales", None, None, None, nif),
+                    lambda n=nif: _comparativa_totales_impl(
+                        ejercicio=None, periodo=None,
+                        num_serie=None, nif_titular=n,
+                    ),
+                )
+                await _cached_or_compute(
+                    ("resumen-origenes", None, None, None, nif),
+                    lambda n=nif: _comparativa_resumen_origenes_impl(
+                        ejercicio=None, periodo=None,
+                        num_serie=None, nif_titular=n,
+                    ),
+                )
+            except Exception as e:  # noqa: BLE001
+                _logger.warning("[warmup] fallo para nif=%s: %s", nif, e)
+        _logger.info("[warmup] Comparativa lista.")
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[warmup] abortado: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +354,13 @@ async def upsert_facturas_bulk(coleccion: str, datos_list: list, fuente: str):
         )
     if ops:
         await _db[coleccion].bulk_write(ops, ordered=False)
-        invalidate_comparativa_cache()
+        # NO invalidamos aquí — durante un import masivo, `upsert_facturas_bulk`
+        # se llama en batches (cada 2000 facturas), y cada batch invalidaría
+        # el cache dejando al frontend haciendo cache-miss constante mientras
+        # dura el import (varios minutos). El cache expira solo por TTL (15s),
+        # así que la Comparativa igualmente se refresca <15s tras terminar
+        # el import. Si se necesita refresco inmediato, el propio endpoint que
+        # cierre el import puede llamar a invalidate_comparativa_cache().
 
 
 # ---------------------------------------------------------------------------
@@ -3579,7 +3648,17 @@ async def comparativa_periodos(nif_titular: Optional[str] = None):
 
     Usa aggregation con `$group` apoyado en el índice compuesto
     (ejercicio, periodo) → segundos en lugar de minutos sobre 1M+ docs.
+
+    Cacheado con TTL=15s + single-flight (aggregate tarda ~2s con 485k docs).
     """
+    cache_key = ("periodos", nif_titular)
+    return await _cached_or_compute(
+        cache_key,
+        lambda: _comparativa_periodos_impl(nif_titular=nif_titular),
+    )
+
+
+async def _comparativa_periodos_impl(nif_titular: Optional[str] = None):
     sii_match: dict = {}
     com_match: dict = {}
     if nif_titular:
@@ -3757,7 +3836,16 @@ async def comparativa_nifs_titulares():
     Útil para construir el toggle de "Sociedad" en la UI. Si en el comercial
     existen docs sin nif_titular (data legacy), se devuelve adicionalmente el
     contador `comercial_sin_nif` para que la UI pueda avisar al usuario.
+
+    Cacheado con TTL=15s + single-flight.
     """
+    cache_key = ("nifs-titulares",)
+    return await _cached_or_compute(
+        cache_key, _comparativa_nifs_titulares_impl,
+    )
+
+
+async def _comparativa_nifs_titulares_impl():
     sii_nifs = await _db.facturas_sii.distinct("nif_titular")
     com_nifs = await _db.facturas_comercial.distinct("nif_titular")
     nifs = sorted(
