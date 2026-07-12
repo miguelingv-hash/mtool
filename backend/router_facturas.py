@@ -237,34 +237,73 @@ async def _warmup_comparativa_cache():
             "[warmup] precalentando cache de la Comparativa para %d NIF(s)…",
             len(nifs),
         )
+        # 1) Warmup base (sin filtro de periodo/ejercicio) para cada NIF.
+        #    Incluye tanto los 3 sub-endpoints como el bundle completo — el
+        #    frontend usa el bundle en la carga inicial.
         for nif in nifs:
             try:
-                # Los 3 endpoints más pesados; los otros (nifs-titulares y
-                # periodos) son suficientemente rápidos y se cachearán al vuelo.
+                # Bundle base (el que el frontend usa al abrir la Comparativa).
                 await _cached_or_compute(
-                    ("comparativa", 0, 50, True, None, None, None, None, None, "desc", nif),
-                    lambda n=nif: _comparativa_impl(
+                    ("bundle", 0, 50, True, None, None, None, None, None, "desc", nif),
+                    lambda n=nif: _comparativa_bundle_impl(
                         skip=0, limit=50, only_diffs=True, ejercicio=None,
                         periodo=None, num_serie=None, estado=None,
                         sort_by=None, sort_dir="desc", nif_titular=n,
                     ),
                 )
-                await _cached_or_compute(
-                    ("totales", None, None, None, nif),
-                    lambda n=nif: _comparativa_totales_impl(
-                        ejercicio=None, periodo=None,
-                        num_serie=None, nif_titular=n,
-                    ),
-                )
-                await _cached_or_compute(
-                    ("resumen-origenes", None, None, None, nif),
-                    lambda n=nif: _comparativa_resumen_origenes_impl(
-                        ejercicio=None, periodo=None,
-                        num_serie=None, nif_titular=n,
-                    ),
-                )
             except Exception as e:  # noqa: BLE001
-                _logger.warning("[warmup] fallo para nif=%s: %s", nif, e)
+                _logger.warning("[warmup] fallo bundle base para nif=%s: %s", nif, e)
+
+        # 2) Warmup por combinaciones (nif, ejercicio, periodo) con datos —
+        # imprescindible cuando el dataset está concentrado en pocos periodos
+        # (p.ej. todo junio 2026). Sin esto la 1ª vez que el user filtra por
+        # mes seguiría tardando ~20s y sacando 502 en el ingress.
+        for nif in nifs:
+            try:
+                pipeline = [
+                    {"$match": {"nif_titular": nif}},
+                    {"$group": {
+                        "_id": {"ejercicio": "$ejercicio", "periodo": "$periodo"},
+                        "count": {"$sum": 1},
+                    }},
+                    # Sólo precomputamos combinaciones con volumen suficiente para
+                    # que compense (evitamos meses casi vacíos).
+                    {"$match": {"count": {"$gte": 500}}},
+                    {"$sort": {"count": -1}},
+                    {"$limit": 24},  # tope: 24 combinaciones (2 años de meses)
+                ]
+                combos = []
+                async for d in _db.facturas_comercial.aggregate(pipeline):
+                    combos.append((d["_id"].get("ejercicio"), d["_id"].get("periodo")))
+                _logger.info(
+                    "[warmup] nif=%s: %d combinaciones (ejercicio,periodo) con datos…",
+                    nif, len(combos),
+                )
+                for eje, per in combos:
+                    if not eje or not per:
+                        continue
+                    try:
+                        # Warmup del bundle completo para esa combinación —
+                        # así al filtrar por mes en la UI la respuesta llega
+                        # instantánea (cache hit del bundle Y de sus 3 partes).
+                        await _cached_or_compute(
+                            ("bundle", 0, 50, True, str(eje), str(per), None, None, None, "desc", nif),
+                            lambda n=nif, e=eje, p=per: _comparativa_bundle_impl(
+                                skip=0, limit=50, only_diffs=True,
+                                ejercicio=str(e), periodo=str(p),
+                                num_serie=None, estado=None,
+                                sort_by=None, sort_dir="desc",
+                                nif_titular=n,
+                            ),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        _logger.warning(
+                            "[warmup] fallo bundle nif=%s eje=%s per=%s: %s",
+                            nif, eje, per, e,
+                        )
+            except Exception as e:  # noqa: BLE001
+                _logger.warning("[warmup] fallo combos nif=%s: %s", nif, e)
+
         _logger.info("[warmup] Comparativa lista.")
     except Exception as e:  # noqa: BLE001
         _logger.warning("[warmup] abortado: %s", e)
@@ -3182,6 +3221,82 @@ async def comparativa(
             nif_titular=nif_titular,
         ),
     )
+
+
+@router.get("/comparativa/bundle")
+async def comparativa_bundle(
+    skip: int = 0,
+    limit: int = 50,
+    only_diffs: bool = True,
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+    num_serie: Optional[str] = None,
+    estado: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: str = "desc",
+    nif_titular: Optional[str] = None,
+):
+    """Endpoint agregado que devuelve las 3 vistas de la Comparativa en una
+    sola petición: `list`, `totales`, `resumen_origenes`.
+
+    ¿Por qué?
+    Cuando el usuario cambia un filtro (mes, ejercicio, num_serie…), el
+    frontend antiguo disparaba 3 peticiones EN PARALELO. Con un dataset
+    grande (~1.4M docs concentrados en un mes), cada una tardaba 5-10s en
+    frío y se saturaban entre ellas subiendo a 15-18s totales → el ingress
+    devolvía 502.
+
+    Este endpoint las ejecuta secuencialmente en el MISMO request; como
+    cada sub-función tiene su propio cache, la 2ª/3ª son cache-hit
+    instantáneas dentro de los 60s siguientes. Además, el frontend sólo
+    dispara 1 conexión HTTP → cero paralelismo destructivo.
+
+    Cacheado a su vez con la key del bundle para que refresh/pestañas
+    repetidas sean instantáneas.
+    """
+    cache_key = (
+        "bundle",
+        skip, limit, only_diffs, ejercicio, periodo, num_serie,
+        estado, sort_by, sort_dir, nif_titular,
+    )
+    return await _cached_or_compute(
+        cache_key,
+        lambda: _comparativa_bundle_impl(
+            skip=skip, limit=limit, only_diffs=only_diffs,
+            ejercicio=ejercicio, periodo=periodo, num_serie=num_serie,
+            estado=estado, sort_by=sort_by, sort_dir=sort_dir,
+            nif_titular=nif_titular,
+        ),
+    )
+
+
+async def _comparativa_bundle_impl(
+    skip: int, limit: int, only_diffs: bool,
+    ejercicio: Optional[str], periodo: Optional[str], num_serie: Optional[str],
+    estado: Optional[str], sort_by: Optional[str], sort_dir: str,
+    nif_titular: Optional[str],
+):
+    """Ejecuta las 3 sub-queries secuencialmente para que compartan cache y
+    no compitan por CPU/event loop."""
+    list_result = await _comparativa_impl(
+        skip=skip, limit=limit, only_diffs=only_diffs,
+        ejercicio=ejercicio, periodo=periodo, num_serie=num_serie,
+        estado=estado, sort_by=sort_by, sort_dir=sort_dir,
+        nif_titular=nif_titular,
+    )
+    totales = await _comparativa_totales_impl(
+        ejercicio=ejercicio, periodo=periodo,
+        num_serie=num_serie, nif_titular=nif_titular,
+    )
+    resumen = await _comparativa_resumen_origenes_impl(
+        ejercicio=ejercicio, periodo=periodo,
+        num_serie=num_serie, nif_titular=nif_titular,
+    )
+    return {
+        "list": list_result,
+        "totales": totales,
+        "resumen_origenes": resumen,
+    }
 
 
 async def _comparativa_impl(

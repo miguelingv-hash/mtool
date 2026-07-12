@@ -333,6 +333,10 @@ export default function Comparativa() {
     periodos: [],
   });
   const [resumenOrigenes, setResumenOrigenes] = useState([]);
+  // Totales del bundle — poblado por `load()` en cada refresco. Se pasa al
+  // componente ResumenTotales como prop para evitar que él haga su propio
+  // fetch (que multiplicaba las peticiones y provocaba 502 antes).
+  const [bundleTotales, setBundleTotales] = useState(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [loading, setLoading] = useState(false);
@@ -409,9 +413,18 @@ export default function Comparativa() {
         params.sort_by = sortBy;
         params.sort_dir = sortDir;
       }
-      const { data } = await api.get("/comparativa", { params });
+      // Endpoint agregado: 1 sola petición HTTP devuelve list + totales +
+      // resumen_origenes. Sustituye a 3 requests paralelas que saturaban el
+      // ingress (502) al filtrar por mes con dataset grande (1M+ docs).
+      const { data: bundle } = await api.get("/comparativa/bundle", { params });
+      const data = bundle.list || {};
       setItems(data.items);
       setTotal(data.total);
+      // Publicamos también los totales y el resumen para que los componentes
+      // hijos (ResumenTotales, ResumenPorOrigen) los consuman sin hacer sus
+      // propias peticiones.
+      setBundleTotales(bundle.totales || null);
+      setResumenOrigenes(bundle.resumen_origenes?.items || []);
       setRefreshTick((t) => t + 1);
     } finally {
       setLoading(false);
@@ -451,21 +464,6 @@ export default function Comparativa() {
       })
       .catch(() => {});
   }, []);
-
-  // Carga el resumen agregado por origen comercial (SAP / SIGLO / desconocido)
-  // cuando cambian los filtros de ejercicio / periodo / num_serie / nif.
-  useEffect(() => {
-    if (filtroNif === null) return;  // esperamos a que se decida el NIF
-    const params = {};
-    if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
-    if (effectivePeriodo) params.periodo = effectivePeriodo;
-    if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
-    if (filtroNif !== "__all__") params.nif_titular = filtroNif;
-    api
-      .get("/comparativa/resumen-origenes", { params })
-      .then((r) => setResumenOrigenes(r.data.items || []))
-      .catch(() => setResumenOrigenes([]));
-  }, [filtroEjercicio, effectivePeriodo, filtroNumSerieDebounced, filtroNif]);
 
   useEffect(() => {
     if (filtroNif === null) return;  // esperamos a que se decida el NIF
@@ -1057,6 +1055,7 @@ export default function Comparativa() {
       <ResumenTotales
         refreshKey={refreshTick}
         enabled={filtroNif !== null}
+        initialData={bundleTotales}
         filtros={{
           ejercicio: filtroEjercicio !== "__all__" ? filtroEjercicio : undefined,
           periodo: effectivePeriodo || undefined,

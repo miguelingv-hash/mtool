@@ -113,8 +113,8 @@ function ColumnaTotales({ titulo, sub, base, cuota, n, ultimaFecha, diff, testId
   );
 }
 
-export default function ResumenTotales({ filtros, refreshKey, enabled = true }) {
-  const [data, setData] = useState(null);
+export default function ResumenTotales({ filtros, refreshKey, enabled = true, initialData = null }) {
+  const [data, setData] = useState(initialData);
   const [loading, setLoading] = useState(false);
 
   // Compacto los filtros relevantes (excluye only_diffs y estado por diseño)
@@ -144,10 +144,18 @@ export default function ResumenTotales({ filtros, refreshKey, enabled = true }) 
     }
   };
 
+  // Cuando el padre nos pasa `initialData` (viene del bundle), NO hacemos
+  // fetch: nos limitamos a reflejar los datos que ya vienen precargados.
+  // Sin esto duplicaríamos peticiones al backend cada vez que cambia un
+  // filtro y contribuiríamos a la saturación que provocaba 502.
   useEffect(() => {
+    if (initialData !== null) {
+      setData(initialData);
+      return;
+    }
     if (!enabled) return;
     load();
-  }, [params, refreshKey, enabled]);
+  }, [params, refreshKey, enabled, initialData]);
 
   const sii = data?.sii;
   const total = data?.comercial_total;
