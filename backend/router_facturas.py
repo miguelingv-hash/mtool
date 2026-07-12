@@ -226,8 +226,13 @@ async def _warmup_comparativa_cache():
         # antes de meterle carga (evita competir con los seeds/índices).
         await _asyncio.sleep(3)
         # NIFs presentes en BD (los que verá el usuario en el toggle).
+        # Ojo: NO precalentamos con nif=None (agregado de TODAS las sociedades),
+        # porque esa query recorre el universo completo (~1.4M docs) y tarda
+        # 15-20s. El frontend hoy en día siempre filtra por una sociedad
+        # concreta (autoselección de la 1ª al montar), así que la key con
+        # None sólo se usaría muy ocasionalmente y no compensa el warmup.
         nifs = await _db.facturas_comercial.distinct("nif_titular")
-        nifs = [n for n in nifs if n] + [None]  # None = "todas las sociedades"
+        nifs = [n for n in nifs if n]
         _logger.info(
             "[warmup] precalentando cache de la Comparativa para %d NIF(s)…",
             len(nifs),

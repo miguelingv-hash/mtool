@@ -316,7 +316,14 @@ export default function Comparativa() {
   const [filtroEstado, setFiltroEstado] = useState(initialNumSerie ? "all" : "diffs"); // diffs|all|coincide|discrepancia|solo_sii|solo_comercial
   // Toggle de "Sociedad" (NIF titular). Se rellena dinámicamente al montar:
   // si sólo hay 1 NIF en BD se autoselecciona; si hay 2+ el usuario alterna.
-  const [filtroNif, setFiltroNif] = useState("__all__");
+  // Filtro por NIF titular (sociedad). Default `null` = "aún no decidido";
+  // el useEffect de /nifs-titulares decidirá al montar si autoselecciona una
+  // sociedad (cuando sólo hay una en BD) o pasa a `__all__` explícito. Los
+  // otros useEffects que disparan queries pesadas SE SALTAN mientras esté a
+  // null para no lanzar la query monstruo "sin filtro" y a los 100ms hacer
+  // otra idéntica con filtro — ese doble disparo saturaba el ingress y
+  // provocaba 502 en la 1ª carga de la Comparativa.
+  const [filtroNif, setFiltroNif] = useState(null);
   const [nifsDisponibles, setNifsDisponibles] = useState([]);
   const [sociedadesMap, setSociedadesMap] = useState({}); // {nif: nombre}
   const [comercialSinNif, setComercialSinNif] = useState(0);
@@ -412,6 +419,8 @@ export default function Comparativa() {
   };
 
   useEffect(() => {
+    // Aún no sabemos qué sociedad usar: esperamos al fetch de /nifs-titulares.
+    if (filtroNif === null) return;
     api
       .get("/comparativa/periodos", {
         params: filtroNif !== "__all__" ? { nif_titular: filtroNif } : {},
@@ -436,9 +445,9 @@ export default function Comparativa() {
         setSociedadesMap(mp);
         setComercialSinNif(r.data?.comercial_sin_nif || 0);
         // Si sólo hay un NIF, autoseleccionarlo para evitar fricción.
-        if (lst.length === 1) {
-          setFiltroNif(lst[0]);
-        }
+        // Si hay varios, pasamos a `__all__` explícito (comportamiento previo).
+        // Si no hay ninguno, también `__all__` como fallback benigno.
+        setFiltroNif(lst.length === 1 ? lst[0] : "__all__");
       })
       .catch(() => {});
   }, []);
@@ -446,6 +455,7 @@ export default function Comparativa() {
   // Carga el resumen agregado por origen comercial (SAP / SIGLO / desconocido)
   // cuando cambian los filtros de ejercicio / periodo / num_serie / nif.
   useEffect(() => {
+    if (filtroNif === null) return;  // esperamos a que se decida el NIF
     const params = {};
     if (filtroEjercicio !== "__all__") params.ejercicio = filtroEjercicio;
     if (effectivePeriodo) params.periodo = effectivePeriodo;
@@ -458,8 +468,8 @@ export default function Comparativa() {
   }, [filtroEjercicio, effectivePeriodo, filtroNumSerieDebounced, filtroNif]);
 
   useEffect(() => {
+    if (filtroNif === null) return;  // esperamos a que se decida el NIF
     load();
-    // eslint-disable-next-line
   }, [filtroEstado, page, pageSize, filtroEjercicio, effectivePeriodo, filtroNumSerieDebounced, sortBy, sortDir, filtroNif]);
 
   // Reset paginación al cambiar filtros
@@ -1046,11 +1056,12 @@ export default function Comparativa() {
 
       <ResumenTotales
         refreshKey={refreshTick}
+        enabled={filtroNif !== null}
         filtros={{
           ejercicio: filtroEjercicio !== "__all__" ? filtroEjercicio : undefined,
           periodo: effectivePeriodo || undefined,
           num_serie: filtroNumSerieDebounced.trim() || undefined,
-          nif_titular: filtroNif !== "__all__" ? filtroNif : undefined,
+          nif_titular: filtroNif && filtroNif !== "__all__" ? filtroNif : undefined,
         }}
       />
 
