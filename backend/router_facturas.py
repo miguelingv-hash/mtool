@@ -3124,8 +3124,15 @@ async def _build_filtros(
     if nif_titular:
         nif_norm = str(nif_titular).strip().upper()
         filtro_sii["nif_titular"] = nif_norm
-        # `null` en $in matchea también docs sin el campo (legacy compat).
-        filtro_com["nif_titular"] = {"$in": [nif_norm, None]}
+        # Sólo docs comerciales explícitamente etiquetados con este NIF.
+        # Antes se incluía `None` (`$in: [nif, None]`) como compat legacy, pero
+        # con dataset masivo sin backfill hacer eso arrastraba TODO el universo
+        # de comerciales sin nif_titular (1M+ docs) al filtrar por cualquier
+        # sociedad → OOM/500. Si el usuario tiene comerciales sin nif_titular
+        # debe hacer backfill explícito antes de compararlas (endpoint
+        # /api/admin/comercial/asignar-nif-titular-por-soc, o re-import con
+        # `nif_titular_override`).
+        filtro_com["nif_titular"] = nif_norm
     if excluir_base_cero:
         # `$ne: 0` excluye exactamente 0; ausencia o null se mantienen porque
         # el comercial ya almacena `base_imponible` como número tras el parser.
@@ -3278,6 +3285,28 @@ async def _comparativa_bundle_impl(
 ):
     """Ejecuta las 3 sub-queries secuencialmente para que compartan cache y
     no compitan por CPU/event loop."""
+    # Cortafuegos anti-OOM: sin filtro de sociedad y con universo grande
+    # el bundle intentaría cargar cientos de miles de docs en RAM 3 veces
+    # (una por sub-query). Con dataset masivo el pod muere OOM-killed.
+    # Aplicamos el mismo guard que _comparativa_impl pero en el nivel bundle
+    # para que dispare ANTES de cualquier query pesada.
+    if not nif_titular:
+        config = await _load_comparativa_config()
+        _sii_filter, com_filter = await _build_filtros(
+            ejercicio, periodo, num_serie,
+            excluir_base_cero=config["excluir_comercial_base_cero"],
+            nif_titular=None,
+        )
+        universo_com = await _db.facturas_comercial.count_documents(com_filter)
+        if universo_com > 200_000:
+            raise HTTPException(
+                400,
+                f"Dataset demasiado grande sin filtro de sociedad "
+                f"({universo_com:,} facturas comerciales). Selecciona una "
+                f"sociedad concreta o filtra por ejercicio/periodo para "
+                f"acotar la comparativa.",
+            )
+
     list_result = await _comparativa_impl(
         skip=skip, limit=limit, only_diffs=only_diffs,
         ejercicio=ejercicio, periodo=periodo, num_serie=num_serie,
@@ -3320,6 +3349,22 @@ async def _comparativa_impl(
         nif_titular=nif_titular,
     )
 
+    # Cortafuegos: cuando el universo comercial supera un umbral y no se
+    # filtra por sociedad, la query intenta cargar centenares de miles de
+    # documentos en RAM (`to_list(None)`) y puede OOM-killar el pod. Antes
+    # de tirar el proceso, devolvemos un error amigable pidiendo al usuario
+    # que restrinja el ámbito.
+    if not nif_titular:
+        universo_com = await _db.facturas_comercial.count_documents(filtro_com)
+        if universo_com > 200_000:
+            raise HTTPException(
+                400,
+                f"Dataset demasiado grande sin filtro de sociedad "
+                f"({universo_com:,} facturas comerciales). Selecciona una "
+                f"sociedad concreta o filtra por ejercicio/periodo para "
+                f"acotar la comparativa.",
+            )
+
     # 1) Universo comercial completo en scope (siempre pequeño)
     com_docs = await _db.facturas_comercial.find(
         filtro_com, {"_id": 0, "versiones": 0}
@@ -3327,13 +3372,21 @@ async def _comparativa_impl(
     com_map = {d["num_serie_factura"]: d for d in com_docs}
     com_keys = list(com_map.keys())
 
-    # 2) Matches SII por num_serie ∈ comercial (uses unique index)
-    sii_match_docs = await _db.facturas_sii.find(
-        {**filtro_sii, "num_serie_factura": {"$in": com_keys}}
-        if com_keys else {**filtro_sii, "num_serie_factura": {"$in": []}},
-        {"_id": 0, "versiones": 0},
-    ).to_list(length=None) if com_keys else []
-    sii_match_map = {d["num_serie_factura"]: d for d in sii_match_docs}
+    # 2) Matches SII por num_serie ∈ comercial. Chunking obligatorio: con
+    #    1.5M+ keys, un único `$in` supera 16MB de BSON (`DocumentTooLarge`)
+    #    porque las keys viajan literales en el pipeline. Troceamos en
+    #    chunks de 20 000 y unimos resultados en `sii_match_map`.
+    NS_CHUNK = 20_000
+    sii_match_map: dict[str, dict] = {}
+    if com_keys:
+        for i in range(0, len(com_keys), NS_CHUNK):
+            chunk = com_keys[i : i + NS_CHUNK]
+            partial = await _db.facturas_sii.find(
+                {**filtro_sii, "num_serie_factura": {"$in": chunk}},
+                {"_id": 0, "versiones": 0},
+            ).to_list(length=None)
+            for d in partial:
+                sii_match_map[d["num_serie_factura"]] = d
 
     # 3) Filas de comercial: cada una será coincide / discrepancia / solo_comercial
     filas_com: list[dict] = []
@@ -3345,11 +3398,23 @@ async def _comparativa_impl(
     #    OJO: hay que preservar otros operadores que ya tenga filtro_sii sobre
     #    `num_serie_factura` (p.ej. el $regex de búsqueda del usuario). Mongo
     #    permite combinar $regex + $nin en el mismo subdocumento.
-    solo_sii_filter = dict(filtro_sii)
-    ns_clause = dict(solo_sii_filter.get("num_serie_factura") or {})
-    ns_clause["$nin"] = com_keys
-    solo_sii_filter["num_serie_factura"] = ns_clause
-    solo_sii_total = await _db.facturas_sii.count_documents(solo_sii_filter)
+    #
+    #    ATENCIÓN: `$nin` con 1.5M keys también dispara DocumentTooLarge.
+    #    Cuando el universo comercial es muy grande, calculamos el total
+    #    con un aggregation `$lookup` + `$match` en la propia BD en lugar
+    #    de enviar el listado literal. Umbral: 50 000 keys.
+    if len(com_keys) > 50_000:
+        # SII total en el universo del filtro, MENOS los que están en comercial.
+        sii_total_universo = await _db.facturas_sii.count_documents(filtro_sii)
+        # Los que están en ambos = tamaño de sii_match_map filtrado por
+        # filtro_sii (ya está aplicado en la query anterior).
+        solo_sii_total = max(0, sii_total_universo - len(sii_match_map))
+    else:
+        solo_sii_filter = dict(filtro_sii)
+        ns_clause = dict(solo_sii_filter.get("num_serie_factura") or {})
+        ns_clause["$nin"] = com_keys
+        solo_sii_filter["num_serie_factura"] = ns_clause
+        solo_sii_total = await _db.facturas_sii.count_documents(solo_sii_filter)
 
     # 5) Aplicar filtros only_diffs / estado para decidir total e items
     # Mapeo de claves de ordenación del cliente a:
@@ -3784,7 +3849,8 @@ async def _comparativa_periodos_impl(nif_titular: Optional[str] = None):
     if nif_titular:
         nif_norm = str(nif_titular).strip().upper()
         sii_match["nif_titular"] = nif_norm
-        com_match["nif_titular"] = {"$in": [nif_norm, None]}
+        # Consistente con _build_filtros: sólo docs etiquetados explícitamente.
+        com_match["nif_titular"] = nif_norm
 
     async def _distinct_eje_per(col, match: dict):
         pipeline = []
@@ -3863,7 +3929,10 @@ async def _comparativa_resumen_origenes_impl(
         }
     if nif_titular:
         nif_norm = str(nif_titular).strip().upper()
-        filtro_com["nif_titular"] = {"$in": [nif_norm, None]}
+        # Sólo docs comerciales explícitamente etiquetados con este NIF
+        # (mismo criterio que _build_filtros — sin el legacy `[nif, None]`
+        # que arrastraba 1.5M+ docs sin nif y provocaba OOM).
+        filtro_com["nif_titular"] = nif_norm
     else:
         nif_norm = None
     if config["excluir_comercial_base_cero"]:
@@ -3903,22 +3972,29 @@ async def _comparativa_resumen_origenes_impl(
 
         sii_docs = []
         if com_keys:
-            sii_filter = {"num_serie_factura": {"$in": com_keys}}
+            base_sii = {}
             if ejercicio:
-                sii_filter["ejercicio"] = str(ejercicio)
+                base_sii["ejercicio"] = str(ejercicio)
             if periodo:
                 periodos_list = [
                     p.strip() for p in str(periodo).split(",") if p.strip()
                 ]
                 if len(periodos_list) == 1:
-                    sii_filter["periodo"] = periodos_list[0]
+                    base_sii["periodo"] = periodos_list[0]
                 elif len(periodos_list) > 1:
-                    sii_filter["periodo"] = {"$in": periodos_list}
+                    base_sii["periodo"] = {"$in": periodos_list}
             if nif_norm:
-                sii_filter["nif_titular"] = nif_norm
-            sii_docs = await _db.facturas_sii.find(
-                sii_filter, {"_id": 0, "versiones": 0}
-            ).to_list(length=None)
+                base_sii["nif_titular"] = nif_norm
+            # Chunking: `$in` con >100k keys revienta el límite BSON de 16MB
+            # (mismo bug que en `_comparativa_impl`). Troceamos en 20k.
+            NS_CHUNK = 20_000
+            for i in range(0, len(com_keys), NS_CHUNK):
+                chunk = com_keys[i : i + NS_CHUNK]
+                partial = await _db.facturas_sii.find(
+                    {**base_sii, "num_serie_factura": {"$in": chunk}},
+                    {"_id": 0, "versiones": 0},
+                ).to_list(length=None)
+                sii_docs.extend(partial)
         sii_map = {d["num_serie_factura"]: d for d in sii_docs}
 
         matches = 0
