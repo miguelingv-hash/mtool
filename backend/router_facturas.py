@@ -237,12 +237,21 @@ async def _warmup_comparativa_cache():
             "[warmup] precalentando cache de la Comparativa para %d NIF(s)…",
             len(nifs),
         )
-        # 1) Warmup base (sin filtro de periodo/ejercicio) para cada NIF.
-        #    Incluye tanto los 3 sub-endpoints como el bundle completo — el
-        #    frontend usa el bundle en la carga inicial.
+        # 1) Warmup del bundle base (sin filtro de periodo/ejercicio) SÓLO
+        #    para NIFs con volumen manejable. Con >300k docs comerciales, el
+        #    bundle sin filtro carga demasiado en memoria y OOM-killa el pod;
+        #    lo dejamos fuera del warmup y confiamos en el guard 400 del
+        #    endpoint (el user tendrá que filtrar por periodo).
+        WARMUP_BASE_LIMIT = 300_000
         for nif in nifs:
             try:
-                # Bundle base (el que el frontend usa al abrir la Comparativa).
+                n_com = await _db.facturas_comercial.count_documents({"nif_titular": nif})
+                if n_com > WARMUP_BASE_LIMIT:
+                    _logger.info(
+                        "[warmup] omitiendo bundle base nif=%s (%d docs > %d)",
+                        nif, n_com, WARMUP_BASE_LIMIT,
+                    )
+                    continue
                 await _cached_or_compute(
                     ("bundle", 0, 50, True, None, None, None, None, None, "desc", nif),
                     lambda n=nif: _comparativa_bundle_impl(
@@ -258,6 +267,11 @@ async def _warmup_comparativa_cache():
         # imprescindible cuando el dataset está concentrado en pocos periodos
         # (p.ej. todo junio 2026). Sin esto la 1ª vez que el user filtra por
         # mes seguiría tardando ~20s y sacando 502 en el ingress.
+        #
+        # Sólo warmupamos combinaciones con volumen manejable (<200k docs) —
+        # las más grandes cargarían demasiado a memoria y OOM-killarían el pod.
+        # Para ésas el user tendrá que aceptar el cache-miss de la 1ª carga.
+        COMBO_WARMUP_LIMIT = 200_000
         for nif in nifs:
             try:
                 pipeline = [
@@ -266,11 +280,9 @@ async def _warmup_comparativa_cache():
                         "_id": {"ejercicio": "$ejercicio", "periodo": "$periodo"},
                         "count": {"$sum": 1},
                     }},
-                    # Sólo precomputamos combinaciones con volumen suficiente para
-                    # que compense (evitamos meses casi vacíos).
-                    {"$match": {"count": {"$gte": 500}}},
+                    {"$match": {"count": {"$gte": 500, "$lte": COMBO_WARMUP_LIMIT}}},
                     {"$sort": {"count": -1}},
-                    {"$limit": 24},  # tope: 24 combinaciones (2 años de meses)
+                    {"$limit": 24},
                 ]
                 combos = []
                 async for d in _db.facturas_comercial.aggregate(pipeline):
@@ -3285,27 +3297,39 @@ async def _comparativa_bundle_impl(
 ):
     """Ejecuta las 3 sub-queries secuencialmente para que compartan cache y
     no compitan por CPU/event loop."""
-    # Cortafuegos anti-OOM: sin filtro de sociedad y con universo grande
-    # el bundle intentaría cargar cientos de miles de docs en RAM 3 veces
-    # (una por sub-query). Con dataset masivo el pod muere OOM-killed.
-    # Aplicamos el mismo guard que _comparativa_impl pero en el nivel bundle
-    # para que dispare ANTES de cualquier query pesada.
-    if not nif_titular:
-        config = await _load_comparativa_config()
-        _sii_filter, com_filter = await _build_filtros(
-            ejercicio, periodo, num_serie,
-            excluir_base_cero=config["excluir_comercial_base_cero"],
-            nif_titular=None,
+    # Cortafuegos anti-OOM: universo comercial que se va a cargar en RAM.
+    # Con dataset masivo (>200k sin filtro sociedad, o >500k con filtro pero
+    # sin acotar por periodo/ejercicio) el pod muere OOM-killed. Aplicamos
+    # umbrales distintos:
+    #  - sin nif → 200k (comportamiento anterior)
+    #  - con nif pero sin acotar por periodo/ejercicio → 500k
+    config = await _load_comparativa_config()
+    _sii_filter, com_filter = await _build_filtros(
+        ejercicio, periodo, num_serie,
+        excluir_base_cero=config["excluir_comercial_base_cero"],
+        nif_titular=nif_titular,
+    )
+    universo_com = await _db.facturas_comercial.count_documents(com_filter)
+    # Con el filtro nif aplicado, permitimos hasta 500k docs (~5GB en memoria
+    # por sub-query x 3 sub-queries = 15GB). Umbrales mayores OOM-killan el
+    # pod (32GB → hasta 15GB residente durante el procesamiento). El user
+    # con >500k comerciales debe filtrar por período/ejercicio o usar un
+    # estado específico (solo_comercial / solo_sii / coincide / discrepancia)
+    # que sí pagina en BD sin cargar el universo entero.
+    limite = 200_000 if not nif_titular else 500_000
+    if universo_com > limite and not estado:
+        raise HTTPException(
+            400,
+            f"Dataset demasiado grande ({universo_com:,} facturas comerciales "
+            f"en el ámbito seleccionado). "
+            + ("Selecciona una sociedad." if not nif_titular
+               else "Filtra también por ejercicio y/o periodo para acotar, "
+                    "o selecciona un estado concreto (coincide, discrepancia, "
+                    "solo_comercial, solo_sii)."),
         )
-        universo_com = await _db.facturas_comercial.count_documents(com_filter)
-        if universo_com > 200_000:
-            raise HTTPException(
-                400,
-                f"Dataset demasiado grande sin filtro de sociedad "
-                f"({universo_com:,} facturas comerciales). Selecciona una "
-                f"sociedad concreta o filtra por ejercicio/periodo para "
-                f"acotar la comparativa.",
-            )
+    # Con estado específico dejamos pasar aunque el universo sea grande,
+    # porque el path `estado` puede paginar directamente en Mongo (ver más
+    # abajo). El bloque duplicado anterior era redundante y se elimina.
 
     list_result = await _comparativa_impl(
         skip=skip, limit=limit, only_diffs=only_diffs,
@@ -3364,6 +3388,31 @@ async def _comparativa_impl(
                 f"sociedad concreta o filtra por ejercicio/periodo para "
                 f"acotar la comparativa.",
             )
+
+    # FAST-PATH `estado=solo_comercial`: pagina directamente en Mongo sin
+    # cargar todo el universo a memoria. Imprescindible cuando hay >500k
+    # comerciales del filtro (OOM anterior). Sólo aplica cuando NO se ha
+    # pedido sort custom ni num_serie regex, casos que necesitan procesar
+    # todo el universo para ordenar/filtrar.
+    if estado == "solo_comercial" and not sort_by and not num_serie:
+        total = await _db.facturas_comercial.count_documents(filtro_com)
+        cursor = (
+            _db.facturas_comercial.find(filtro_com, {"_id": 0, "versiones": 0})
+            .skip(skip).limit(limit)
+        )
+        page_docs = await cursor.to_list(length=limit)
+        # Sin match SII (por definición de solo_comercial)
+        rows = [
+            _build_row_from_docs(None, com, com["num_serie_factura"], config)
+            for com in page_docs
+        ]
+        return {
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "campos_canonicos": CAMPOS_CANONICOS,
+            "items": rows,
+        }
 
     # 1) Universo comercial completo en scope (siempre pequeño)
     com_docs = await _db.facturas_comercial.find(
@@ -3952,8 +4001,13 @@ async def _comparativa_resumen_origenes_impl(
     ]
     grupos = await _db.facturas_comercial.aggregate(pipeline).to_list(length=None)
 
-    # 2) Para cada origen calculamos matches/discrepancias contra SII
-    #    Cargamos las facturas comerciales del grupo (sólo num_serie),
+    # 2) Para cada origen calculamos matches/discrepancias contra SII.
+    #    Modo LIGERO: cuando el universo total es enorme (>500k), saltamos
+    #    el cruce con SII y devolvemos únicamente los agregados. El detalle
+    #    de matches/coincidencias/discrepancias se puede ver seleccionando
+    #    un estado concreto en la Comparativa.
+    universo_total = sum(g.get("total_facturas", 0) for g in grupos)
+    modo_ligero = universo_total > 500_000
     #    cruzamos con SII por num_serie ∈ comercial (uses unique index)
     #    y diff sólo de las que coinciden.
     resultados = []
@@ -3965,13 +4019,37 @@ async def _comparativa_resumen_origenes_impl(
         else:
             ftr["origen_comercial"] = origen_label
 
-        com_docs = await _db.facturas_comercial.find(
-            ftr, {"_id": 0, "versiones": 0}
-        ).to_list(length=None)
-        com_keys = [d["num_serie_factura"] for d in com_docs]
+        # Modo ligero: no cruzamos con SII, sólo agregados. Salva 10-30s de
+        # streaming + lookup cuando el universo es masivo.
+        if modo_ligero:
+            resultados.append({
+                "origen": origen_label,
+                "total_facturas": g["total_facturas"],
+                "base_total": round(g.get("base_total") or 0, 2),
+                "cuota_total": round(g.get("cuota_total") or 0, 2),
+                "importe_total": round(g.get("importe_total") or 0, 2),
+                "matches_sii": None,       # None = "no calculado por volumen"
+                "sin_match_sii": None,
+                "coincidencias": None,
+                "discrepancias": None,
+                "modo_ligero": True,
+            })
+            continue
 
-        sii_docs = []
-        if com_keys:
+        # Streaming en cursor + lookup por chunks de num_serie: evitamos
+        # cargar TODA la lista de comerciales del grupo a memoria (con 1M+
+        # docs OOM-killaba el pod). Trabajamos en batches de 20k.
+        BATCH = 20_000
+        matches = 0
+        coincidencias = 0
+        discrepancias = 0
+        n_procesados = 0
+        batch_docs: list[dict] = []
+
+        async def _process_batch(batch: list[dict]) -> tuple[int, int, int]:
+            """Devuelve (matches, coincidencias, discrepancias) para el batch."""
+            if not batch:
+                return 0, 0, 0
             base_sii = {}
             if ejercicio:
                 base_sii["ejercicio"] = str(ejercicio)
@@ -3985,29 +4063,40 @@ async def _comparativa_resumen_origenes_impl(
                     base_sii["periodo"] = {"$in": periodos_list}
             if nif_norm:
                 base_sii["nif_titular"] = nif_norm
-            # Chunking: `$in` con >100k keys revienta el límite BSON de 16MB
-            # (mismo bug que en `_comparativa_impl`). Troceamos en 20k.
-            NS_CHUNK = 20_000
-            for i in range(0, len(com_keys), NS_CHUNK):
-                chunk = com_keys[i : i + NS_CHUNK]
-                partial = await _db.facturas_sii.find(
-                    {**base_sii, "num_serie_factura": {"$in": chunk}},
-                    {"_id": 0, "versiones": 0},
-                ).to_list(length=None)
-                sii_docs.extend(partial)
-        sii_map = {d["num_serie_factura"]: d for d in sii_docs}
+            keys = [d["num_serie_factura"] for d in batch]
+            sii_partial = await _db.facturas_sii.find(
+                {**base_sii, "num_serie_factura": {"$in": keys}},
+                {"_id": 0, "versiones": 0},
+            ).to_list(length=None)
+            sii_map = {d["num_serie_factura"]: d for d in sii_partial}
+            m = 0
+            co = 0
+            di = 0
+            for com in batch:
+                sii = sii_map.get(com["num_serie_factura"])
+                if sii:
+                    m += 1
+                    if not diff_facturas(sii, com, config):
+                        co += 1
+                    else:
+                        di += 1
+            return m, co, di
 
-        matches = 0
-        coincidencias = 0
-        discrepancias = 0
-        for com in com_docs:
-            sii = sii_map.get(com["num_serie_factura"])
-            if sii:
-                matches += 1
-                if not diff_facturas(sii, com, config):
-                    coincidencias += 1
-                else:
-                    discrepancias += 1
+        cursor = _db.facturas_comercial.find(ftr, {"_id": 0, "versiones": 0})
+        async for d in cursor:
+            batch_docs.append(d)
+            n_procesados += 1
+            if len(batch_docs) >= BATCH:
+                m, co, di = await _process_batch(batch_docs)
+                matches += m
+                coincidencias += co
+                discrepancias += di
+                batch_docs = []
+        # Último batch parcial
+        m, co, di = await _process_batch(batch_docs)
+        matches += m
+        coincidencias += co
+        discrepancias += di
 
         resultados.append({
             "origen": origen_label,

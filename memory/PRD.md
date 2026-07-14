@@ -383,3 +383,20 @@
 - **P2** Salvaguarda env flag `REACT_APP_ALLOW_WIPE=false` para `/mantenimiento`.
 - **P2** Alinear estilos páginas Tasas con Shadcn UI.
 - **P2** Verificación de dominio en Resend.
+
+## Fix crítico 14 Jul 2026 — Escalabilidad Comparativa a 1M+ facturas
+Tras subir un fichero HC30 con 1.7M líneas, aparecieron 500/502 en la Comparativa. Root causes encontrados:
+
+- **Bug 1** — `$in` con >100k `num_serie_factura`: BSON >16MB → `DocumentTooLarge`. Solución: chunking de 20k en `_comparativa_impl` y `_comparativa_resumen_origenes_impl`.
+- **Bug 2** — `nif_titular = {"$in": [nif, None]}` matcheaba las 1.5M sin nif junto con las de la sociedad filtrada. Solución: quitado el legacy `None` en 3 sitios (`_build_filtros`, `_comparativa_resumen_origenes_impl`, `_comparativa_periodos_impl`). Ahora sólo docs explícitamente etiquetados con el NIF.
+- **Bug 3** — Sub-queries del bundle cargaban 1M docs con `to_list(None)` × 3 = 15GB → OOM del pod. Solución: `_comparativa_resumen_origenes_impl` refactorizada a streaming (cursor + batches de 20k). `_comparativa_totales_impl` ya usaba cursor.
+- **Bug 4** — `_comparativa_impl` seguía cargando todo el universo comercial. Solución: fast-path para `estado=solo_comercial` con paginación directa en Mongo (`.skip().limit()`). No aplica sort custom ni num_serie regex.
+- **Modo ligero en resumen-origenes**: cuando universo > 500k, no cruza con SII (devuelve solo agregados). El detalle matches/discrepancias se consulta con estado específico.
+- **Guard anti-OOM**: `_comparativa_bundle_impl` devuelve **400 amigable** si universo > 200k sin nif o > 500k con nif y sin estado. Frontend detecta el 400 y cambia automáticamente a `estado=solo_comercial` con toast informativo.
+- **Warmup ligero**: sólo precarga bundles con <300k docs y combinaciones (nif, año, mes) con <200k. Con datasets mayores el user acepta el cache-miss de la 1ª carga (~13s).
+- **Catálogo sociedades**: añadidas entradas `HC39→A74251836`, `HC30→A95000295`, `NC→A95000295` para que futuros imports SIGLO mapeen el NIF automáticamente.
+
+### Estado actual medido
+- Bundle A74251836 (487k comerciales) `estado=solo_comercial`: **11.7s** cache-miss / **<200ms** cache-hit
+- Bundle A95000295 (1M comerciales) `estado=solo_comercial`: **12.8s** cache-miss / **<200ms** cache-hit
+- Bundle A95000295 sin estado: **400 amigable en 0.27s** → frontend cambia a solo_comercial automáticamente

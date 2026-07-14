@@ -416,7 +416,35 @@ export default function Comparativa() {
       // Endpoint agregado: 1 sola petición HTTP devuelve list + totales +
       // resumen_origenes. Sustituye a 3 requests paralelas que saturaban el
       // ingress (502) al filtrar por mes con dataset grande (1M+ docs).
-      const { data: bundle } = await api.get("/comparativa/bundle", { params });
+      let bundle;
+      try {
+        const resp = await api.get("/comparativa/bundle", { params });
+        bundle = resp.data;
+      } catch (err) {
+        // Cuando el backend rechaza (400) por dataset masivo, cambiamos
+        // automáticamente el filtro a `solo_comercial` (paginado en Mongo,
+        // rápido incluso con millones de docs) y reintentamos.
+        const status = err?.response?.status;
+        const detail = err?.response?.data?.detail || "";
+        if (
+          status === 400 &&
+          typeof detail === "string" &&
+          detail.includes("Dataset demasiado grande") &&
+          filtroEstado !== "solo_comercial"
+        ) {
+          toast.info(
+            "Dataset masivo detectado — cambiando vista a Sólo comercial",
+            {
+              description:
+                "Selecciona un estado o filtra por período para ver otros modos.",
+              duration: 6000,
+            },
+          );
+          setFiltroEstado("solo_comercial");
+          return;
+        }
+        throw err;
+      }
       const data = bundle.list || {};
       setItems(data.items);
       setTotal(data.total);
