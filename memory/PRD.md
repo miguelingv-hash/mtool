@@ -400,3 +400,13 @@ Tras subir un fichero HC30 con 1.7M líneas, aparecieron 500/502 en la Comparati
 - Bundle A74251836 (487k comerciales) `estado=solo_comercial`: **11.7s** cache-miss / **<200ms** cache-hit
 - Bundle A95000295 (1M comerciales) `estado=solo_comercial`: **12.8s** cache-miss / **<200ms** cache-hit
 - Bundle A95000295 sin estado: **400 amigable en 0.27s** → frontend cambia a solo_comercial automáticamente
+
+## Bug fix 14 Jul 2026 — solo_comercial devolvía 0 aunque había más docs en Comercial que en SII
+El fast-path del endpoint `/api/comparativa/bundle` con `estado=solo_comercial` (añadido en el fix anterior para evitar OOM con datasets grandes) tenía un bug: devolvía TODAS las comerciales del filtro marcadas como solo_comercial, sin excluir las que tienen match en SII. Consecuencia: los users veían counts incorrectos.
+
+**Corrección**: el fast-path ahora carga en memoria un set con `num_serie_factura` de `facturas_sii` dentro del mismo filtro, y filtra las comerciales excluyendo las que estén en ese set. Con nif A74251836: comercial=487.749, SII=430.344 → solo_comercial correcto ~59.242.
+
+**Verificado por testing agent (iteration_20.json)**:
+- 6/6 tests backend PASS incluyendo coherencia matemática vs Mongo (tol 1%)
+- Frontend cambia automáticamente a `solo_comercial` cuando el backend devuelve 400 amigable
+- Cache-miss ~15s primera vez, cache-hit <200ms
