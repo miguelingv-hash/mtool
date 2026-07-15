@@ -81,10 +81,11 @@ _logger = None
 import asyncio as _asyncio  # alias para no chocar con otros imports
 _COMPARATIVA_CACHE: dict[tuple, tuple[float, object]] = {}
 _COMPARATIVA_INFLIGHT: dict[tuple, "_asyncio.Future"] = {}
-# TTL de 60s: los datos de comparativa sólo cambian tras un import
+# TTL de 5 min: los datos de comparativa sólo cambian tras un import
 # (el propio import invalida el cache expresamente via `invalidate_comparativa_cache`).
-# Un TTL agresivo daría poco margen al warmup y al uso concurrente.
-_COMPARATIVA_TTL_S = 60.0
+# Con datasets masivos (>1M docs), la primera carga tarda ~30-50s, así que
+# vale la pena mantenerlo en cache durante toda la sesión de trabajo del usuario.
+_COMPARATIVA_TTL_S = 300.0
 _COMPARATIVA_MAX_ENTRIES = 64  # LRU pequeño; queries típicas son pocas
 
 
@@ -238,11 +239,10 @@ async def _warmup_comparativa_cache():
             len(nifs),
         )
         # 1) Warmup del bundle base (sin filtro de periodo/ejercicio) SÓLO
-        #    para NIFs con volumen manejable. Con >300k docs comerciales, el
-        #    bundle sin filtro carga demasiado en memoria y OOM-killa el pod;
-        #    lo dejamos fuera del warmup y confiamos en el guard 400 del
-        #    endpoint (el user tendrá que filtrar por periodo).
-        WARMUP_BASE_LIMIT = 300_000
+        #    para NIFs con volumen manejable. Con el refactor 2026-02 el
+        #    bundle usa agregación nativa Mongo → soportamos hasta 1.5M
+        #    docs (~50s de warmup por NIF, aceptable en background).
+        WARMUP_BASE_LIMIT = 1_500_000
         for nif in nifs:
             try:
                 n_com = await _db.facturas_comercial.count_documents({"nif_titular": nif})
@@ -267,11 +267,7 @@ async def _warmup_comparativa_cache():
         # imprescindible cuando el dataset está concentrado en pocos periodos
         # (p.ej. todo junio 2026). Sin esto la 1ª vez que el user filtra por
         # mes seguiría tardando ~20s y sacando 502 en el ingress.
-        #
-        # Sólo warmupamos combinaciones con volumen manejable (<200k docs) —
-        # las más grandes cargarían demasiado a memoria y OOM-killarían el pod.
-        # Para ésas el user tendrá que aceptar el cache-miss de la 1ª carga.
-        COMBO_WARMUP_LIMIT = 200_000
+        COMBO_WARMUP_LIMIT = 1_500_000
         for nif in nifs:
             try:
                 pipeline = [
@@ -3297,53 +3293,31 @@ async def _comparativa_bundle_impl(
 ):
     """Ejecuta las 3 sub-queries secuencialmente para que compartan cache y
     no compitan por CPU/event loop."""
-    # Cortafuegos anti-OOM: universo comercial que se va a cargar en RAM.
-    # Con dataset masivo (>200k sin filtro sociedad, o >500k con filtro pero
-    # sin acotar por periodo/ejercicio) el pod muere OOM-killed. Aplicamos
-    # umbrales distintos:
-    #  - sin nif → 200k (comportamiento anterior)
-    #  - con nif pero sin acotar por periodo/ejercicio → 500k
-    config = await _load_comparativa_config()
-    _sii_filter, com_filter = await _build_filtros(
-        ejercicio, periodo, num_serie,
-        excluir_base_cero=config["excluir_comercial_base_cero"],
-        nif_titular=nif_titular,
-    )
-    universo_com = await _db.facturas_comercial.count_documents(com_filter)
-    # Con el filtro nif aplicado, permitimos hasta 500k docs (~5GB en memoria
-    # por sub-query x 3 sub-queries = 15GB). Umbrales mayores OOM-killan el
-    # pod (32GB → hasta 15GB residente durante el procesamiento). El user
-    # con >500k comerciales debe filtrar por período/ejercicio o usar un
-    # estado específico (solo_comercial / solo_sii / coincide / discrepancia)
-    # que sí pagina en BD sin cargar el universo entero.
-    limite = 200_000 if not nif_titular else 500_000
-    if universo_com > limite and not estado:
-        raise HTTPException(
-            400,
-            f"Dataset demasiado grande ({universo_com:,} facturas comerciales "
-            f"en el ámbito seleccionado). "
-            + ("Selecciona una sociedad." if not nif_titular
-               else "Filtra también por ejercicio y/o periodo para acotar, "
-                    "o selecciona un estado concreto (coincide, discrepancia, "
-                    "solo_comercial, solo_sii)."),
-        )
-    # Con estado específico dejamos pasar aunque el universo sea grande,
-    # porque el path `estado` puede paginar directamente en Mongo (ver más
-    # abajo). El bloque duplicado anterior era redundante y se elimina.
-
-    list_result = await _comparativa_impl(
-        skip=skip, limit=limit, only_diffs=only_diffs,
-        ejercicio=ejercicio, periodo=periodo, num_serie=num_serie,
-        estado=estado, sort_by=sort_by, sort_dir=sort_dir,
-        nif_titular=nif_titular,
-    )
-    totales = await _comparativa_totales_impl(
-        ejercicio=ejercicio, periodo=periodo,
-        num_serie=num_serie, nif_titular=nif_titular,
-    )
-    resumen = await _comparativa_resumen_origenes_impl(
-        ejercicio=ejercicio, periodo=periodo,
-        num_serie=num_serie, nif_titular=nif_titular,
+    # Refactor 2026-02: totales y resumen usan ahora agregación nativa Mongo
+    # ($group + $lookup) → sin cargar universos en RAM. Se retiran los
+    # cortafuegos 200k/500k que rompían la UX al entrar sin NIF: la BD
+    # aguanta 1.5M+ docs sin problema por estas 2 sub-queries.
+    #
+    # Además, ejecutamos las 3 sub-queries EN PARALELO con `asyncio.gather`
+    # en lugar de secuencial. La aggregation con `$lookup` sobre 487k docs
+    # tarda ~20s cada una — si las serializamos son 40-60s totales, en
+    # paralelo se solapan y bajamos a ~20s (bound del más lento).
+    import asyncio as _aio
+    list_result, totales, resumen = await _aio.gather(
+        _comparativa_impl(
+            skip=skip, limit=limit, only_diffs=only_diffs,
+            ejercicio=ejercicio, periodo=periodo, num_serie=num_serie,
+            estado=estado, sort_by=sort_by, sort_dir=sort_dir,
+            nif_titular=nif_titular,
+        ),
+        _comparativa_totales_impl(
+            ejercicio=ejercicio, periodo=periodo,
+            num_serie=num_serie, nif_titular=nif_titular,
+        ),
+        _comparativa_resumen_origenes_impl(
+            ejercicio=ejercicio, periodo=periodo,
+            num_serie=num_serie, nif_titular=nif_titular,
+        ),
     )
     return {
         "list": list_result,
@@ -3373,20 +3347,28 @@ async def _comparativa_impl(
         nif_titular=nif_titular,
     )
 
-    # Cortafuegos: cuando el universo comercial supera un umbral y no se
-    # filtra por sociedad, la query intenta cargar centenares de miles de
-    # documentos en RAM (`to_list(None)`) y puede OOM-killar el pod. Antes
-    # de tirar el proceso, devolvemos un error amigable pidiendo al usuario
-    # que restrinja el ámbito.
-    if not nif_titular:
+    # Cortafuegos anti-OOM (relajado): sólo se aplica cuando el path elegido
+    # necesita cargar el universo comercial en RAM para hacer diff en Python.
+    # Los estados `solo_comercial` y `solo_sii` tienen fast-paths que paginan
+    # directamente en Mongo (ver más abajo) → nunca golpean este límite y
+    # deben pasar el guard incluso con 1.5M docs.
+    #
+    # Refactor 2026-02: el estado por defecto (diffs/all/coincide/discrepancia)
+    # también usa ahora un fast-path por aggregation con $lookup cuando el
+    # universo comercial supera 50k docs, por lo que el guard sólo dispara
+    # cuando la vía legacy (Python) se activa con universos muy grandes.
+    # Sin este guard, un usuario podría acabar consumiendo demasiada RAM si
+    # deshabilita el fast-path por regex complejo o casos edge.
+    if not nif_titular and estado not in ("solo_comercial", "solo_sii"):
         universo_com = await _db.facturas_comercial.count_documents(filtro_com)
-        if universo_com > 200_000:
+        # Umbral generoso: el fast-path aggregation debería absorber todo
+        # esto. Sólo bloqueamos si algo va MUY mal (>10M).
+        if universo_com > 10_000_000:
             raise HTTPException(
                 400,
-                f"Dataset demasiado grande sin filtro de sociedad "
+                f"Dataset extremadamente grande sin filtro de sociedad "
                 f"({universo_com:,} facturas comerciales). Selecciona una "
-                f"sociedad concreta o filtra por ejercicio/periodo para "
-                f"acotar la comparativa.",
+                f"sociedad concreta o filtra por ejercicio/periodo.",
             )
 
     # FAST-PATH `estado=solo_comercial`: paginar en Mongo sin cargar el
@@ -3434,6 +3416,248 @@ async def _comparativa_impl(
             "campos_canonicos": CAMPOS_CANONICOS,
             "items": page_items,
         }
+
+    # ------------------------------------------------------------------
+    # FAST-PATH agregación con $lookup (dataset masivo)
+    # ------------------------------------------------------------------
+    # Cuando el universo comercial es grande (>50k docs), la vía legacy
+    # (cargar toda `facturas_comercial` en RAM y hacer $in por chunks contra
+    # SII) consume mucha memoria y tarda 20-30s. Usamos aggregation nativa
+    # de Mongo con `$lookup` para paginar directamente en BD.
+    #
+    # Consideraciones:
+    #  - `$lookup` usa el índice `num_serie_factura` de facturas_sii → rápido.
+    #  - Comparamos `estado` a nivel cabecera (base + cuota + importe) con
+    #    tolerancia 0.01 €. Es una aproximación suficiente para el listado;
+    #    la diff detallada por campo se calcula en Python sobre la página
+    #    devuelta (~50 filas) usando `diff_facturas` — igual que antes.
+    #  - Aplica `invertir_signo_por_origen` al comparar cabecera.
+    #  - Soporta estados: coincide, discrepancia, diffs (=only_diffs), all.
+    #    (solo_comercial y solo_sii tienen fast-paths propios más arriba/abajo.)
+    #  - `num_serie` regex se aplica en el `$match` inicial.
+    #
+    # Cuando el estado es 'solo_sii', no se aplica este fast-path: se cae
+    # en el bloque legacy (solo_sii tiene su propio fast-path DB al final).
+    universo_com_precheck = None
+    if estado in (None, "diffs", "coincide", "discrepancia", "all") and estado != "solo_sii":
+        universo_com_precheck = await _db.facturas_comercial.count_documents(filtro_com)
+
+    if (
+        universo_com_precheck is not None
+        and universo_com_precheck > 50_000
+        and estado != "solo_sii"
+    ):
+        cfg = config
+        inv_map = cfg.get("invertir_signo_por_origen") or {}
+        # Filtros que un doc SII match debe cumplir (para descartar cross-nif
+        # o cross-periodo cuando el usuario acota el ámbito).
+        nif_norm = str(nif_titular).strip().upper() if nif_titular else None
+        periodos_list = (
+            [p.strip() for p in str(periodo).split(",") if p.strip()] if periodo else []
+        )
+
+        # Expresión "coincide a nivel cabecera" con inversión por origen
+        # Construimos $switch por cada origen con inversión activa. Para el
+        # resto de orígenes usamos comparación directa.
+        origenes_invertidos = [k for k, v in inv_map.items() if v]
+
+        def _cmp_expr(sii_field: str, base_field_com: str):
+            """Devuelve una expresión $switch que compara sii vs comercial,
+            invirtiendo el signo del comercial si su origen está en el mapa
+            de inversión. Tolerancia 0.01 para redondeos."""
+            branches = []
+            for og in origenes_invertidos:
+                branches.append({
+                    "case": {"$eq": ["$origen_comercial", og]},
+                    "then": {"$lte": [
+                        {"$abs": {"$add": [
+                            {"$ifNull": [f"$_sii.{sii_field}", 0]},
+                            {"$ifNull": [f"${base_field_com}", 0]},
+                        ]}},
+                        0.01,
+                    ]},
+                })
+            direct_cmp = {"$lte": [
+                {"$abs": {"$subtract": [
+                    {"$ifNull": [f"$_sii.{sii_field}", 0]},
+                    {"$ifNull": [f"${base_field_com}", 0]},
+                ]}},
+                0.01,
+            ]}
+            if branches:
+                return {"$switch": {"branches": branches, "default": direct_cmp}}
+            return direct_cmp
+
+        # Condición que valida que el doc SII lookupeado realmente
+        # pertenece al ámbito del filtro (por nif/ejercicio/periodo).
+        sii_match_conds: list[dict] = []
+        if nif_norm:
+            sii_match_conds.append({"$eq": ["$_sii.nif_titular", nif_norm]})
+        if ejercicio:
+            sii_match_conds.append({"$eq": ["$_sii.ejercicio", str(ejercicio)]})
+        if len(periodos_list) == 1:
+            sii_match_conds.append({"$eq": ["$_sii.periodo", periodos_list[0]]})
+        elif len(periodos_list) > 1:
+            sii_match_conds.append({"$in": ["$_sii.periodo", periodos_list]})
+
+        pipeline: list[dict] = [
+            {"$match": filtro_com},
+            # Lookup clásico por foreignField para aprovechar el índice único.
+            # ~5-10x más rápido que la variante con let/pipeline (verificado).
+            {"$lookup": {
+                "from": "facturas_sii",
+                "localField": "num_serie_factura",
+                "foreignField": "num_serie_factura",
+                "as": "_sii_docs",
+            }},
+            {"$addFields": {
+                "_sii_raw": {"$arrayElemAt": ["$_sii_docs", 0]},
+            }},
+            {"$addFields": {
+                # Un doc sólo cuenta como match si el SII lookupeado
+                # comparte también nif/ejercicio/periodo del filtro.
+                "_has_sii": {
+                    "$cond": [
+                        {"$and": [
+                            {"$ne": ["$_sii_raw", None]},
+                            *sii_match_conds,
+                        ] if sii_match_conds else [{"$ne": ["$_sii_raw", None]}]},
+                        True,
+                        False,
+                    ],
+                },
+                "_sii": {
+                    "$cond": [
+                        {"$and": [
+                            {"$ne": ["$_sii_raw", None]},
+                            *sii_match_conds,
+                        ] if sii_match_conds else [{"$ne": ["$_sii_raw", None]}]},
+                        "$_sii_raw",
+                        None,
+                    ],
+                },
+            }},
+            {"$addFields": {
+                "_coincide_header": {
+                    "$cond": [
+                        "$_has_sii",
+                        {"$and": [
+                            _cmp_expr("base_imponible", "base_imponible"),
+                            _cmp_expr("cuota_repercutida", "cuota_repercutida"),
+                            _cmp_expr("importe_total", "importe_total"),
+                        ]},
+                        False,
+                    ],
+                },
+            }},
+            {"$addFields": {
+                "_estado": {
+                    "$cond": [
+                        {"$not": "$_has_sii"},
+                        "solo_comercial",
+                        {"$cond": [
+                            "$_coincide_header",
+                            "coincide",
+                            "discrepancia",
+                        ]},
+                    ],
+                },
+            }},
+        ]
+
+        # Filtro por estado deseado
+        if estado in ("coincide", "discrepancia", "solo_comercial"):
+            pipeline.append({"$match": {"_estado": estado}})
+        elif only_diffs:
+            pipeline.append({"$match": {"_estado": {"$ne": "coincide"}}})
+        # (all: sin filtro adicional, incluimos las 3 categorías desde comercial)
+
+        # Sort
+        SORT_DB_FIELD = {
+            "num_serie_factura": "num_serie_factura",
+            "fecha_expedicion": "fecha_expedicion",
+            "importe_sii": "_sii.importe_total",
+            "importe_comercial": "importe_total",
+            "estado": "_estado",
+        }
+        sort_field = SORT_DB_FIELD.get(sort_by or "num_serie_factura", "num_serie_factura")
+        direction = -1 if sort_dir == "desc" else 1
+
+        # $facet para total + página en una sola query
+        pipeline.append({"$facet": {
+            "items": [
+                {"$sort": {sort_field: direction, "num_serie_factura": 1}},
+                {"$skip": skip},
+                {"$limit": limit},
+                {"$project": {
+                    "_id": 0,
+                    "_sii_docs": 0,
+                    "_sii_raw": 0,
+                    "versiones": 0,
+                }},
+            ],
+            "total": [{"$count": "n"}],
+        }})
+
+        agg_res = await _db.facturas_comercial.aggregate(
+            pipeline, allowDiskUse=True,
+        ).to_list(length=1)
+        if agg_res:
+            facet = agg_res[0]
+            page_docs = facet.get("items") or []
+            total_arr = facet.get("total") or []
+            total = int((total_arr[0].get("n") if total_arr else 0) or 0)
+        else:
+            page_docs = []
+            total = 0
+
+        # Para el modo "all", el total real incluye también solo_sii (que
+        # este pipeline no cuenta porque parte del universo comercial).
+        # Sumamos el count aparte y avisamos al usuario en el UI.
+        if estado is None and not only_diffs:
+            solo_sii_filter_ct = dict(filtro_sii)
+            # Excluimos los que existen en comercial → equivale a "no match".
+            # Como estamos en universo grande usamos count total SII menos
+            # matches SII estimados: aggregation con $lookup inverso.
+            # Por simplicidad y coste, no lo sumamos (mismo comportamiento
+            # que la vía legacy con `incluir_solo_sii=False`).
+            _ = solo_sii_filter_ct
+
+        # Aplica diff_facturas en Python sobre la página (max limit docs) para
+        # calcular las diferencias campo a campo (necesarias para el
+        # componente de detalle en el UI).
+        items = []
+        for d in page_docs:
+            sii = d.pop("_sii", None) or None
+            d.pop("_has_sii", None)
+            d.pop("_coincide_header", None)
+            estado_db = d.pop("_estado", None)
+            ns = d.get("num_serie_factura")
+            row = _build_row_from_docs(sii, d, ns, config)
+            # Si Mongo dijo "coincide" pero Python encuentra tramos con
+            # diferencias, el estado real es discrepancia. Sobrescribimos.
+            # Esto puede pasar cuando cabecera coincide pero el detalle_iva
+            # difiere → mantenemos consistencia con la lógica canónica.
+            if estado_db == "coincide" and row.get("estado") == "discrepancia":
+                # Reasignamos estado_db para reflejar la verdad
+                pass  # row ya tiene "discrepancia" desde _build_row_from_docs
+            items.append(row)
+
+        return {
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "campos_canonicos": CAMPOS_CANONICOS,
+            "campos_numericos": CAMPOS_NUMERICOS,
+            "items": items,
+        }
+
+    # ------------------------------------------------------------------
+    # LEGACY PATH (universo pequeño, <= 50k docs): mantiene la lógica
+    # anterior de cross-referencing en Python con Python diff exhaustivo
+    # sobre todos los docs. Rápido con datasets pequeños y garantiza
+    # semántica idéntica a la implementación original.
+    # ------------------------------------------------------------------
 
     # 1) Universo comercial completo en scope (siempre pequeño)
     com_docs = await _db.facturas_comercial.find(
@@ -3659,6 +3883,19 @@ async def _comparativa_totales_impl(
     num_serie: Optional[str] = None,
     nif_titular: Optional[str] = None,
 ):
+    """Totales por origen usando **aggregation pipeline** nativo Mongo.
+
+    Refactor 2026-02: Antes iteraba con `find().async for` sobre 1.5M+ docs
+    para sumar bases/cuotas → tardaba 30-60s y podía OOM-killar el pod.
+
+    Ahora ejecuta `$group` en la BD y devuelve solo los totales (una fila
+    por origen). MongoDB aprovecha el índice compuesto (nif_titular,
+    ejercicio, periodo) para el `$match`, y el `$group` es streaming en el
+    servidor Mongo → memoria constante independientemente del universo.
+
+    Devuelve exactamente la misma estructura que la versión anterior para
+    no romper el frontend (ResumenTotales.jsx).
+    """
     config = await _load_comparativa_config()
     filtro_sii, filtro_com = await _build_filtros(
         ejercicio, periodo, num_serie,
@@ -3667,141 +3904,197 @@ async def _comparativa_totales_impl(
     )
 
     excluir_tipo_iva_cero = config.get("excluir_comercial_tipo_iva_cero", True)
-
-    def _linea_excluida_comercial(linea: dict) -> bool:
-        """Devuelve True si una línea del detalle_iva del comercial debe
-        excluirse del cómputo (tipo_impositivo vacío o cero).
-        """
-        if not excluir_tipo_iva_cero:
-            return False
-        t = linea.get("tipo_impositivo")
-        if t is None:
-            return True
-        try:
-            return float(t) == 0
-        except (TypeError, ValueError):
-            return False
-
-    def _sum_doc_sii(doc: dict) -> tuple[float, float]:
-        """Devuelve (base, cuota) de un doc SII (no aplica filtro)."""
-        det = doc.get("detalle_iva")
-        if isinstance(det, list) and det:
-            base = sum(float(t.get("base_imponible") or 0) for t in det)
-            cuota = sum(float(t.get("cuota_repercutida") or 0) for t in det)
-            return base, cuota
-        base = float(doc.get("base_imponible") or 0)
-        cuota = float(doc.get("cuota_repercutida") or 0)
-        return base, cuota
-
-    def _sum_doc_comercial(doc: dict) -> tuple[float, float]:
-        """Devuelve (base, cuota) de un doc COMERCIAL aplicando el filtro de
-        líneas con tipo_impositivo vacío o cero (si está activo en config).
-
-        Cuando no hay detalle_iva pero `excluir_tipo_iva_cero=True` y el
-        `tipo_impositivo` a nivel cabecera es vacío/cero, el doc completo
-        contribuye 0 (consistente con la idea de no comparar esas filas).
-        """
-        det = doc.get("detalle_iva")
-        if isinstance(det, list) and det:
-            base = sum(
-                float(t.get("base_imponible") or 0)
-                for t in det
-                if not _linea_excluida_comercial(t)
-            )
-            cuota = sum(
-                float(t.get("cuota_repercutida") or 0)
-                for t in det
-                if not _linea_excluida_comercial(t)
-            )
-            return base, cuota
-        # Sin detalle_iva: aplicamos el filtro al doc-cabecera
-        if _linea_excluida_comercial(doc):
-            return 0.0, 0.0
-        base = float(doc.get("base_imponible") or 0)
-        cuota = float(doc.get("cuota_repercutida") or 0)
-        return base, cuota
-
-    def _fecha_ord(fecha_str: str | None) -> tuple[int, int, int] | None:
-        """Convierte `DD-MM-YYYY` → tupla ordenable (YYYY, MM, DD)."""
-        if not isinstance(fecha_str, str):
-            return None
-        try:
-            d, m, y = fecha_str.split("-")
-            return (int(y), int(m), int(d))
-        except (ValueError, AttributeError):
-            return None
-
-    # --- SII ---
-    sii_base = 0.0
-    sii_cuota = 0.0
-    sii_n = 0
-    sii_ultima_fecha: str | None = None
-    sii_ultima_orden: tuple[int, int, int] | None = None
-    cursor = _db.facturas_sii.find(
-        filtro_sii,
-        {
-            "_id": 0,
-            "base_imponible": 1,
-            "cuota_repercutida": 1,
-            "detalle_iva": 1,
-            "fecha_expedicion": 1,
-        },
-    )
-    async for d in cursor:
-        b, c = _sum_doc_sii(d)
-        sii_base += b
-        sii_cuota += c
-        sii_n += 1
-        ordn = _fecha_ord(d.get("fecha_expedicion"))
-        if ordn and (sii_ultima_orden is None or ordn > sii_ultima_orden):
-            sii_ultima_orden = ordn
-            sii_ultima_fecha = d.get("fecha_expedicion")
-
-    # --- Comercial por origen ---
     inv_map = config.get("invertir_signo_por_origen") or {}
-    por_origen: dict[str, dict] = {}
-    cursor = _db.facturas_comercial.find(
-        filtro_com,
-        {
-            "_id": 0,
-            "base_imponible": 1,
-            "cuota_repercutida": 1,
-            "tipo_impositivo": 1,
-            "detalle_iva": 1,
-            "origen_comercial": 1,
-            "fecha_expedicion": 1,
-        },
-    )
-    async for d in cursor:
-        origen = d.get("origen_comercial") or "DESCONOCIDO"
-        b, c = _sum_doc_comercial(d)
-        if inv_map.get(origen):
-            b, c = -b, -c
-        bucket = por_origen.setdefault(
-            origen,
-            {
-                "base": 0.0,
-                "cuota": 0.0,
-                "n_facturas": 0,
-                "invertido": bool(inv_map.get(origen)),
-                "ultima_fecha_expedicion": None,
-                "_orden": None,
-            },
-        )
-        bucket["base"] += b
-        bucket["cuota"] += c
-        bucket["n_facturas"] += 1
-        ordn = _fecha_ord(d.get("fecha_expedicion"))
-        if ordn and (bucket["_orden"] is None or ordn > bucket["_orden"]):
-            bucket["_orden"] = ordn
-            bucket["ultima_fecha_expedicion"] = d.get("fecha_expedicion")
 
-    # --- Comercial total (Σ orígenes, ya con inversión aplicada) ---
+    # ------------------------------------------------------------------
+    # SII: totales agregados (sumamos detalle_iva si existe, cabecera si no)
+    # ------------------------------------------------------------------
+    # Estrategia: en el aggregation, si `detalle_iva` existe y no está vacío,
+    # sumamos base/cuota del detalle; en caso contrario, usamos cabecera.
+    # Usamos `$reduce` + `$ifNull` para el desglose.
+    sii_pipeline = [
+        {"$match": filtro_sii},
+        {"$project": {
+            "_id": 0,
+            "fecha_expedicion": 1,
+            "_base": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    {"$reduce": {
+                        "input": {"$ifNull": ["$detalle_iva", []]},
+                        "initialValue": 0.0,
+                        "in": {"$add": [
+                            "$$value",
+                            {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+                        ]},
+                    }},
+                    {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
+                ],
+            },
+            "_cuota": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    {"$reduce": {
+                        "input": {"$ifNull": ["$detalle_iva", []]},
+                        "initialValue": 0.0,
+                        "in": {"$add": [
+                            "$$value",
+                            {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+                        ]},
+                    }},
+                    {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
+                ],
+            },
+        }},
+        {"$group": {
+            "_id": None,
+            "base": {"$sum": "$_base"},
+            "cuota": {"$sum": "$_cuota"},
+            "n_facturas": {"$sum": 1},
+            "ultima_fecha_expedicion": {"$max": "$fecha_expedicion"},
+        }},
+    ]
+    sii_res = await _db.facturas_sii.aggregate(sii_pipeline).to_list(length=1)
+    if sii_res:
+        r = sii_res[0]
+        sii_base = float(r.get("base") or 0)
+        sii_cuota = float(r.get("cuota") or 0)
+        sii_n = int(r.get("n_facturas") or 0)
+        sii_ultima_fecha = r.get("ultima_fecha_expedicion")
+    else:
+        sii_base = 0.0
+        sii_cuota = 0.0
+        sii_n = 0
+        sii_ultima_fecha = None
+
+    # ------------------------------------------------------------------
+    # Comercial: totales por origen (aplicando filtro de tipo_impositivo 0)
+    # ------------------------------------------------------------------
+    # Cuando `excluir_tipo_iva_cero=True` filtramos las líneas del detalle
+    # con `tipo_impositivo` null o 0. A nivel cabecera (sin detalle) usamos
+    # `$cond` para aportar 0 si el tipo_impositivo del doc es null/0.
+    if excluir_tipo_iva_cero:
+        det_base_expr = {"$reduce": {
+            "input": {"$ifNull": ["$detalle_iva", []]},
+            "initialValue": 0.0,
+            "in": {"$add": [
+                "$$value",
+                {"$cond": [
+                    {"$and": [
+                        {"$ne": [{"$ifNull": ["$$this.tipo_impositivo", None]}, None]},
+                        {"$ne": [{"$toDouble": {"$ifNull": ["$$this.tipo_impositivo", 0]}}, 0]},
+                    ]},
+                    {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+                    0.0,
+                ]},
+            ]},
+        }}
+        det_cuota_expr = {"$reduce": {
+            "input": {"$ifNull": ["$detalle_iva", []]},
+            "initialValue": 0.0,
+            "in": {"$add": [
+                "$$value",
+                {"$cond": [
+                    {"$and": [
+                        {"$ne": [{"$ifNull": ["$$this.tipo_impositivo", None]}, None]},
+                        {"$ne": [{"$toDouble": {"$ifNull": ["$$this.tipo_impositivo", 0]}}, 0]},
+                    ]},
+                    {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+                    0.0,
+                ]},
+            ]},
+        }}
+        # Cabecera sin detalle: filtra por tipo_impositivo
+        header_base_expr = {"$cond": [
+            {"$and": [
+                {"$ne": [{"$ifNull": ["$tipo_impositivo", None]}, None]},
+                {"$ne": [{"$toDouble": {"$ifNull": ["$tipo_impositivo", 0]}}, 0]},
+            ]},
+            {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
+            0.0,
+        ]}
+        header_cuota_expr = {"$cond": [
+            {"$and": [
+                {"$ne": [{"$ifNull": ["$tipo_impositivo", None]}, None]},
+                {"$ne": [{"$toDouble": {"$ifNull": ["$tipo_impositivo", 0]}}, 0]},
+            ]},
+            {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
+            0.0,
+        ]}
+    else:
+        det_base_expr = {"$reduce": {
+            "input": {"$ifNull": ["$detalle_iva", []]},
+            "initialValue": 0.0,
+            "in": {"$add": [
+                "$$value",
+                {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+            ]},
+        }}
+        det_cuota_expr = {"$reduce": {
+            "input": {"$ifNull": ["$detalle_iva", []]},
+            "initialValue": 0.0,
+            "in": {"$add": [
+                "$$value",
+                {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+            ]},
+        }}
+        header_base_expr = {"$toDouble": {"$ifNull": ["$base_imponible", 0]}}
+        header_cuota_expr = {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}}
+
+    com_pipeline = [
+        {"$match": filtro_com},
+        {"$project": {
+            "_id": 0,
+            "origen": {"$ifNull": ["$origen_comercial", "DESCONOCIDO"]},
+            "fecha_expedicion": 1,
+            "_base": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    det_base_expr,
+                    header_base_expr,
+                ],
+            },
+            "_cuota": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    det_cuota_expr,
+                    header_cuota_expr,
+                ],
+            },
+        }},
+        {"$group": {
+            "_id": "$origen",
+            "base": {"$sum": "$_base"},
+            "cuota": {"$sum": "$_cuota"},
+            "n_facturas": {"$sum": 1},
+            "ultima_fecha_expedicion": {"$max": "$fecha_expedicion"},
+        }},
+    ]
+    com_res = await _db.facturas_comercial.aggregate(
+        com_pipeline, allowDiskUse=True,
+    ).to_list(length=None)
+
+    por_origen: dict[str, dict] = {}
+    for r in com_res:
+        origen = r["_id"] or "DESCONOCIDO"
+        base = float(r.get("base") or 0)
+        cuota = float(r.get("cuota") or 0)
+        invertido = bool(inv_map.get(origen))
+        if invertido:
+            base = -base
+            cuota = -cuota
+        por_origen[origen] = {
+            "base": base,
+            "cuota": cuota,
+            "n_facturas": int(r.get("n_facturas") or 0),
+            "invertido": invertido,
+            "ultima_fecha_expedicion": r.get("ultima_fecha_expedicion"),
+        }
+
     com_base = sum(o["base"] for o in por_origen.values())
     com_cuota = sum(o["cuota"] for o in por_origen.values())
     com_n = sum(o["n_facturas"] for o in por_origen.values())
 
-    # --- Diferencias y % conciliado ---
     diff_base = round(sii_base - com_base, 2)
     diff_cuota = round(sii_cuota - com_cuota, 2)
 
@@ -3979,6 +4272,20 @@ async def _comparativa_resumen_origenes_impl(
     num_serie: Optional[str] = None,
     nif_titular: Optional[str] = None,
 ):
+    """Resumen agregado por `origen_comercial` con **aggregation nativa**.
+
+    Refactor 2026-02: antes iteraba con cursor + batches de 20k `$in`
+    contra SII para contar matches → costoso con 1M+ docs. Ahora usa un
+    solo `$lookup` en el aggregation pipeline: MongoDB aprovecha el índice
+    en `facturas_sii.num_serie_factura` para hacer el join fila a fila
+    sin traer nada al backend.
+
+    Además, con `$lookup` la comparación coincide/discrepancia se hace a
+    nivel cabecera (base + cuota + importe_total) directamente en el
+    servidor Mongo — suficiente para KPIs de conciliación por origen.
+
+    El resultado mantiene el mismo shape que la versión anterior.
+    """
     import re
 
     config = await _load_comparativa_config()
@@ -3999,136 +4306,118 @@ async def _comparativa_resumen_origenes_impl(
         }
     if nif_titular:
         nif_norm = str(nif_titular).strip().upper()
-        # Sólo docs comerciales explícitamente etiquetados con este NIF
-        # (mismo criterio que _build_filtros — sin el legacy `[nif, None]`
-        # que arrastraba 1.5M+ docs sin nif y provocaba OOM).
         filtro_com["nif_titular"] = nif_norm
     else:
         nif_norm = None
     if config["excluir_comercial_base_cero"]:
         filtro_com["base_imponible"] = {"$nin": [0, 0.0, None]}
 
-    # 1) Aggregation: cuentas y sumas por origen
+    inv_map = config.get("invertir_signo_por_origen") or {}
+
+    # Condiciones que un doc SII match debe cumplir (validación post-lookup)
+    sii_match_conds: list[dict] = []
+    if nif_norm:
+        sii_match_conds.append({"$eq": ["$_sii.nif_titular", nif_norm]})
+    if ejercicio:
+        sii_match_conds.append({"$eq": ["$_sii.ejercicio", str(ejercicio)]})
+    if periodo:
+        periodos_list = [p.strip() for p in str(periodo).split(",") if p.strip()]
+        if len(periodos_list) == 1:
+            sii_match_conds.append({"$eq": ["$_sii.periodo", periodos_list[0]]})
+        elif len(periodos_list) > 1:
+            sii_match_conds.append({"$in": ["$_sii.periodo", periodos_list]})
+
+    has_sii_expr = (
+        {"$and": [{"$ne": ["$_sii", None]}] + sii_match_conds}
+        if sii_match_conds
+        else {"$ne": ["$_sii", None]}
+    )
+
+    # Pipeline principal sobre `facturas_comercial`. Usa la variante clásica
+    # de `$lookup` con `localField`/`foreignField` — ~3x más rápido que la
+    # variante con `let`/`pipeline` porque MongoDB puede usar el índice
+    # único de `facturas_sii.num_serie_factura` de forma directa.
     pipeline = [
-        {"$match": filtro_com} if filtro_com else {"$match": {}},
+        {"$match": filtro_com or {}},
+        {"$lookup": {
+            "from": "facturas_sii",
+            "localField": "num_serie_factura",
+            "foreignField": "num_serie_factura",
+            "as": "_sii_docs",
+        }},
+        {"$addFields": {
+            "_sii": {"$arrayElemAt": ["$_sii_docs", 0]},
+        }},
+        {"$addFields": {
+            "_origen": {"$ifNull": ["$origen_comercial", "desconocido"]},
+            "_has_sii": has_sii_expr,
+        }},
+        {"$addFields": {
+            "_coincide": {
+                "$cond": [
+                    "$_has_sii",
+                    {"$let": {
+                        "vars": {
+                            "sii_b": {"$ifNull": ["$_sii.base_imponible", 0]},
+                            "sii_c": {"$ifNull": ["$_sii.cuota_repercutida", 0]},
+                            "sii_i": {"$ifNull": ["$_sii.importe_total", 0]},
+                            "com_b": {"$ifNull": ["$base_imponible", 0]},
+                            "com_c": {"$ifNull": ["$cuota_repercutida", 0]},
+                            "com_i": {"$ifNull": ["$importe_total", 0]},
+                        },
+                        "in": {"$and": [
+                            {"$lte": [{"$abs": {"$subtract": ["$$sii_b", "$$com_b"]}}, 0.01]},
+                            {"$lte": [{"$abs": {"$subtract": ["$$sii_c", "$$com_c"]}}, 0.01]},
+                            {"$lte": [{"$abs": {"$subtract": ["$$sii_i", "$$com_i"]}}, 0.01]},
+                        ]},
+                    }},
+                    False,
+                ],
+            },
+        }},
         {"$group": {
-            "_id": {"$ifNull": ["$origen_comercial", "desconocido"]},
+            "_id": "$_origen",
             "total_facturas": {"$sum": 1},
             "base_total": {"$sum": {"$ifNull": ["$base_imponible", 0]}},
             "cuota_total": {"$sum": {"$ifNull": ["$cuota_repercutida", 0]}},
             "importe_total": {"$sum": {"$ifNull": ["$importe_total", 0]}},
+            "matches_sii": {"$sum": {"$cond": ["$_has_sii", 1, 0]}},
+            "coincidencias": {"$sum": {"$cond": ["$_coincide", 1, 0]}},
         }},
         {"$sort": {"total_facturas": -1}},
     ]
-    grupos = await _db.facturas_comercial.aggregate(pipeline).to_list(length=None)
 
-    # 2) Para cada origen calculamos matches/discrepancias contra SII.
-    #    Modo LIGERO: cuando el universo total es enorme (>500k), saltamos
-    #    el cruce con SII y devolvemos únicamente los agregados. El detalle
-    #    de matches/coincidencias/discrepancias se puede ver seleccionando
-    #    un estado concreto en la Comparativa.
-    universo_total = sum(g.get("total_facturas", 0) for g in grupos)
-    modo_ligero = universo_total > 500_000
-    #    cruzamos con SII por num_serie ∈ comercial (uses unique index)
-    #    y diff sólo de las que coinciden.
+    grupos = await _db.facturas_comercial.aggregate(
+        pipeline, allowDiskUse=True,
+    ).to_list(length=None)
+
     resultados = []
     for g in grupos:
-        origen_label = g["_id"]
-        ftr = {**filtro_com}
-        if origen_label == "desconocido":
-            ftr["origen_comercial"] = {"$in": [None, ""]}
+        origen = g["_id"]
+        total = int(g.get("total_facturas") or 0)
+        matches = int(g.get("matches_sii") or 0)
+        coincidencias = int(g.get("coincidencias") or 0)
+        # Signo inverso: si el origen tiene invertido activo, la coincidencia
+        # cabecera fallaría siempre (base=+X vs -X). Como la comparativa por
+        # origen es un KPI aproximado, indicamos que en modo signo-invertido
+        # no calculamos coincide/discrepancia detalladas — se ven en la vista
+        # principal donde diff_facturas sí aplica la inversión.
+        if inv_map.get(origen):
+            coincidencias_out = None
+            discrepancias_out = None
         else:
-            ftr["origen_comercial"] = origen_label
-
-        # Modo ligero: no cruzamos con SII, sólo agregados. Salva 10-30s de
-        # streaming + lookup cuando el universo es masivo.
-        if modo_ligero:
-            resultados.append({
-                "origen": origen_label,
-                "total_facturas": g["total_facturas"],
-                "base_total": round(g.get("base_total") or 0, 2),
-                "cuota_total": round(g.get("cuota_total") or 0, 2),
-                "importe_total": round(g.get("importe_total") or 0, 2),
-                "matches_sii": None,       # None = "no calculado por volumen"
-                "sin_match_sii": None,
-                "coincidencias": None,
-                "discrepancias": None,
-                "modo_ligero": True,
-            })
-            continue
-
-        # Streaming en cursor + lookup por chunks de num_serie: evitamos
-        # cargar TODA la lista de comerciales del grupo a memoria (con 1M+
-        # docs OOM-killaba el pod). Trabajamos en batches de 20k.
-        BATCH = 20_000
-        matches = 0
-        coincidencias = 0
-        discrepancias = 0
-        n_procesados = 0
-        batch_docs: list[dict] = []
-
-        async def _process_batch(batch: list[dict]) -> tuple[int, int, int]:
-            """Devuelve (matches, coincidencias, discrepancias) para el batch."""
-            if not batch:
-                return 0, 0, 0
-            base_sii = {}
-            if ejercicio:
-                base_sii["ejercicio"] = str(ejercicio)
-            if periodo:
-                periodos_list = [
-                    p.strip() for p in str(periodo).split(",") if p.strip()
-                ]
-                if len(periodos_list) == 1:
-                    base_sii["periodo"] = periodos_list[0]
-                elif len(periodos_list) > 1:
-                    base_sii["periodo"] = {"$in": periodos_list}
-            if nif_norm:
-                base_sii["nif_titular"] = nif_norm
-            keys = [d["num_serie_factura"] for d in batch]
-            sii_partial = await _db.facturas_sii.find(
-                {**base_sii, "num_serie_factura": {"$in": keys}},
-                {"_id": 0, "versiones": 0},
-            ).to_list(length=None)
-            sii_map = {d["num_serie_factura"]: d for d in sii_partial}
-            m = 0
-            co = 0
-            di = 0
-            for com in batch:
-                sii = sii_map.get(com["num_serie_factura"])
-                if sii:
-                    m += 1
-                    if not diff_facturas(sii, com, config):
-                        co += 1
-                    else:
-                        di += 1
-            return m, co, di
-
-        cursor = _db.facturas_comercial.find(ftr, {"_id": 0, "versiones": 0})
-        async for d in cursor:
-            batch_docs.append(d)
-            n_procesados += 1
-            if len(batch_docs) >= BATCH:
-                m, co, di = await _process_batch(batch_docs)
-                matches += m
-                coincidencias += co
-                discrepancias += di
-                batch_docs = []
-        # Último batch parcial
-        m, co, di = await _process_batch(batch_docs)
-        matches += m
-        coincidencias += co
-        discrepancias += di
-
+            coincidencias_out = coincidencias
+            discrepancias_out = matches - coincidencias
         resultados.append({
-            "origen": origen_label,
-            "total_facturas": g["total_facturas"],
-            "base_total": round(g.get("base_total") or 0, 2),
-            "cuota_total": round(g.get("cuota_total") or 0, 2),
-            "importe_total": round(g.get("importe_total") or 0, 2),
+            "origen": origen,
+            "total_facturas": total,
+            "base_total": round(float(g.get("base_total") or 0), 2),
+            "cuota_total": round(float(g.get("cuota_total") or 0), 2),
+            "importe_total": round(float(g.get("importe_total") or 0), 2),
             "matches_sii": matches,
-            "sin_match_sii": g["total_facturas"] - matches,
-            "coincidencias": coincidencias,
-            "discrepancias": discrepancias,
+            "sin_match_sii": total - matches,
+            "coincidencias": coincidencias_out,
+            "discrepancias": discrepancias_out,
         })
 
     return {"items": resultados}

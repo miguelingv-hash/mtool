@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 21 - Refactor 2026-02 (aggregation nativa $lookup/$group + asyncio.gather) verificado. Backend: 11/12 tests PASS del nuevo test_comparativa_refactor_iter21.py. Bundle NO devuelve 400 en carga inicial (fix del bug reportado) ✓. Totales + resumen-origenes responden 200 con estructura correcta. Cache-hit 2ª petición < 3s (baja de 27-58s cache-miss a instant). NIF grande (A95000295, 1M docs) también carga sin 400. FAIL: estado=solo_sii devuelve HTTP 500 UnboundLocalError ('solo_sii_filter' no definido en la rama len(com_keys)>50_000) — regresión real introducida por el refactor. Frontend: /comparativa H1 carga, filtros y totales cards se pueblan, PERO la request bundle inicial sin NIF (Sociedad='Todas') supera el timeout del ingress y devuelve 502 (no 400 — el fix cambió la naturaleza del error). La tabla queda 'Cargando...' hasta que el usuario elige una sociedad. Regresión iter20 (solo_comercial): PASS cuando se ejecuta con cache tibia.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/comparativa/bundle?estado=solo_sii&nif_titular=A74251836", "issue": "HTTP 500 UnboundLocalError: 'solo_sii_filter' referenced before assignment. En router_facturas.py L3700-3711, cuando len(com_keys) > 50_000 se toma la rama del count via $lookup y `solo_sii_filter` NO se define — pero luego a L3757 y L3792 se usa para el cursor de items. Solo se dispara en datasets grandes (NIFs con >50k com_keys, i.e., A74251836/A95000295).", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/comparativa/bundle (sin nif_titular)", "issue": "Cache-miss inicial 45-100s. Con el ingress de Kubernetes (timeout ~60s) devuelve 502 al frontend en lugar de completar. El frontend maneja ese error genérico como 'Cargando...' indefinido en vez de cambiar a solo_comercial (el catch sólo detecta 400 + detail 'Dataset demasiado grande', no 502)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Comparativa page inicial", "issue": "La tabla queda en 'Cargando...' cuando la sociedad = 'Todas' porque el bundle inicial tarda 90s+ (cache-miss universo global) y el ingress devuelve 502. El review request mencionaba 'default state es diffs con nif_titular autoselected (first NIF alphabetically)' pero el UI arranca con Sociedad='Todas'. Debería auto-seleccionar el primer NIF al montar.", "selector": "table tbody, .sociedad-selector", "priority": "HIGH"}
+    ],
+    "integration_issues": [
+      {"flow": "Comparativa initial load sin NIF", "issue": "El catch de /comparativa/bundle en Comparativa.jsx L423-446 sólo maneja 400+detail 'Dataset demasiado grande'. El 502 del ingress timeout se propaga como error genérico y se queda 'Cargando...'. Añadir fallback para 502/504/timeout que auto-seleccione un NIF.", "affected_selectors": ["table tbody tr"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_comparativa_refactor_iter21.py",
+    "/app/test_reports/pytest/iter21_refactor.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Fix UnboundLocalError en router_facturas.py L3700-3711. Definir `solo_sii_filter` también en la rama `if len(com_keys) > 50_000`. Ej: mover la construcción de `solo_sii_filter = dict(filtro_sii); ns_clause=...; ns_clause['$nin']=com_keys; solo_sii_filter['num_serie_factura']=ns_clause` FUERA del if/else, pero notar que con >500k com_keys el $nin excede el límite BSON 16MB — requiere fast-path alternativo (aggregation $lookup en facturas_sii con $match: {'com_match': {$eq: []}}).",
+    "HIGH: En Comparativa.jsx auto-seleccionar el primer NIF alfabético cuando `nifs-titulares` responde y no hay filtroNif seleccionado (evita el timeout del bundle global).",
+    "HIGH: Extender el catch de bundle a status 502/504 (ingress timeout) además del 400, cambiando también a solo_comercial o sugiriendo elegir sociedad.",
+    "MEDIUM: Considerar aumentar el timeout del ingress (nginx.ingress.kubernetes.io/proxy-read-timeout) por encima de 100s, o preferentemente reducir el cache-miss cold a <30s (índice compuesto nif_titular+num_serie_factura para el $lookup)."
+  ],
+  "critical_code_review_comments": [
+    "router_facturas.py L3700-3711 (bug crítico): la variable `solo_sii_filter` sólo se define en la rama `else` (com_keys ≤ 50k). Cuando se toma la rama `if` (com_keys > 50k), la variable queda sin definir pero se usa en L3757/L3792 para el cursor items → UnboundLocalError → HTTP 500.",
+    "router_facturas.py L3384-3418 (fast-path solo_comercial): la carga de sii_keys como set() sigue siendo O(N) en memoria (~100MB para 907k strings). Considerar aggregation Mongo $lookup + $match: {'sii_match': {$eq: []}} con paginación nativa que evita cargar todo el set en RAM del proceso Python.",
+    "router_facturas.py L3305-3321 (asyncio.gather): las 3 sub-queries comparten el pool de conexiones de Motor. Con 3 aggregations pesadas simultáneas se pueden saturar los ~10 conexiones del pool y bloquear otros requests. Considerar Semaphore(2) o cache warmup que rellene los 3 caches al arrancar.",
+    "Comparativa.jsx L391-460: no hay indicador visual de 'cargando datos masivos, puede tardar 30-60s'. Con cache-miss 90s el usuario ve 'Cargando...' silencioso, no sabe si está roto. Añadir toast/skeleton con mensaje explícito.",
+    "Comparativa.jsx: la primera carga sin `filtroNif` es inevitable con 1.5M docs. Aparte del auto-select, considerar mostrar la selección de sociedad ANTES de intentar la primera query (defer /bundle hasta que haya nif o el usuario elija 'Todas' explícitamente)."
+  ],
+  "updated_files": ["/app/backend/tests/test_comparativa_refactor_iter21.py (nuevo)"],
+  "success_rate": {"backend": "92% (11/12 nuevos + regresión iter20 PASS cuando cache warm)", "frontend": "50% (H1 y filtros OK; tabla no se puebla por 502)"},
+  "test_credentials": "Admin miguelingv@gmail.com via JWT minted con auth.create_access_token, cookie monitorsii_access.",
+  "seed_data_creation": "Ninguno.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "El refactor 2026-02 arregló el HTTP 400 inmediato pero introdujo 2 problemas: (1) HTTP 500 UnboundLocalError en estado=solo_sii con NIFs grandes — root cause identificado en L3700-3711. (2) HTTP 502 en la carga inicial 'Todas' por ingress timeout — mitigable auto-seleccionando NIF en frontend. Los tests /app/backend/tests/test_comparativa_refactor_iter21.py cubren 12 casos; una vez arreglado solo_sii deben pasar 12/12. Los tests iter20 pasan con cache tibia (si fallan por Read timeout, correr uno-a-uno para warmear cache).",
+  "rca_of_the_issue": "Root cause del bug reportado (HTTP 400 en carga inicial): el guard OOM previo bloqueaba estado=diffs sin NIF con universo >200k docs. Fix aplicado: elevar el umbral a 10M y añadir fast-path aggregation con $lookup para universos >50k. Este fix funciona pero introduce dos side effects: (a) el bloque legacy Python-side que corre cuando universo ≤50k define `solo_sii_filter`, pero la nueva rama `>50k` (L3700) sólo calcula el count agregado y OLVIDA definir la variable — se rompe cuando estado=solo_sii. Reproducible con `GET /api/comparativa/bundle?estado=solo_sii&nif_titular=A74251836` → 500. (b) La query bundle sin NIF ahora dura 45-100s (antes fallaba rápido con 400) y el ingress corta a ~60s → 502. El frontend no maneja 502 y queda 'Cargando...'. Mitigation: definir solo_sii_filter también en la rama >50k pero con fallback que evite $nin gigante (aggregation lookup)."
+}
