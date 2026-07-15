@@ -424,8 +424,13 @@ export default function Comparativa() {
         // Cuando el backend rechaza (400) por dataset masivo, cambiamos
         // automáticamente el filtro a `solo_comercial` (paginado en Mongo,
         // rápido incluso con millones de docs) y reintentamos.
+        // También manejamos 502/504 (ingress timeout tras 60-90s) sugiriendo
+        // al usuario que seleccione una sociedad concreta.
         const status = err?.response?.status;
         const detail = err?.response?.data?.detail || "";
+        const isTimeout =
+          err?.code === "ECONNABORTED" ||
+          (typeof err?.message === "string" && err.message.includes("timeout"));
         if (
           status === 400 &&
           typeof detail === "string" &&
@@ -442,6 +447,31 @@ export default function Comparativa() {
           );
           setFiltroEstado("solo_comercial");
           return;
+        }
+        if ((status === 502 || status === 504 || isTimeout) && filtroNif === "__all__") {
+          // El bundle global (sin filtro sociedad) sobre 1M+ docs se corta
+          // en el ingress. Auto-seleccionamos el primer NIF disponible.
+          if (nifsDisponibles.length > 0) {
+            const firstNif = [...nifsDisponibles].sort()[0];
+            toast.info(
+              "El dataset global es demasiado grande — filtrando por " +
+                (sociedadesMap[firstNif] || firstNif),
+              {
+                description:
+                  "Cambia de sociedad en el selector de arriba si necesitas otra.",
+                duration: 8000,
+              },
+            );
+            setFiltroNif(firstNif);
+            return;
+          }
+        }
+        if (status === 502 || status === 504 || isTimeout) {
+          toast.error("La consulta está tardando demasiado", {
+            description:
+              "Filtra por período o intenta de nuevo — la BD está calentando la caché (1ª carga puede tardar 30-60s).",
+            duration: 10000,
+          });
         }
         throw err;
       }
@@ -485,10 +515,20 @@ export default function Comparativa() {
         });
         setSociedadesMap(mp);
         setComercialSinNif(r.data?.comercial_sin_nif || 0);
-        // Si sólo hay un NIF, autoseleccionarlo para evitar fricción.
-        // Si hay varios, pasamos a `__all__` explícito (comportamiento previo).
-        // Si no hay ninguno, también `__all__` como fallback benigno.
-        setFiltroNif(lst.length === 1 ? lst[0] : "__all__");
+        // Autoselección: para evitar el query global (1.5M+ docs) que
+        // dispara timeouts 502 del ingress, elegimos siempre un NIF al
+        // montar. El usuario puede cambiar a "Todas" explícitamente si lo
+        // necesita, pero eso ya no es la vista inicial.
+        //   - 1 NIF → ese
+        //   - varios → primero alfabético
+        //   - ninguno → "__all__" (fallback benigno; muestra la pantalla vacía)
+        if (lst.length === 1) {
+          setFiltroNif(lst[0]);
+        } else if (lst.length > 1) {
+          setFiltroNif([...lst].sort()[0]);
+        } else {
+          setFiltroNif("__all__");
+        }
       })
       .catch(() => {});
   }, []);

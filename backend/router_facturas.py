@@ -3449,6 +3449,11 @@ async def _comparativa_impl(
     ):
         cfg = config
         inv_map = cfg.get("invertir_signo_por_origen") or {}
+        # Campos que definen "coincide" — configurable por el usuario en
+        # /admin/comparativa. Por defecto: base_imponible + cuota_repercutida.
+        campos_comparados = list(cfg.get("campos_comparados") or [
+            "base_imponible", "cuota_repercutida",
+        ])
         # Filtros que un doc SII match debe cumplir (para descartar cross-nif
         # o cross-periodo cuando el usuario acota el ámbito).
         nif_norm = str(nif_titular).strip().upper() if nif_titular else None
@@ -3490,15 +3495,29 @@ async def _comparativa_impl(
 
         # Condición que valida que el doc SII lookupeado realmente
         # pertenece al ámbito del filtro (por nif/ejercicio/periodo).
+        # Referenciamos `$_sii_raw` (el resultado del `$arrayElemAt` en la
+        # stage anterior) — no `$_sii`, que se define en la MISMA stage y
+        # aún no está disponible cuando se evalúan estas condiciones.
         sii_match_conds: list[dict] = []
         if nif_norm:
-            sii_match_conds.append({"$eq": ["$_sii.nif_titular", nif_norm]})
+            sii_match_conds.append({"$eq": ["$_sii_raw.nif_titular", nif_norm]})
         if ejercicio:
-            sii_match_conds.append({"$eq": ["$_sii.ejercicio", str(ejercicio)]})
+            sii_match_conds.append({"$eq": ["$_sii_raw.ejercicio", str(ejercicio)]})
         if len(periodos_list) == 1:
-            sii_match_conds.append({"$eq": ["$_sii.periodo", periodos_list[0]]})
+            sii_match_conds.append({"$eq": ["$_sii_raw.periodo", periodos_list[0]]})
         elif len(periodos_list) > 1:
-            sii_match_conds.append({"$in": ["$_sii.periodo", periodos_list]})
+            sii_match_conds.append({"$in": ["$_sii_raw.periodo", periodos_list]})
+
+        # Construcción de la expresión booleana `_has_sii`:
+        #   - si no hay conds adicionales → basta con que _sii_raw exista
+        #   - si hay conds → _sii_raw existe Y cumple todas
+        if sii_match_conds:
+            has_sii_bool = {"$and": [
+                {"$ne": ["$_sii_raw", None]},
+                *sii_match_conds,
+            ]}
+        else:
+            has_sii_bool = {"$ne": ["$_sii_raw", None]}
 
         pipeline: list[dict] = [
             {"$match": filtro_com},
@@ -3516,35 +3535,28 @@ async def _comparativa_impl(
             {"$addFields": {
                 # Un doc sólo cuenta como match si el SII lookupeado
                 # comparte también nif/ejercicio/periodo del filtro.
-                "_has_sii": {
-                    "$cond": [
-                        {"$and": [
-                            {"$ne": ["$_sii_raw", None]},
-                            *sii_match_conds,
-                        ] if sii_match_conds else [{"$ne": ["$_sii_raw", None]}]},
-                        True,
-                        False,
-                    ],
-                },
+                "_has_sii": has_sii_bool,
+            }},
+            {"$addFields": {
+                # `_sii` es el doc completo cuando hay match, null si no.
+                # Se usa en `_cmp_expr` y en Python (post-page) para diff.
                 "_sii": {
-                    "$cond": [
-                        {"$and": [
-                            {"$ne": ["$_sii_raw", None]},
-                            *sii_match_conds,
-                        ] if sii_match_conds else [{"$ne": ["$_sii_raw", None]}]},
-                        "$_sii_raw",
-                        None,
-                    ],
+                    "$cond": ["$_has_sii", "$_sii_raw", None],
                 },
             }},
             {"$addFields": {
                 "_coincide_header": {
                     "$cond": [
                         "$_has_sii",
+                        # Comparación a nivel cabecera limitada a los campos
+                        # configurados en `campos_comparados`. Es una
+                        # aproximación de la lógica canónica `diff_facturas`
+                        # (sin tramos IVA) — suficiente para paginar y contar
+                        # coincide/discrepancia con dataset masivo. La diff
+                        # exacta por campo se calcula en Python sobre los
+                        # docs de la página.
                         {"$and": [
-                            _cmp_expr("base_imponible", "base_imponible"),
-                            _cmp_expr("cuota_repercutida", "cuota_repercutida"),
-                            _cmp_expr("importe_total", "importe_total"),
+                            _cmp_expr(f, f) for f in campos_comparados
                         ]},
                         False,
                     ],
@@ -3593,6 +3605,8 @@ async def _comparativa_impl(
                     "_id": 0,
                     "_sii_docs": 0,
                     "_sii_raw": 0,
+                    "_sii._id": 0,
+                    "_sii.versiones": 0,
                     "versiones": 0,
                 }},
             ],
@@ -3693,16 +3707,18 @@ async def _comparativa_impl(
     #    `num_serie_factura` (p.ej. el $regex de búsqueda del usuario). Mongo
     #    permite combinar $regex + $nin en el mismo subdocumento.
     #
-    #    ATENCIÓN: `$nin` con 1.5M keys también dispara DocumentTooLarge.
-    #    Cuando el universo comercial es muy grande, calculamos el total
-    #    con un aggregation `$lookup` + `$match` en la propia BD en lugar
-    #    de enviar el listado literal. Umbral: 50 000 keys.
-    if len(com_keys) > 50_000:
+    #    ATENCIÓN: `$nin` con >50k keys se acerca al límite BSON 16MB.
+    #    Cuando el universo comercial es grande, usamos un fast-path
+    #    aggregation con `$lookup` inverso (desde SII a comercial) y
+    #    filtramos las que no tienen match.
+    solo_sii_large_dataset = len(com_keys) > 50_000
+    if solo_sii_large_dataset:
         # SII total en el universo del filtro, MENOS los que están en comercial.
         sii_total_universo = await _db.facturas_sii.count_documents(filtro_sii)
-        # Los que están en ambos = tamaño de sii_match_map filtrado por
-        # filtro_sii (ya está aplicado en la query anterior).
         solo_sii_total = max(0, sii_total_universo - len(sii_match_map))
+        # `solo_sii_filter` no aplica aquí (no podemos meter $nin gigante).
+        # Cuando pagemos solo_sii usaremos un pipeline agregado con $lookup.
+        solo_sii_filter = None
     else:
         solo_sii_filter = dict(filtro_sii)
         ns_clause = dict(solo_sii_filter.get("num_serie_factura") or {})
@@ -3748,15 +3764,65 @@ async def _comparativa_impl(
     if estado == "solo_sii":
         # Sólo SII: paginamos a nivel BD. No mezclamos con filas_com.
         db_field = SORT_DB_FIELD.get(sort_by or "", "num_serie_factura")
-        # En BD las fechas son strings 'DD-MM-YYYY' que NO ordenan
-        # cronológicamente como strings; pero como TODAS las del año actual
-        # comparten el sufijo '-YYYY', el orden lexicográfico coincide con el
-        # cronológico dentro del mismo año. Para multi-año cargamos en memoria.
         direction = -1 if sort_dir == "desc" else 1
-        cursor = _db.facturas_sii.find(
-            solo_sii_filter, {"_id": 0, "versiones": 0}
-        ).sort(db_field, direction).skip(skip).limit(limit)
-        sii_pagina = await cursor.to_list(length=limit)
+        if solo_sii_large_dataset:
+            # Fast-path aggregation: `$lookup` inverso desde SII a comercial,
+            # filtramos los que NO tienen contraparte. Escala con datasets
+            # de millones de docs sin cargar keys en memoria del proceso.
+            sii_pipeline = [
+                {"$match": filtro_sii},
+                {"$lookup": {
+                    "from": "facturas_comercial",
+                    "localField": "num_serie_factura",
+                    "foreignField": "num_serie_factura",
+                    "as": "_com_docs",
+                }},
+            ]
+            # Filtrar los que no tienen match en comercial (considerando el
+            # filtro comercial: nif, ejercicio, periodo, base≠0). Un doc SII
+            # está en "solo_sii" si NINGÚN doc comercial dentro del ámbito
+            # comparte su num_serie_factura.
+            com_match_conds = []
+            if nif_titular:
+                com_match_conds.append({"$eq": ["$$c.nif_titular", str(nif_titular).strip().upper()]})
+            if ejercicio:
+                com_match_conds.append({"$eq": ["$$c.ejercicio", str(ejercicio)]})
+            if periodo:
+                _plist = [p.strip() for p in str(periodo).split(",") if p.strip()]
+                if len(_plist) == 1:
+                    com_match_conds.append({"$eq": ["$$c.periodo", _plist[0]]})
+                elif len(_plist) > 1:
+                    com_match_conds.append({"$in": ["$$c.periodo", _plist]})
+            # Un doc "coincide" (tiene match en comercial) si existe algún
+            # elemento de _com_docs que cumple TODAS las com_match_conds.
+            if com_match_conds:
+                has_match_expr = {
+                    "$anyElementTrue": {
+                        "$map": {
+                            "input": "$_com_docs",
+                            "as": "c",
+                            "in": {"$and": com_match_conds},
+                        },
+                    },
+                }
+            else:
+                has_match_expr = {"$gt": [{"$size": "$_com_docs"}, 0]}
+            sii_pipeline += [
+                {"$addFields": {"_has_com": has_match_expr}},
+                {"$match": {"_has_com": False}},
+                {"$sort": {db_field: direction, "num_serie_factura": 1}},
+                {"$skip": skip},
+                {"$limit": limit},
+                {"$project": {"_id": 0, "_com_docs": 0, "_has_com": 0, "versiones": 0}},
+            ]
+            sii_pagina = await _db.facturas_sii.aggregate(
+                sii_pipeline, allowDiskUse=True,
+            ).to_list(length=limit)
+        else:
+            cursor = _db.facturas_sii.find(
+                solo_sii_filter, {"_id": 0, "versiones": 0}
+            ).sort(db_field, direction).skip(skip).limit(limit)
+            sii_pagina = await cursor.to_list(length=limit)
         items = [
             _build_row_from_docs(d, None, d["num_serie_factura"], config)
             for d in sii_pagina
@@ -3787,7 +3853,10 @@ async def _comparativa_impl(
         # (paginar solo_sii sólo cuando el usuario lo pida explícitamente con
         # estado="solo_sii") para no traer 800 000+ docs.
         incluir_solo_sii = bool(estado is None and num_serie)
-        if incluir_solo_sii:
+        if incluir_solo_sii and solo_sii_filter is not None:
+            # Con num_serie el universo comercial también es pequeño → cae en
+            # la rama `else` que sí define solo_sii_filter. En modo large sin
+            # num_serie no entramos aquí.
             solo_sii_docs = await _db.facturas_sii.find(
                 solo_sii_filter, {"_id": 0, "versiones": 0}
             ).to_list(length=None)
@@ -4313,8 +4382,34 @@ async def _comparativa_resumen_origenes_impl(
         filtro_com["base_imponible"] = {"$nin": [0, 0.0, None]}
 
     inv_map = config.get("invertir_signo_por_origen") or {}
+    campos_comparados = list(config.get("campos_comparados") or [
+        "base_imponible", "cuota_repercutida",
+    ])
+    origenes_invertidos_resumen = [k for k, v in inv_map.items() if v]
 
-    # Condiciones que un doc SII match debe cumplir (validación post-lookup)
+    def _resumen_cmp_expr(field: str):
+        """Expresión "coincide en `field`" respetando la inversión de signo."""
+        direct = {"$lte": [
+            {"$abs": {"$subtract": [
+                {"$ifNull": [f"$_sii.{field}", 0]},
+                {"$ifNull": [f"${field}", 0]},
+            ]}},
+            0.01,
+        ]}
+        if not origenes_invertidos_resumen:
+            return direct
+        branches = [
+            {"case": {"$eq": ["$origen_comercial", og]},
+             "then": {"$lte": [
+                 {"$abs": {"$add": [
+                     {"$ifNull": [f"$_sii.{field}", 0]},
+                     {"$ifNull": [f"${field}", 0]},
+                 ]}},
+                 0.01,
+             ]}}
+            for og in origenes_invertidos_resumen
+        ]
+        return {"$switch": {"branches": branches, "default": direct}}
     sii_match_conds: list[dict] = []
     if nif_norm:
         sii_match_conds.append({"$eq": ["$_sii.nif_titular", nif_norm]})
@@ -4356,21 +4451,9 @@ async def _comparativa_resumen_origenes_impl(
             "_coincide": {
                 "$cond": [
                     "$_has_sii",
-                    {"$let": {
-                        "vars": {
-                            "sii_b": {"$ifNull": ["$_sii.base_imponible", 0]},
-                            "sii_c": {"$ifNull": ["$_sii.cuota_repercutida", 0]},
-                            "sii_i": {"$ifNull": ["$_sii.importe_total", 0]},
-                            "com_b": {"$ifNull": ["$base_imponible", 0]},
-                            "com_c": {"$ifNull": ["$cuota_repercutida", 0]},
-                            "com_i": {"$ifNull": ["$importe_total", 0]},
-                        },
-                        "in": {"$and": [
-                            {"$lte": [{"$abs": {"$subtract": ["$$sii_b", "$$com_b"]}}, 0.01]},
-                            {"$lte": [{"$abs": {"$subtract": ["$$sii_c", "$$com_c"]}}, 0.01]},
-                            {"$lte": [{"$abs": {"$subtract": ["$$sii_i", "$$com_i"]}}, 0.01]},
-                        ]},
-                    }},
+                    # Coincidencia según `campos_comparados` configurados.
+                    # Respeta inversión de signo por origen.
+                    {"$and": [_resumen_cmp_expr(f) for f in campos_comparados]},
                     False,
                 ],
             },
@@ -4397,17 +4480,11 @@ async def _comparativa_resumen_origenes_impl(
         total = int(g.get("total_facturas") or 0)
         matches = int(g.get("matches_sii") or 0)
         coincidencias = int(g.get("coincidencias") or 0)
-        # Signo inverso: si el origen tiene invertido activo, la coincidencia
-        # cabecera fallaría siempre (base=+X vs -X). Como la comparativa por
-        # origen es un KPI aproximado, indicamos que en modo signo-invertido
-        # no calculamos coincide/discrepancia detalladas — se ven en la vista
-        # principal donde diff_facturas sí aplica la inversión.
-        if inv_map.get(origen):
-            coincidencias_out = None
-            discrepancias_out = None
-        else:
-            coincidencias_out = coincidencias
-            discrepancias_out = matches - coincidencias
+        # Los orígenes invertidos ahora sí devuelven coincide/discrepancia
+        # porque el aggregation aplica correctamente la inversión de signo
+        # (ver `_resumen_cmp_expr`). No hay motivo para marcarlos como null.
+        coincidencias_out = coincidencias
+        discrepancias_out = matches - coincidencias
         resultados.append({
             "origen": origen,
             "total_facturas": total,

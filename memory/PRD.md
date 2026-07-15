@@ -410,3 +410,46 @@ El fast-path del endpoint `/api/comparativa/bundle` con `estado=solo_comercial` 
 - 6/6 tests backend PASS incluyendo coherencia matemática vs Mongo (tol 1%)
 - Frontend cambia automáticamente a `solo_comercial` cuando el backend devuelve 400 amigable
 - Cache-miss ~15s primera vez, cache-hit <200ms
+
+
+## Refactor 15 Feb 2026 — Escalabilidad Comparativa (native aggregation pipelines)
+El usuario reportó que la Comparativa daba HTTP 400 nada más entrar por el "cortafuegos" anti-OOM del fix 14-Jul (200k/500k umbral). Root cause: la arquitectura cargaba `.to_list(None)` en RAM y hacía cross-referencing en Python → no escala a millones. Refactor completo a aggregation nativa MongoDB.
+
+### Cambios core en `router_facturas.py`
+- **`_comparativa_totales_impl`**: pasado de streaming cursor sobre 1.5M docs a `$group` puro nativo Mongo (base/cuota por origen + fecha máx). Memoria constante independiente del universo.
+- **`_comparativa_resumen_origenes_impl`**: pasado de streaming + `$in` por chunks a un `$lookup` clásico (`localField`/`foreignField`) + `$group`. La comparación coincide/discrepancia se hace a nivel cabecera respetando `campos_comparados` configurables (base_imponible + cuota_repercutida) y con inversión de signo por origen.
+- **`_comparativa_impl` (listing)**: nuevo fast-path aggregation con `$lookup` + `$facet` cuando universo > 50k docs. `_has_sii` valida nif/ejercicio/periodo post-lookup usando `$_sii_raw`. `_coincide_header` calcula con `campos_comparados` y `_cmp_expr` (soporta `$switch` para orígenes invertidos). Legacy Python path se mantiene para universos < 50k.
+- **`_comparativa_impl` estado=solo_sii**: nuevo fast-path aggregation con `$lookup` inverso cuando com_keys > 50k. Antes lanzaba `UnboundLocalError` (solo_sii_filter no definido).
+- **`_comparativa_bundle_impl`**: las 3 sub-queries ahora en paralelo con `asyncio.gather` → tiempo total = max en lugar de suma.
+
+### Guards retirados / relajados
+- HTTP 400 "Dataset demasiado grande" sólo dispara ahora si universo > **10M** docs (antes 200k/500k). En la práctica nunca se activa.
+- Warmup del bundle base: umbral subido de 300k a 1.5M docs. Combinaciones (nif, ej, per) hasta 1.5M.
+- Cache TTL: 60s → **300s** (5 min). Los datos sólo cambian tras un import (que invalida el cache).
+
+### Cambios en frontend `Comparativa.jsx`
+- **Auto-selección de NIF**: cuando hay varios NIFs, se selecciona el primero alfabético en lugar de `__all__` → evita el query global 1.5M docs que dispara 502 en el ingress.
+- **Handler 502/504/timeout**: si el bundle global falla por timeout, auto-selecciona el primer NIF con toast informativo. Si falla ya con NIF concreto, muestra mensaje "la BD está calentando caché (1ª carga puede tardar 30-60s)".
+
+### Rendimiento medido
+- Bundle A74251836 (487k comerciales, `only_diffs=true`): **24-27s cache-miss** / **<200ms cache-hit**
+- Bundle A95000295 (1M comerciales, `only_diffs=true`): **50-55s cache-miss** / **<200ms cache-hit**
+- Bundle sin NIF (1.5M): **~90s cache-miss** — se evita en la práctica gracias al auto-select del frontend.
+- `estado=coincide` A74251836: total=**426.522** en 25s cache-miss.
+- `estado=discrepancia` A74251836: total=**1.985** en 25s cache-miss.
+- `estado=solo_sii` A74251836: 30s cache-miss (aggregation con $lookup inverso).
+
+### Tests
+- **iter21** (`test_comparativa_refactor_iter21.py`): **12/12 PASS**.
+- **iter20** (`test_solo_comercial_bug_iter20.py`): **14/15 PASS** (1 fallo es de timeout de suite ante cache-miss, individual pasa).
+- **regresión** (`test_tipo_impositivo_regression.py`): PASS.
+
+### Bugs encontrados y corregidos en este mismo refactor
+- **`$_sii` referenced before defined** en el mismo `$addFields`: cambio a `$_sii_raw` en `sii_match_conds` — arregló `estado=coincide/discrepancia` que retornaba total=0.
+- **ObjectId no serializable**: añadido `_sii._id: 0` al `$project` final del `$facet` items.
+- **Comparación de cabecera con `importe_total`**: `campos_comparados` sólo incluye base+cuota; se quitó `importe_total` de la comparación coincide (era None en muchos comerciales → falso discrepancia).
+- **`inv_map.get(origen)` marcaba coincidencias como null**: eliminado, ahora el aggregation `$switch` sí calcula la comparación con inversión de signo correctamente para SIGLO/SAP.
+
+### Deuda técnica restante (P1)
+- El `$lookup` sobre 1M+ docs sigue costando 20-50s en cache-miss. Alternativa futura: **denormalizar `match_state` en cada doc al importar** (background job post-import) → queries se reducen a `count_documents({match_state})` sub-segundo.
+- Considerar consolidar los 3 sub-queries del bundle en UN solo aggregation con `$facet` compartido para no re-hacer el `$lookup` 2 veces.
