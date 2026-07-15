@@ -3389,29 +3389,50 @@ async def _comparativa_impl(
                 f"acotar la comparativa.",
             )
 
-    # FAST-PATH `estado=solo_comercial`: pagina directamente en Mongo sin
-    # cargar todo el universo a memoria. Imprescindible cuando hay >500k
-    # comerciales del filtro (OOM anterior). Sólo aplica cuando NO se ha
-    # pedido sort custom ni num_serie regex, casos que necesitan procesar
-    # todo el universo para ordenar/filtrar.
+    # FAST-PATH `estado=solo_comercial`: paginar en Mongo sin cargar el
+    # universo. Excluye las que SÍ tienen match en SII (fix del bug donde
+    # devolvíamos TODAS las comerciales del filtro).
+    #
+    # Estrategia (más rápida que `$lookup` en Mongo):
+    # 1) Cargar en memoria un set con TODOS los num_serie_factura de SII
+    #    que caen dentro del mismo filtro (nif+ejercicio+periodo). Este set
+    #    típicamente cabe: 907k strings ≈ 100MB. Muy rápido con el índice.
+    # 2) Iterar comerciales en cursor, saltar los que estén en el set,
+    #    acumular los solo_comercial hasta llenar la página + contar total.
     if estado == "solo_comercial" and not sort_by and not num_serie:
-        total = await _db.facturas_comercial.count_documents(filtro_com)
-        cursor = (
-            _db.facturas_comercial.find(filtro_com, {"_id": 0, "versiones": 0})
-            .skip(skip).limit(limit)
+        sii_keys: set[str] = set()
+        sii_cursor = _db.facturas_sii.find(
+            filtro_sii, {"_id": 0, "num_serie_factura": 1}
         )
-        page_docs = await cursor.to_list(length=limit)
-        # Sin match SII (por definición de solo_comercial)
-        rows = [
-            _build_row_from_docs(None, com, com["num_serie_factura"], config)
-            for com in page_docs
-        ]
+        async for d in sii_cursor:
+            sii_keys.add(d["num_serie_factura"])
+
+        total = 0
+        page_items: list[dict] = []
+        com_cursor = _db.facturas_comercial.find(
+            filtro_com, {"_id": 0, "versiones": 0}
+        )
+        async for com in com_cursor:
+            if com["num_serie_factura"] in sii_keys:
+                continue  # tiene match en SII → NO es solo_comercial
+            if skip > 0:
+                skip -= 1
+                total += 1
+                continue
+            if len(page_items) < limit:
+                page_items.append(
+                    _build_row_from_docs(
+                        None, com, com["num_serie_factura"], config,
+                    )
+                )
+            total += 1
+
         return {
             "total": total,
-            "skip": skip,
+            "skip": 0,  # ya consumido
             "limit": limit,
             "campos_canonicos": CAMPOS_CANONICOS,
-            "items": rows,
+            "items": page_items,
         }
 
     # 1) Universo comercial completo en scope (siempre pequeño)

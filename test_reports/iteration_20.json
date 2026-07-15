@@ -1,0 +1,31 @@
+{
+  "summary": "Iteration 20 - Bug fix verification: fast-path estado=solo_comercial en /api/comparativa/bundle ahora excluye correctamente comerciales con match SII. Backend 6/6 pytest PASS (tests/test_solo_comercial_bug_iter20.py): (1) A74251836 solo_comercial total > 0 y < 487.749 [PASS] (2) items devueltos sin sii poblado [PASS] (3) num_serie devueltos NO existen en facturas_sii [PASS] (4) coherencia matematica API vs Mongo direct count dentro de tol 1% [PASS] (5) A95000295 solo_comercial total > 0 [PASS] (6) coincide items tienen ambas partes SII+COM [PASS]. Ejecucion ~97s (cache-miss primera vez). Frontend Playwright: /comparativa carga H1='Comparativa SII', filtro por defecto cambia auto a 'Solo en Comercial' tras 400 del backend, resumen y datos poblados sin 5xx. Se observa overlay CRA de dev mostrando el error 400 catcheado (cosmetico en dev; no aparece en build de produccion).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Comparativa initial load (dataset masivo)", "issue": "El axios 400 esperado (dataset masivo -> switch a solo_comercial) se catchea y maneja correctamente, pero CRA react-error-overlay lo muestra en modo dev como 'Uncaught runtime error - Request failed with status code 400'. La funcionalidad es correcta (state se cambia a solo_comercial, tabla se puebla), pero el overlay puede confundir. Considerar suprimirlo con overrideMethod / setError(null) o usar axios interceptor que marque el error como 'expected'.", "affected_selectors": ["#webpack-dev-server-client-overlay"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_solo_comercial_bug_iter20.py", "/app/test_reports/pytest/iteration_20_solo_com.xml"],
+  "action_items": [
+    "(Opcional/cosmetico) Suprimir el overlay CRA dev cuando el 400 'Dataset demasiado grande' es catcheado y auto-manejado. Ejemplo: en el catch, llamar a window.stop() no aplica; mejor usar un axios interceptor que setee err.__handled=true y filtrar en window.onerror, o migrar a Vite/prod build donde el overlay no existe."
+  ],
+  "critical_code_review_comments": [
+    "router_facturas.py L3402-3436 (fast-path solo_comercial): la carga del set sii_keys es sincronica en el event loop (async for + set.add) y puede tardar >10s con 900k+ docs; considerar cache dedicado del set por (nif_titular, ejercicio, periodo) con TTL corto para evitar recarga en cada request (aunque _cached_or_compute ya cachea el bundle entero con TTL 60s, cache-miss inicial sigue siendo 15-40s). Documentado en review_request como esperado.",
+    "router_facturas.py L3418-3421: la paginacion via skip decremento por-doc en un for loop puede resultar cara con skip grande (>10k). Preferible aplicar $nin sobre num_serie_factura con paginacion nativa Mongo si el sii_keys set cabe en un $nin (limite BSON 16MB ~ 500k strings de 20 chars) - fallback al metodo actual si excede.",
+    "Comparativa.jsx L423-447: el rethrow del catch (line 446) propaga el 400 auto-manejado al onError global de axios/window, disparando el CRA error overlay en dev. Alternativa: no rethrow cuando el status===400 con dataset-masivo (ya manejado); solo rethrow para errores inesperados."
+  ],
+  "updated_files": ["/app/backend/tests/test_solo_comercial_bug_iter20.py (nuevo)"],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "100% funcional (overlay dev cosmetico observado)"},
+  "test_credentials": "Admin miguelingv@gmail.com via JWT minted con auth.create_access_token, cookie monitorsii_access.",
+  "seed_data_creation": "Ninguno. Solo lecturas GET.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "El fix del bug esta verificado end-to-end. El fast-path estado=solo_comercial en _comparativa_impl (L3402-3436) carga correctamente el set de num_serie_factura de facturas_sii y filtra la iteracion comercial excluyendo los que estan en el set. Contadores medidos: A74251836 solo_comercial total ~= 57.405 (esperado ~59.242, cuadra); coincide y otros estados funcionan. Frontend maneja el 400 dataset-masivo y cambia auto a solo_comercial. Unico refinamiento opcional: evitar el overlay CRA en dev catcheando sin rethrow.",
+  "rca_of_the_issue": "Root cause: el fast-path 'estado=solo_comercial' en _comparativa_impl fue anadido para evitar OOM cargando el universo comercial completo en memoria (>500k docs). El fix original olvido cargar el set de num_serie de facturas_sii y filtrar la iteracion comercial excluyendo los que tienen match, resultando en 0 o TODAS las comerciales. Corregido cargando sii_keys como set() antes del cursor comercial y saltando docs con num_serie_factura in sii_keys. Verificado con 6 tests que comprueban (a) total > 0 y < universo, (b) items sin sii poblado, (c) los num_serie devueltos NO existen en facturas_sii, (d) coherencia con conteo directo en Mongo (tol 1%)."
+}
