@@ -174,14 +174,23 @@ export default function ResumenTotales({ filtros, refreshKey, enabled = true, in
   }, [porOrigen]);
 
   // Banner % conciliado
+  // Diferencia importante: hay 2 métricas de conciliación:
+  //   - `pctImporteMin`: mínimo entre pct_base y pct_cuota → % de IMPORTE (€)
+  //   - `pctFacturas`  : matches / universo union por num_serie → % de Nº facturas
+  // Ambas son válidas pero distintas. El banner las muestra separadas para
+  // que el usuario no confunda "93 % conciliado en €" con "93 % en nº facturas".
   const pctBase = diff?.pct_conciliado_base;
   const pctCuota = diff?.pct_conciliado_cuota;
-  const pctMin = [pctBase, pctCuota]
+  const pctImporteMin = [pctBase, pctCuota]
     .filter((v) => v !== null && v !== undefined)
     .reduce((acc, v) => (acc === null ? v : Math.min(acc, v)), null);
+  const pctFacturas = diff?.pct_conciliado_facturas;
+  const matchesN = diff?.matches_num_serie;
+  const universoN = diff?.universo_num_serie;
 
   const conciliado100 =
     pctBase === 1 && pctCuota === 1 &&
+    pctFacturas === 1 &&
     Math.abs(diff?.base ?? 0) < 0.005 &&
     Math.abs(diff?.cuota ?? 0) < 0.005;
 
@@ -217,19 +226,45 @@ export default function ResumenTotales({ filtros, refreshKey, enabled = true, in
           )}
           data-testid="totales-kpi-banner"
         >
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             {conciliado100 ? (
               <Badge className="bg-emerald-600 hover:bg-emerald-600 text-white">
                 100% conciliado
               </Badge>
             ) : (
-              <Badge className="bg-amber-600 hover:bg-amber-600 text-white">
-                {pctMin !== null ? formatPct(pctMin) : "—"} conciliado
-              </Badge>
+              <>
+                <Badge
+                  className="bg-amber-600 hover:bg-amber-600 text-white"
+                  data-testid="badge-conciliado-importe"
+                  title="Porcentaje de conciliación en IMPORTE (€) — min(base, cuota)"
+                >
+                  {pctImporteMin !== null ? formatPct(pctImporteMin) : "—"} en €
+                </Badge>
+                <Badge
+                  variant="outline"
+                  className="border-amber-300 text-amber-800 bg-amber-50"
+                  data-testid="badge-conciliado-facturas"
+                  title="Porcentaje de facturas conciliadas (matches / unión de num_serie)"
+                >
+                  {pctFacturas !== null && pctFacturas !== undefined
+                    ? formatPct(pctFacturas)
+                    : "—"}{" "}
+                  en nº facturas
+                </Badge>
+              </>
             )}
             <div className="text-xs text-slate-600">
               {sii?.n_facturas?.toLocaleString("es-ES") || 0} facturas SII ·{" "}
               {total?.n_facturas?.toLocaleString("es-ES") || 0} comerciales
+              {matchesN !== null && matchesN !== undefined && universoN ? (
+                <>
+                  {" · "}
+                  <span className="text-slate-500">
+                    {matchesN.toLocaleString("es-ES")} con contraparte de{" "}
+                    {universoN.toLocaleString("es-ES")}
+                  </span>
+                </>
+              ) : null}
             </div>
           </div>
           {!conciliado100 && diff && (

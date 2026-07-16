@@ -3346,6 +3346,27 @@ async def _comparativa_bundle_impl(
             num_serie=num_serie, nif_titular=nif_titular,
         ),
     )
+    # Enriquecemos `totales.diferencias` con la métrica de conciliación
+    # por Nº de facturas (matches / unión). Reutilizamos los `matches_sii`
+    # que ya calculó `resumen_origenes` — evitamos un $lookup duplicado en
+    # `_comparativa_totales_impl` (que suma 60-80s en datasets masivos).
+    try:
+        matches_total = sum(
+            int(it.get("matches_sii") or 0)
+            for it in (resumen.get("items") or [])
+        )
+        sii_n = int((totales.get("sii") or {}).get("n_facturas") or 0)
+        com_n = int((totales.get("comercial_total") or {}).get("n_facturas") or 0)
+        universo = sii_n + com_n - matches_total
+        pct_fact = (
+            round(matches_total / universo, 6) if universo > 0 else None
+        )
+        diff = totales.setdefault("diferencias", {})
+        diff["matches_num_serie"] = matches_total
+        diff["universo_num_serie"] = universo
+        diff["pct_conciliado_facturas"] = pct_fact
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "list": list_result,
         "totales": totales,
@@ -4191,6 +4212,15 @@ async def _comparativa_totales_impl(
     com_cuota = sum(o["cuota"] for o in por_origen.values())
     com_n = sum(o["n_facturas"] for o in por_origen.values())
 
+    # Nota: matches_num_serie / pct_conciliado_facturas NO se calcula aquí
+    # para evitar un $lookup adicional (60-80s en datasets grandes). Se
+    # rellena desde el bundle sumando `matches_sii` del resumen_origenes
+    # (que ya hace ese $lookup). Cuando este endpoint se llama sin bundle,
+    # el frontend puede consultarlo por separado en /comparativa/resumen-origenes.
+    matches_num_serie: int | None = None
+    universo_facturas: int | None = None
+    pct_conciliado_facturas: float | None = None
+
     diff_base = round(sii_base - com_base, 2)
     diff_cuota = round(sii_cuota - com_cuota, 2)
 
@@ -4226,6 +4256,11 @@ async def _comparativa_totales_impl(
             "cuota": diff_cuota,
             "pct_conciliado_base": _pct(diff_base, sii_base),
             "pct_conciliado_cuota": _pct(diff_cuota, sii_cuota),
+            # Nueva métrica: % conciliado por NÚMERO de facturas.
+            # matches / (union SII ∪ Comercial por num_serie).
+            "matches_num_serie": matches_num_serie,
+            "universo_num_serie": universo_facturas,
+            "pct_conciliado_facturas": pct_conciliado_facturas,
         },
         "filtros": {
             "ejercicio": ejercicio,
