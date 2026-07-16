@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 import asyncio
 import csv
 import io
+import re
 import time
 import uuid
 
@@ -2697,6 +2698,23 @@ def _detectar_formato_tabular(text: str) -> Optional[str]:
     return None
 
 
+_NIF_RE = re.compile(r"^[A-Z][0-9]{8}$")
+
+
+def _es_nif(s: str) -> bool:
+    """True si `s` tiene formato NIF (letra + 8 dígitos).
+
+    En SAP FI, el campo `Soc.` viene ya con el NIF directamente
+    (p.ej. `A74251836`) en lugar de un código de sociedad (p.ej. `HC30`).
+    Usamos este check para decidir si podemos asignar `nif_titular` sin
+    necesidad de pasar por el catálogo.
+    """
+    if not isinstance(s, str):
+        return False
+    return bool(_NIF_RE.match(s.strip().upper()))
+
+
+
 def _parsear_numero_sap(valor: str) -> Optional[float]:
     """Parsea importes en formato español/SAP:
        - signo '-' al final  → negativo
@@ -2870,6 +2888,15 @@ def _parsear_report_tabular(
             mapping = catalogo.get(soc) if soc else None
             if soc and not mapping:
                 soc_no_mapeadas.add(soc)
+            # Fallback: en SAP FI, `soc_origen` viene YA con el NIF de la
+            # sociedad (formato letra + 8 dígitos, p.ej. "A74251836"). No hay
+            # entrada en el catálogo porque el catálogo mapea CÓDIGOS
+            # ("HC30", "HC39"...) a NIFs. Si el soc parece un NIF, lo
+            # usamos directamente como `nif_titular`.
+            resolved_nif = (mapping or {}).get("nif_titular")
+            resolved_nombre = (mapping or {}).get("nombre_titular")
+            if not resolved_nif and soc and _es_nif(soc):
+                resolved_nif = soc.upper()
             ejercicio = fexp.split("-")[-1] if fexp else None
             periodo = fexp.split("-")[1] if fexp else None
             # Una misma factura puede aparecer en varias filas (una por tramo
@@ -2889,8 +2916,8 @@ def _parsear_report_tabular(
                     "detalle_iva": [],
                     "origen_comercial": origen,
                     "soc_origen": soc or None,
-                    "nif_titular": (mapping or {}).get("nif_titular"),
-                    "nombre_titular": (mapping or {}).get("nombre_titular"),
+                    "nif_titular": resolved_nif,
+                    "nombre_titular": resolved_nombre,
                 }
                 registros_por_num[num] = agg
             if base is not None:
@@ -4535,10 +4562,25 @@ async def _comparativa_nifs_titulares_impl():
     nif_to_nombre: dict[str, str] = {}
     for soc, info in catalogo.items():
         nif_to_nombre[info["nif_titular"]] = info.get("nombre_titular") or ""
+    # Volumen por sociedad (para que el frontend pueda elegir la más
+    # pequeña como default y minimizar el tiempo de cache-miss inicial).
+    volumen_pipe = [{"$group": {"_id": "$nif_titular", "n": {"$sum": 1}}}]
+    vol_com = {
+        r["_id"]: int(r.get("n") or 0)
+        for r in await _db.facturas_comercial.aggregate(volumen_pipe).to_list(None)
+        if r.get("_id")
+    }
+    vol_sii = {
+        r["_id"]: int(r.get("n") or 0)
+        for r in await _db.facturas_sii.aggregate(volumen_pipe).to_list(None)
+        if r.get("_id")
+    }
     sociedades = [
         {
             "nif_titular": n,
             "nombre_titular": nif_to_nombre.get(n, ""),
+            "n_comercial": vol_com.get(n, 0),
+            "n_sii": vol_sii.get(n, 0),
         }
         for n in nifs
     ]

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { api, API } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -388,7 +388,22 @@ export default function Comparativa() {
     setMonthsSel([]);
   };
 
+  // Ref para cancelar requests obsoletos cuando cambia el filtro.
+  // Sin esto, un load() de la sociedad A que tarda 60s puede sobreescribir
+  // el resultado de la sociedad B que el usuario acaba de seleccionar
+  // (race condition). El AbortController garantiza que sólo el último
+  // request en vuelo llega a modificar el estado.
+  const abortRef = useRef(null);
+
   const load = async () => {
+    // Cancela request en vuelo si lo hay (evita race condition al
+    // cambiar de sociedad rápidamente).
+    if (abortRef.current) {
+      abortRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setLoading(true);
     try {
       const params = {
@@ -418,63 +433,65 @@ export default function Comparativa() {
       // ingress (502) al filtrar por mes con dataset grande (1M+ docs).
       let bundle;
       try {
-        const resp = await api.get("/comparativa/bundle", { params });
+        const resp = await api.get("/comparativa/bundle", {
+          params,
+          signal: controller.signal,
+        });
         bundle = resp.data;
       } catch (err) {
-        // Cuando el backend rechaza (400) por dataset masivo, cambiamos
-        // automáticamente el filtro a `solo_comercial` (paginado en Mongo,
-        // rápido incluso con millones de docs) y reintentamos.
-        // También manejamos 502/504 (ingress timeout tras 60-90s) sugiriendo
-        // al usuario que seleccione una sociedad concreta.
+        // Si el request fue cancelado por AbortController, salimos en
+        // silencio: hay otro load() en curso que actualizará el estado.
+        if (
+          err?.name === "CanceledError" ||
+          err?.name === "AbortError" ||
+          err?.code === "ERR_CANCELED"
+        ) {
+          return;
+        }
         const status = err?.response?.status;
         const detail = err?.response?.data?.detail || "";
         const isTimeout =
           err?.code === "ECONNABORTED" ||
           (typeof err?.message === "string" && err.message.includes("timeout"));
+        // Backend explícito de "dataset masivo": informamos y sugerimos.
+        // NO cambiamos automáticamente ningún filtro — respeta la elección
+        // del usuario. Sólo cambiamos si SU filtro es `__all__` (implícito).
         if (
           status === 400 &&
           typeof detail === "string" &&
-          detail.includes("Dataset demasiado grande") &&
-          filtroEstado !== "solo_comercial"
+          detail.includes("Dataset demasiado grande")
         ) {
-          toast.info(
-            "Dataset masivo detectado — cambiando vista a Sólo comercial",
-            {
-              description:
-                "Selecciona un estado o filtra por período para ver otros modos.",
-              duration: 6000,
-            },
-          );
-          setFiltroEstado("solo_comercial");
-          return;
-        }
-        if ((status === 502 || status === 504 || isTimeout) && filtroNif === "__all__") {
-          // El bundle global (sin filtro sociedad) sobre 1M+ docs se corta
-          // en el ingress. Auto-seleccionamos el primer NIF disponible.
-          if (nifsDisponibles.length > 0) {
-            const firstNif = [...nifsDisponibles].sort()[0];
-            toast.info(
-              "El dataset global es demasiado grande — filtrando por " +
-                (sociedadesMap[firstNif] || firstNif),
-              {
-                description:
-                  "Cambia de sociedad en el selector de arriba si necesitas otra.",
-                duration: 8000,
-              },
-            );
-            setFiltroNif(firstNif);
-            return;
-          }
-        }
-        if (status === 502 || status === 504 || isTimeout) {
-          toast.error("La consulta está tardando demasiado", {
+          toast.error("El dataset es demasiado grande para esta consulta", {
             description:
-              "Filtra por período o intenta de nuevo — la BD está calentando la caché (1ª carga puede tardar 30-60s).",
+              "Selecciona una sociedad concreta o filtra por ejercicio/período para acotar el ámbito.",
             duration: 10000,
           });
+          return;
+        }
+        // Timeouts / 502 / 504: mensaje claro. NO auto-cambiamos el
+        // filtro del usuario (era un bug: podía sobreescribir la sociedad
+        // que el usuario había seleccionado con la primera alfabética).
+        if (status === 502 || status === 504 || isTimeout) {
+          const isGlobal = filtroNif === "__all__";
+          toast.error(
+            isGlobal
+              ? "La consulta global es demasiado pesada"
+              : "La consulta está tardando demasiado (>60s)",
+            {
+              description: isGlobal
+                ? "Selecciona una sociedad en el desplegable de arriba para acotar la consulta."
+                : "La 1ª carga precalienta la caché (30-60s). Reintenta la operación en unos segundos.",
+              duration: 12000,
+            },
+          );
+          return;
         }
         throw err;
       }
+      // Nos aseguramos de que este resultado corresponda al filtro actual
+      // (si un load posterior canceló este por otra ruta, controller.signal
+      // ya estará aborted). Sanity check por si acaso.
+      if (controller.signal.aborted) return;
       const data = bundle.list || {};
       setItems(data.items);
       setTotal(data.total);
@@ -485,7 +502,11 @@ export default function Comparativa() {
       setResumenOrigenes(bundle.resumen_origenes?.items || []);
       setRefreshTick((t) => t + 1);
     } finally {
-      setLoading(false);
+      // Sólo apagamos el spinner si el controller sigue activo (no
+      // cancelado por otro load posterior).
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
     }
   };
 
@@ -515,17 +536,29 @@ export default function Comparativa() {
         });
         setSociedadesMap(mp);
         setComercialSinNif(r.data?.comercial_sin_nif || 0);
-        // Autoselección: para evitar el query global (1.5M+ docs) que
-        // dispara timeouts 502 del ingress, elegimos siempre un NIF al
-        // montar. El usuario puede cambiar a "Todas" explícitamente si lo
-        // necesita, pero eso ya no es la vista inicial.
+        // Autoselección: elegimos la sociedad con MENOR volumen para que
+        // la primera carga sea la más rápida (cache-miss ~5-10s en vez
+        // de ~50s). El usuario puede cambiar a otra al momento.
+        // Volumen se estima como max(n_comercial, n_sii) para cubrir el
+        // peor caso del $lookup.
         //   - 1 NIF → ese
-        //   - varios → primero alfabético
-        //   - ninguno → "__all__" (fallback benigno; muestra la pantalla vacía)
+        //   - varios → menor volumen
+        //   - ninguno → "__all__" (fallback benigno; muestra pantalla vacía)
         if (lst.length === 1) {
           setFiltroNif(lst[0]);
         } else if (lst.length > 1) {
-          setFiltroNif([...lst].sort()[0]);
+          const enriched = sociedades
+            .filter((s) => s.nif_titular)
+            .map((s) => ({
+              nif: s.nif_titular,
+              size: Math.max(s.n_comercial || 0, s.n_sii || 0),
+            }));
+          if (enriched.length > 0) {
+            enriched.sort((a, b) => a.size - b.size);
+            setFiltroNif(enriched[0].nif);
+          } else {
+            setFiltroNif([...lst].sort()[0]);
+          }
         } else {
           setFiltroNif("__all__");
         }
