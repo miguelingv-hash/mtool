@@ -102,6 +102,30 @@ def test_solo_sii_con_sort():
         )
 
 
+def test_solo_sii_sin_nif_no_ooma():
+    """Bug reportado: `estado=solo_sii` sin NIF con 1,5M docs pasaba por
+    legacy path (com_docs.to_list(None)) → OOM → estados mezclados en
+    el listado. Ahora usa fast-path aggregation directo."""
+    r = requests.get(
+        f"{BASE_URL}/comparativa/bundle",
+        params={"estado": "solo_sii", "limit": 15},
+        headers=HDR,
+        timeout=200,
+    )
+    assert r.status_code == 200, (
+        f"solo_sii sin NIF devolvió {r.status_code}: {r.text[:300]}"
+    )
+    data = r.json()["list"]
+    estados_unicos = {it["estado"] for it in data["items"]}
+    assert estados_unicos.issubset({"solo_sii"}), (
+        f"Filtro solo_sii sin NIF devolvió otros estados: {estados_unicos}"
+    )
+    for it in data["items"]:
+        assert it.get("comercial") is None, (
+            f"Item {it.get('num_serie_factura')} en solo_sii trae comercial"
+        )
+
+
 def test_estado_no_mezcla_con_ningun_filtro():
     """Regresión: al pedir un estado concreto NUNCA debe aparecer otro."""
     for estado in ["coincide", "discrepancia", "solo_comercial", "solo_sii"]:

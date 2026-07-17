@@ -3534,6 +3534,116 @@ async def _comparativa_impl(
             "items": page_items,
         }
 
+    # FAST-PATH `estado=solo_sii` (aggregation nativa Mongo).
+    #
+    # Antes: pasaba por el legacy path que cargaba `com_docs` (1,5M) a RAM
+    # con `to_list(length=None)` → OOM → datos parciales → estados
+    # mezclados en el listado.
+    #
+    # Ahora: aggregation con `$lookup` inverso desde SII a comercial y
+    # `$match` para quedarnos con los que NO tienen contraparte
+    # comercial. Todo paginado y ordenado en BD. Simétrico al fast-path
+    # de solo_comercial.
+    if estado == "solo_sii":
+        nif_norm = (
+            str(nif_titular).strip().upper() if nif_titular else None
+        )
+        _plist = (
+            [p.strip() for p in str(periodo).split(",") if p.strip()]
+            if periodo else []
+        )
+        # Condiciones que un doc comercial match debe cumplir para
+        # "descartar" a este SII (validación post-lookup del ámbito).
+        com_extra_conds: list[dict] = []
+        if nif_norm:
+            com_extra_conds.append({"$eq": ["$$c.nif_titular", nif_norm]})
+        if ejercicio:
+            com_extra_conds.append({"$eq": ["$$c.ejercicio", str(ejercicio)]})
+        if len(_plist) == 1:
+            com_extra_conds.append({"$eq": ["$$c.periodo", _plist[0]]})
+        elif len(_plist) > 1:
+            com_extra_conds.append({"$in": ["$$c.periodo", _plist]})
+
+        # ¿Existe algún doc comercial que cumpla las conds del ámbito?
+        # Usamos `$map` + `$anyElementTrue` sobre `_com_docs`. Los
+        # extra_conds están dentro del map ($$c referencia cada elem).
+        if com_extra_conds:
+            has_valid_com = {"$and": [
+                {"$gt": [{"$size": "$_com_docs"}, 0]},
+                {"$anyElementTrue": {
+                    "$map": {
+                        "input": "$_com_docs",
+                        "as": "c",
+                        "in": {"$and": com_extra_conds},
+                    },
+                }},
+            ]}
+        else:
+            has_valid_com = {"$gt": [{"$size": "$_com_docs"}, 0]}
+
+        SS_SORT_FIELD = {
+            "num_serie_factura": "num_serie_factura",
+            "fecha_expedicion": "fecha_expedicion",
+            "importe_sii": "importe_total",
+            "estado": "num_serie_factura",
+        }
+        ss_sort = SS_SORT_FIELD.get(sort_by or "", "num_serie_factura")
+        ss_dir = -1 if sort_dir == "desc" else 1
+
+        ss_pipeline: list[dict] = [
+            {"$match": filtro_sii},
+            {"$lookup": {
+                "from": "facturas_comercial",
+                "localField": "num_serie_factura",
+                "foreignField": "num_serie_factura",
+                "as": "_com_docs",
+            }},
+            {"$addFields": {"_has_valid_com": has_valid_com}},
+            {"$match": {"_has_valid_com": False}},
+            {"$facet": {
+                "items": [
+                    {"$sort": {ss_sort: ss_dir, "num_serie_factura": 1}},
+                    {"$skip": skip},
+                    {"$limit": limit},
+                    {"$project": {
+                        "_id": 0,
+                        "_com_docs": 0,
+                        "_has_valid_com": 0,
+                        "versiones": 0,
+                    }},
+                ],
+                "total": [{"$count": "n"}],
+            }},
+        ]
+        ss_res = await _db.facturas_sii.aggregate(
+            ss_pipeline, allowDiskUse=True,
+        ).to_list(length=1)
+        if ss_res:
+            facet = ss_res[0]
+            page_docs = facet.get("items") or []
+            total_arr = facet.get("total") or []
+            total = int(
+                (total_arr[0].get("n") if total_arr else 0) or 0
+            )
+        else:
+            page_docs = []
+            total = 0
+
+        page_items = [
+            _build_row_from_docs(
+                d, None, d.get("num_serie_factura"), config,
+            )
+            for d in page_docs
+        ]
+        return {
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "campos_canonicos": CAMPOS_CANONICOS,
+            "campos_numericos": CAMPOS_NUMERICOS,
+            "items": page_items,
+        }
+
     # ------------------------------------------------------------------
     # FAST-PATH agregación con $lookup (dataset masivo)
     # ------------------------------------------------------------------
