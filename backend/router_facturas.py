@@ -4865,55 +4865,140 @@ async def comparativa_export(
         return buf.getvalue()
 
     async def _generate():
+        """Streaming generator: emite fila a fila sin cargar universos a RAM.
+
+        Estrategia (misma que los fast-paths del listado):
+          - Ruta 1 (comercial): cursor sobre `facturas_comercial` + $lookup
+            fila a fila contra SII → clasifica coincide/discrepancia/
+            solo_comercial y emite. Memoria constante.
+          - Ruta 2 (solo_sii): cursor sobre `facturas_sii` + $lookup inverso
+            a comercial → emite las que no tienen contraparte.
+
+        Antes: `com_docs.to_list(length=None)` cargaba 1,5M docs → OOM →
+        el CSV terminaba con solo la cabecera (bug reportado).
+        """
         # BOM para Excel + cabecera
         yield ("\ufeff" + _writerow_to_str(headers)).encode("utf-8")
 
-        # 1) Universo comercial completo (pequeño)
-        com_docs = await _db.facturas_comercial.find(
-            filtro_com, {"_id": 0, "versiones": 0}
-        ).to_list(length=None)
-        com_map = {d["num_serie_factura"]: d for d in com_docs}
-        com_keys = list(com_map.keys())
+        nif_norm = (
+            str(nif_titular).strip().upper() if nif_titular else None
+        )
+        _plist = (
+            [p.strip() for p in str(periodo).split(",") if p.strip()]
+            if periodo else []
+        )
 
-        # 2) Matches SII por num_serie ∈ comercial
-        sii_match_docs = []
-        if com_keys:
-            sii_match_docs = await _db.facturas_sii.find(
-                {**filtro_sii, "num_serie_factura": {"$in": com_keys}},
-                {"_id": 0, "versiones": 0},
-            ).to_list(length=None)
-        sii_match_map = {d["num_serie_factura"]: d for d in sii_match_docs}
+        # ---------------- Ruta 1: iteración por Comercial ----------------
+        # Cuando `estado=solo_sii`, no hace falta iterar comerciales.
+        if estado != "solo_sii":
+            # Aggregation streaming: $lookup por num_serie único de SII.
+            # Escala con cualquier volumen; no consume RAM del proceso.
+            sii_extra_conds: list[dict] = []
+            if nif_norm:
+                sii_extra_conds.append({"$eq": ["$_sii.nif_titular", nif_norm]})
+            if ejercicio:
+                sii_extra_conds.append({"$eq": ["$_sii.ejercicio", str(ejercicio)]})
+            if len(_plist) == 1:
+                sii_extra_conds.append({"$eq": ["$_sii.periodo", _plist[0]]})
+            elif len(_plist) > 1:
+                sii_extra_conds.append({"$in": ["$_sii.periodo", _plist]})
 
-        # 3) Filas comerciales (coincide / discrepancia / solo_comercial)
-        for ns in com_keys:
-            r = _build_row_from_docs(
-                sii_match_map.get(ns), com_map.get(ns), ns, config,
-            )
-            if estado and r["estado"] != estado:
-                continue
-            if estado is None and only_diffs and r["estado"] == "coincide":
-                continue
-            yield _writerow_to_str(_row_to_cells(r)).encode("utf-8")
+            com_pipeline: list[dict] = [
+                {"$match": filtro_com},
+                {"$lookup": {
+                    "from": "facturas_sii",
+                    "localField": "num_serie_factura",
+                    "foreignField": "num_serie_factura",
+                    "as": "_sii_docs",
+                }},
+                {"$addFields": {
+                    "_sii": {"$arrayElemAt": ["$_sii_docs", 0]},
+                }},
+            ]
+            if sii_extra_conds:
+                com_pipeline.append({"$addFields": {
+                    "_has_sii": {"$and": [
+                        {"$gt": [{"$size": "$_sii_docs"}, 0]},
+                        *sii_extra_conds,
+                    ]},
+                }})
+            else:
+                com_pipeline.append({"$addFields": {
+                    "_has_sii": {"$gt": [{"$size": "$_sii_docs"}, 0]},
+                }})
+            com_pipeline.append({"$project": {"_sii_docs": 0, "versiones": 0}})
 
-        # 4) Filas solo_sii: cursor incremental en SII fuera de comercial.
-        #    Sólo si el usuario las quiere ver (estado=None engloba "diffs"
-        #    y "all" — ambos incluyen solo_sii; estado=solo_sii filtra a
-        #    sólo esas).
-        incluir_solo_sii = estado in (None, "solo_sii")
-        if incluir_solo_sii:
-            solo_sii_filter = dict(filtro_sii)
-            ns_clause = dict(solo_sii_filter.get("num_serie_factura") or {})
-            ns_clause["$nin"] = com_keys
-            solo_sii_filter["num_serie_factura"] = ns_clause
-            cursor = _db.facturas_sii.find(
-                solo_sii_filter, {"_id": 0, "versiones": 0}
-            )
-            async for d in cursor:
+            async for doc in _db.facturas_comercial.aggregate(
+                com_pipeline, allowDiskUse=True,
+            ):
+                sii = doc.pop("_sii", None) or None
+                has_sii = bool(doc.pop("_has_sii", False))
+                doc.pop("_id", None)
+                if sii and not has_sii:
+                    # El SII lookupeado no cumple el ámbito → descartamos
+                    # como si no hubiera match (será solo_comercial).
+                    sii = None
+                # Sanea el SII de campos internos que _build_row_from_docs
+                # no necesita.
+                if isinstance(sii, dict):
+                    sii.pop("_id", None)
+                    sii.pop("versiones", None)
                 r = _build_row_from_docs(
-                    d, None, d["num_serie_factura"], config,
+                    sii, doc, doc.get("num_serie_factura"), config,
                 )
+                # Filtros de estado
                 if estado and r["estado"] != estado:
                     continue
+                if estado is None and only_diffs and r["estado"] == "coincide":
+                    continue
+                yield _writerow_to_str(_row_to_cells(r)).encode("utf-8")
+
+        # ---------------- Ruta 2: solo_sii ------------------------------
+        # Cuando `estado=solo_sii` o queremos incluir esas filas en el
+        # export completo (estado=None con only_diffs true/false, ambos las
+        # incluyen porque nunca son "coincide").
+        incluir_solo_sii = estado in (None, "solo_sii")
+        if incluir_solo_sii:
+            com_extra_conds: list[dict] = []
+            if nif_norm:
+                com_extra_conds.append({"$eq": ["$$c.nif_titular", nif_norm]})
+            if ejercicio:
+                com_extra_conds.append({"$eq": ["$$c.ejercicio", str(ejercicio)]})
+            if len(_plist) == 1:
+                com_extra_conds.append({"$eq": ["$$c.periodo", _plist[0]]})
+            elif len(_plist) > 1:
+                com_extra_conds.append({"$in": ["$$c.periodo", _plist]})
+
+            if com_extra_conds:
+                has_valid_com = {"$and": [
+                    {"$gt": [{"$size": "$_com_docs"}, 0]},
+                    {"$anyElementTrue": {"$map": {
+                        "input": "$_com_docs",
+                        "as": "c",
+                        "in": {"$and": com_extra_conds},
+                    }}},
+                ]}
+            else:
+                has_valid_com = {"$gt": [{"$size": "$_com_docs"}, 0]}
+
+            sii_pipeline: list[dict] = [
+                {"$match": filtro_sii},
+                {"$lookup": {
+                    "from": "facturas_comercial",
+                    "localField": "num_serie_factura",
+                    "foreignField": "num_serie_factura",
+                    "as": "_com_docs",
+                }},
+                {"$addFields": {"_has_valid_com": has_valid_com}},
+                {"$match": {"_has_valid_com": False}},
+                {"$project": {"_id": 0, "_com_docs": 0, "_has_valid_com": 0, "versiones": 0}},
+            ]
+            async for d in _db.facturas_sii.aggregate(
+                sii_pipeline, allowDiskUse=True,
+            ):
+                r = _build_row_from_docs(
+                    d, None, d.get("num_serie_factura"), config,
+                )
                 yield _writerow_to_str(_row_to_cells(r)).encode("utf-8")
 
     filename = "comparativa"

@@ -143,6 +143,36 @@ def test_estado_no_mezcla_con_ningun_filtro():
         )
 
 
+def test_export_devuelve_filas_ademas_de_cabecera():
+    """Bug: export CSV con dataset >100k docs devolvía sólo la cabecera
+    porque `com_docs.to_list(length=None)` OOM-killaba el generator.
+    Ahora usa aggregation streaming (cursor + $lookup) → memoria constante."""
+    r = requests.get(
+        f"{BASE_URL}/comparativa/export",
+        params={
+            "nif_titular": "A74251836",
+            "estado": "solo_comercial",
+        },
+        headers=HDR,
+        timeout=180,
+    )
+    assert r.status_code == 200, f"{r.status_code}: {r.text[:200]}"
+    body = r.text
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    # Al menos la cabecera + 1 fila de datos.
+    assert len(lines) >= 2, (
+        f"Export devolvió sólo {len(lines)} líneas — el bug OOM podría "
+        "haber vuelto: cabecera sin datos."
+    )
+    # La cabecera empieza con num_serie_factura (con BOM)
+    assert "num_serie_factura" in lines[0]
+    # Las filas siguientes deben tener num_serie_factura + estado=solo_comercial
+    for ln in lines[1:6]:
+        assert "solo_comercial" in ln, (
+            f"Fila no tiene el estado esperado: {ln[:120]}"
+        )
+
+
 def test_has_sii_usa_size_no_ne_null():
     """El patrón `$ne [$_sii_raw, None]` es bugueado con MongoDB porque
     `$arrayElemAt` de array vacío devuelve `undefined`, no `null`. Este
