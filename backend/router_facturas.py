@@ -3419,49 +3419,118 @@ async def _comparativa_impl(
                 f"sociedad concreta o filtra por ejercicio/periodo.",
             )
 
-    # FAST-PATH `estado=solo_comercial`: paginar en Mongo sin cargar el
-    # universo. Excluye las que SÍ tienen match en SII (fix del bug donde
-    # devolvíamos TODAS las comerciales del filtro).
+    # FAST-PATH `estado=solo_comercial` (aggregation nativa Mongo).
     #
-    # Estrategia (más rápida que `$lookup` en Mongo):
-    # 1) Cargar en memoria un set con TODOS los num_serie_factura de SII
-    #    que caen dentro del mismo filtro (nif+ejercicio+periodo). Este set
-    #    típicamente cabe: 907k strings ≈ 100MB. Muy rápido con el índice.
-    # 2) Iterar comerciales en cursor, saltar los que estén en el set,
-    #    acumular los solo_comercial hasta llenar la página + contar total.
-    if estado == "solo_comercial" and not sort_by and not num_serie:
-        sii_keys: set[str] = set()
-        sii_cursor = _db.facturas_sii.find(
-            filtro_sii, {"_id": 0, "num_serie_factura": 1}
+    # Antes: cargábamos todos los `num_serie` de SII en un set Python
+    # (~100 MB para 900k keys) y luego iterábamos comerciales en cursor.
+    # Funcionaba pero rompía cuando el usuario hacía SORT o filtraba por
+    # `num_serie` — se caía al legacy path que hace `to_list(None)` sobre
+    # 1,5M comerciales → OOM inmediato del pod.
+    #
+    # Ahora: aggregation con `$lookup` inverso desde COMERCIAL a SII y
+    # `$match` para quedarnos con los que NO tienen contraparte. Todo
+    # paginado y ordenado en la BD → memoria constante. Soporta sort_by
+    # y num_serie sin problemas.
+    if estado == "solo_comercial":
+        # Condiciones que un doc SII match debe cumplir para "descartar"
+        # a este comercial. Referencian `$sii_raw` de la stage anterior.
+        nif_norm = (
+            str(nif_titular).strip().upper() if nif_titular else None
         )
-        async for d in sii_cursor:
-            sii_keys.add(d["num_serie_factura"])
-
-        total = 0
-        page_items: list[dict] = []
-        com_cursor = _db.facturas_comercial.find(
-            filtro_com, {"_id": 0, "versiones": 0}
+        _plist = (
+            [p.strip() for p in str(periodo).split(",") if p.strip()]
+            if periodo else []
         )
-        async for com in com_cursor:
-            if com["num_serie_factura"] in sii_keys:
-                continue  # tiene match en SII → NO es solo_comercial
-            if skip > 0:
-                skip -= 1
-                total += 1
-                continue
-            if len(page_items) < limit:
-                page_items.append(
-                    _build_row_from_docs(
-                        None, com, com["num_serie_factura"], config,
-                    )
-                )
-            total += 1
+        sii_extra_conds: list[dict] = []
+        if nif_norm:
+            sii_extra_conds.append({"$eq": ["$_sii_raw.nif_titular", nif_norm]})
+        if ejercicio:
+            sii_extra_conds.append({"$eq": ["$_sii_raw.ejercicio", str(ejercicio)]})
+        if len(_plist) == 1:
+            sii_extra_conds.append({"$eq": ["$_sii_raw.periodo", _plist[0]]})
+        elif len(_plist) > 1:
+            sii_extra_conds.append({"$in": ["$_sii_raw.periodo", _plist]})
 
+        if sii_extra_conds:
+            # Existe SII válido: array no vacío Y cumple los extra conds
+            # (nif/ejercicio/periodo del filtro).
+            has_valid_sii = {"$and": [
+                {"$gt": [{"$size": "$_sii_docs"}, 0]},
+                *sii_extra_conds,
+            ]}
+        else:
+            # Existe SII (cualquier match por num_serie único): array no vacío.
+            # Nota: usamos `$size` en lugar de `$ne: [null]` porque
+            # `$arrayElemAt` de un array vacío devuelve `undefined` — no null —
+            # y `$ne` no lo detecta como ausencia.
+            has_valid_sii = {"$gt": [{"$size": "$_sii_docs"}, 0]}
+
+        # Field para ordenar (a nivel BD). Solo permitimos campos del doc
+        # comercial — no del SII, ya que estos docs no tienen SII match.
+        SC_SORT_FIELD = {
+            "num_serie_factura": "num_serie_factura",
+            "fecha_expedicion": "fecha_expedicion",
+            "importe_comercial": "importe_total",
+            "estado": "num_serie_factura",  # no aplica, todos son solo_comercial
+        }
+        sc_sort = SC_SORT_FIELD.get(sort_by or "", "num_serie_factura")
+        sc_dir = -1 if sort_dir == "desc" else 1
+
+        sc_pipeline: list[dict] = [
+            {"$match": filtro_com},
+            {"$lookup": {
+                "from": "facturas_sii",
+                "localField": "num_serie_factura",
+                "foreignField": "num_serie_factura",
+                "as": "_sii_docs",
+            }},
+            {"$addFields": {
+                "_sii_raw": {"$arrayElemAt": ["$_sii_docs", 0]},
+            }},
+            {"$addFields": {"_has_valid_sii": has_valid_sii}},
+            {"$match": {"_has_valid_sii": False}},
+            {"$facet": {
+                "items": [
+                    {"$sort": {sc_sort: sc_dir, "num_serie_factura": 1}},
+                    {"$skip": skip},
+                    {"$limit": limit},
+                    {"$project": {
+                        "_id": 0,
+                        "_sii_docs": 0,
+                        "_sii_raw": 0,
+                        "_has_valid_sii": 0,
+                        "versiones": 0,
+                    }},
+                ],
+                "total": [{"$count": "n"}],
+            }},
+        ]
+        sc_res = await _db.facturas_comercial.aggregate(
+            sc_pipeline, allowDiskUse=True,
+        ).to_list(length=1)
+        if sc_res:
+            facet = sc_res[0]
+            page_docs = facet.get("items") or []
+            total_arr = facet.get("total") or []
+            total = int(
+                (total_arr[0].get("n") if total_arr else 0) or 0
+            )
+        else:
+            page_docs = []
+            total = 0
+
+        page_items = [
+            _build_row_from_docs(
+                None, d, d.get("num_serie_factura"), config,
+            )
+            for d in page_docs
+        ]
         return {
             "total": total,
-            "skip": 0,  # ya consumido
+            "skip": skip,
             "limit": limit,
             "campos_canonicos": CAMPOS_CANONICOS,
+            "campos_numericos": CAMPOS_NUMERICOS,
             "items": page_items,
         }
 
@@ -3557,15 +3626,18 @@ async def _comparativa_impl(
             sii_match_conds.append({"$in": ["$_sii_raw.periodo", periodos_list]})
 
         # Construcción de la expresión booleana `_has_sii`:
-        #   - si no hay conds adicionales → basta con que _sii_raw exista
-        #   - si hay conds → _sii_raw existe Y cumple todas
+        #   - si no hay conds adicionales → basta con que _sii_docs no esté vacío
+        #   - si hay conds → array no vacío Y cumple todas
+        # Nota: usamos `$size(_sii_docs)>0` porque `$arrayElemAt` de un
+        # array vacío devuelve `undefined` (no null) y `$ne [None]` no lo
+        # detecta como ausencia — patrón que ya nos falló en solo_comercial.
         if sii_match_conds:
             has_sii_bool = {"$and": [
-                {"$ne": ["$_sii_raw", None]},
+                {"$gt": [{"$size": "$_sii_docs"}, 0]},
                 *sii_match_conds,
             ]}
         else:
-            has_sii_bool = {"$ne": ["$_sii_raw", None]}
+            has_sii_bool = {"$gt": [{"$size": "$_sii_docs"}, 0]}
 
         pipeline: list[dict] = [
             {"$match": filtro_com},
