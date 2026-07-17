@@ -802,6 +802,7 @@ _NEWMAN_COLUMN_MAP: dict[str, str] = {
     "BaseImponible": "base_imponible",
     "TipoImpositivo": "tipo_impositivo",
     "CuotaRepercutida": "cuota_repercutida",
+    "CausaExencion": "causa_exencion",
     "ContraparteNIF": "contraparte_nif",
     "ContraparteNombre": "contraparte_nombre",
     "EstadoFactura": "estado_factura",
