@@ -200,6 +200,14 @@ def _extraer_factura_canonica(primer, entrada) -> dict:
     contra = getattr(df, "Contraparte", None) if df is not None else None
     base, cuota, tipo, detalle_iva = _extraer_iva_emitida(df)
     total = getattr(df, "ImporteTotal", None) if df is not None else None
+    # Fallback: la consulta MASIVA por período (ConsultaLRFacturasEmitidas)
+    # NO devuelve `<ImporteTotal>` en muchos casos — típicamente para
+    # facturas exentas, pero también para F1 normales. La consulta
+    # INDIVIDUAL sí lo trae. Cuando la AEAT no lo manda, lo calculamos
+    # como `base + cuota` (equivale a facturas.total desde el desglose IVA).
+    # Esto es exacto por definición de base imponible + cuota repercutida.
+    if total is None and base is not None:
+        total = float(base) + float(cuota or 0)
     return {
         "num_serie_factura": entrada.num_serie_factura,
         "fecha_expedicion": entrada.fecha_expedicion,

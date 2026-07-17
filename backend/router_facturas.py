@@ -2004,6 +2004,15 @@ def _consultar_mensual_real(
                 contra = getattr(df, "Contraparte", None) if df else None
                 base, cuota, tipo, detalle_iva = _extraer_iva_emitida(df)
                 total = getattr(df, "ImporteTotal", None) if df is not None else None
+                # Fallback: la AEAT no siempre devuelve `<ImporteTotal>` en la
+                # consulta masiva por período — típicamente NO lo trae para
+                # facturas exentas (Sujeta.Exenta) pero también puede faltar
+                # en F1 normales. Cuando falta, lo calculamos como
+                # `base + cuota` (matemáticamente exacto). Sin este fallback
+                # las exentas se guardaban con importe_total=None y no salían
+                # en la Comparativa contra el CSV comercial.
+                if total is None and base is not None:
+                    total = float(base) + float(cuota or 0)
                 out.append(
                     {
                         "num_serie_factura": getattr(
