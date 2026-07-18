@@ -453,3 +453,38 @@ El usuario reportó que la Comparativa daba HTTP 400 nada más entrar por el "co
 ### Deuda técnica restante (P1)
 - El `$lookup` sobre 1M+ docs sigue costando 20-50s en cache-miss. Alternativa futura: **denormalizar `match_state` en cada doc al importar** (background job post-import) → queries se reducen a `count_documents({match_state})` sub-segundo.
 - Considerar consolidar los 3 sub-queries del bundle en UN solo aggregation con `$facet` compartido para no re-hacer el `$lookup` 2 veces.
+
+
+## iter24 (Feb 2026) — Cuadro de Conciliación Mensual
+
+Nueva sección independiente bajo el menú **Monitor SII** (ruta `/cuadro-mensual`) que muestra, por sociedad y ejercicio, una tabla pivotada con una fila por (periodo × tipo_factura) y columnas Base + Cuota + Nº de facturas para SII vs SIGLO vs SAP FI + Δ + % de conciliación.
+
+### Backend
+- **`GET /api/comparativa/cuadro-mensual`** (nuevo, cached TTL 300s)
+  - Params obligatorios: `nif_titular`, `ejercicio`. Opcional: `periodo` (CSV meses).
+  - Pipeline: 2 aggregations en paralelo (SII $group por periodo+tipo; Comercial $lookup+$group por periodo+origen+tipo heredado de SII). Comerciales sin match SII se agrupan como `_sin_clasificar`.
+  - Aplica inversión de signo (`invertir_signo_por_origen`) y excluye tipo_impositivo=0 según config.
+  - Devuelve `rows` (una fila por combinación) + `totales` (fila TOTAL) + `origenes` detectados en scope.
+- **`GET /api/comparativa`** ahora acepta el param `tipos_factura` (antes sólo estaba en `/comparativa/bundle`).
+
+### Frontend
+- **`/app/frontend/src/pages/CuadroMensual.jsx`** (nueva página)
+  - Tabs Baser / TotalEnergies (`cuadro-tab-<nif>`), selector Ejercicio/Mes.
+  - Tabla con filas expandibles inline: al clicar se carga la lista de facturas del tramo desde `/comparativa` con los filtros pre-fijados + botón "Abrir en Comparativa" para navegar con querystring.
+  - Botón "Exportar cuadro" que genera un CSV con TODAS las filas + total (client-side, sin round-trip).
+  - Fila TOTAL destacada (`cuadro-row-total`) con fondo oscuro.
+- **`Layout.jsx`**: nuevo item de menú `Cuadro mensual` (icono Grid3X3) dentro del grupo Monitor SII.
+- **`App.js`**: ruta `/cuadro-mensual` protegida con permiso `comparativa.view`.
+
+### Rendimiento
+- Cuadro Mensual BASER 2026: **15-25s cache-miss** / **<200ms cache-hit** (TTL 5 min).
+- Detalle inline (`/comparativa` con periodo+tipo): 30-45s cache-miss / <300ms hit.
+- Testing agent (iter24, 7/8 checks): navegación, tabs, tabla, exportar CSV, refresh y fila TOTAL OK. El detalle inline es lento en frío pero muestra spinner con aviso "puede tardar hasta 60 s en frío".
+
+### Tests
+- `/app/backend/tests/test_cuadro_mensual_iter24.py`: **4/4 PASS**
+  - 400/422 sin params obligatorios
+  - Estructura completa de la respuesta
+  - Totales del cuadro cuadran con `/comparativa/totales`
+  - Filtro por periodo restringe filas correctamente
+

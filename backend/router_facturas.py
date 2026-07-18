@@ -3259,11 +3259,14 @@ async def comparativa(
     sort_by: Optional[str] = None,
     sort_dir: str = "desc",
     nif_titular: Optional[str] = None,
+    tipos_factura: Optional[str] = None,
 ):
     """Compara facturas SII vs Comercial por `num_serie_factura`.
 
     Filtros: `ejercicio`, `periodo`, `num_serie` (contiene), `estado`
-    (coincide | discrepancia | solo_sii | solo_comercial), `nif_titular`.
+    (coincide | discrepancia | solo_sii | solo_comercial), `nif_titular`,
+    `tipos_factura` (CSV: "F1,F2,R1,...", con pseudo-código
+    `_sin_clasificar` para las comerciales sin match SII).
     Paginación: `skip` / `limit` (default 50).
 
     Optimización: para evitar cargar millones de facturas SII en memoria,
@@ -3281,7 +3284,7 @@ async def comparativa(
     cache_key = (
         "comparativa",
         skip, limit, only_diffs, ejercicio, periodo, num_serie,
-        estado, sort_by, sort_dir, nif_titular,
+        estado, sort_by, sort_dir, nif_titular, tipos_factura,
     )
     return await _cached_or_compute(
         cache_key,
@@ -3289,7 +3292,7 @@ async def comparativa(
             skip=skip, limit=limit, only_diffs=only_diffs,
             ejercicio=ejercicio, periodo=periodo, num_serie=num_serie,
             estado=estado, sort_by=sort_by, sort_dir=sort_dir,
-            nif_titular=nif_titular,
+            nif_titular=nif_titular, tipos_factura=tipos_factura,
         ),
     )
 

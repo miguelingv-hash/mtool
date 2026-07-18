@@ -139,11 +139,13 @@ function DetalleFacturas({ nifTitular, ejercicio, periodo, tipoFactura }) {
           periodo,
           tipos_factura: tipoFactura,
         };
-        const r = await api.get("/comparativa/bundle", { params });
+        // Usamos /comparativa (sólo lista) en lugar de /comparativa/bundle
+        // para evitar recalcular totales + resumen_origenes (30-40s extra).
+        const r = await api.get("/comparativa", { params });
         if (cancelled) return;
-        const list = r.data?.list?.items || [];
+        const list = r.data?.items || [];
         setItems(list);
-        setTotal(r.data?.list?.total || 0);
+        setTotal(r.data?.total || 0);
       } catch (err) {
         if (!cancelled) {
           toast.error("No se pudo cargar el detalle", {
@@ -174,6 +176,9 @@ function DetalleFacturas({ nifTitular, ejercicio, periodo, tipoFactura }) {
       <div className="px-6 py-4 flex items-center gap-2 text-sm text-slate-500">
         <Loader2 className="h-4 w-4 animate-spin" />
         Cargando facturas del tramo…
+        <span className="text-[11px] text-slate-400 italic ml-1">
+          (puede tardar hasta 60 s en frío; luego se cachea 5 min)
+        </span>
       </div>
     );
   }
