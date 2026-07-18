@@ -4423,8 +4423,61 @@ async def _comparativa_totales_impl(
         header_base_expr = {"$toDouble": {"$ifNull": ["$base_imponible", 0]}}
         header_cuota_expr = {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}}
 
-    com_pipeline = [
+    # Parseamos tipos_factura para filtrar comerciales via SII match.
+    # El campo `tipo_factura` NO existe en `facturas_comercial` → el filtro
+    # se aplica indirectamente: comercial cuenta como tipo X si su match
+    # SII (por num_serie único) es de tipo X. Los solo_comercial (sin
+    # match SII) sólo cuentan si `_sin_clasificar` está seleccionado.
+    _tipos_codes = (
+        [t.strip() for t in str(tipos_factura).split(",") if t.strip()]
+        if tipos_factura else []
+    )
+    _tipos_real = [c for c in _tipos_codes if c != "_sin_clasificar"]
+    _incluir_sin_clasif = "_sin_clasificar" in _tipos_codes
+    _TODOS_TIPOS = {"F1", "F2", "F3", "F4", "R1", "R2", "R3", "R4", "R5"}
+    aplicar_filtro_tipo_com = (
+        tipos_factura is not None
+        and (
+            set(_tipos_real) != _TODOS_TIPOS
+            or not _incluir_sin_clasif
+        )
+    )
+
+    com_pipeline: list[dict] = [
         {"$match": filtro_com},
+    ]
+    if aplicar_filtro_tipo_com:
+        # $lookup con foreignField clásico (aprovecha índice único).
+        com_pipeline.extend([
+            {"$lookup": {
+                "from": "facturas_sii",
+                "localField": "num_serie_factura",
+                "foreignField": "num_serie_factura",
+                "as": "_sii_docs",
+            }},
+            {"$addFields": {
+                "_sii_tipo": {"$arrayElemAt": ["$_sii_docs.tipo_factura", 0]},
+                "_has_sii": {"$gt": [{"$size": "$_sii_docs"}, 0]},
+            }},
+        ])
+        # Construye el $match según selección:
+        #   - si hay tipos reales: aceptamos comerciales cuyo SII match ∈ set
+        #   - si _sin_clasificar: aceptamos también comerciales sin SII match
+        or_clauses: list[dict] = []
+        if _tipos_real:
+            or_clauses.append({"_sii_tipo": {"$in": _tipos_real}})
+        if _incluir_sin_clasif:
+            or_clauses.append({"_has_sii": False})
+        if len(or_clauses) > 1:
+            com_pipeline.append({"$match": {"$or": or_clauses}})
+        elif or_clauses:
+            com_pipeline.append({"$match": or_clauses[0]})
+        else:
+            # Ni tipos_real ni _sin_clasificar → nada cuenta.
+            com_pipeline.append({"$match": {"_id": None}})
+        com_pipeline.append({"$project": {"_sii_docs": 0, "_sii_tipo": 0, "_has_sii": 0}})
+
+    com_pipeline.extend([
         {"$project": {
             "_id": 0,
             "origen": {"$ifNull": ["$origen_comercial", "DESCONOCIDO"]},
@@ -4451,7 +4504,7 @@ async def _comparativa_totales_impl(
             "n_facturas": {"$sum": 1},
             "ultima_fecha_expedicion": {"$max": "$fecha_expedicion"},
         }},
-    ]
+    ])
     com_res = await _db.facturas_comercial.aggregate(
         com_pipeline, allowDiskUse=True,
     ).to_list(length=None)
@@ -4756,6 +4809,21 @@ async def _comparativa_resumen_origenes_impl(
         else {"$ne": ["$_sii", None]}
     )
 
+    # Filtro por tipo_factura: aplica al comercial vía SII match (el campo
+    # no existe en comerciales). solo_comercial (sin SII) sólo cuenta si
+    # `_sin_clasificar` está en la selección del usuario.
+    _tipos_codes = (
+        [t.strip() for t in str(tipos_factura).split(",") if t.strip()]
+        if tipos_factura else []
+    )
+    _tipos_real = [c for c in _tipos_codes if c != "_sin_clasificar"]
+    _incluir_sin_clasif = "_sin_clasificar" in _tipos_codes
+    _TODOS_TIPOS = {"F1", "F2", "F3", "F4", "R1", "R2", "R3", "R4", "R5"}
+    aplicar_filtro_tipo_com = (
+        tipos_factura is not None
+        and (set(_tipos_real) != _TODOS_TIPOS or not _incluir_sin_clasif)
+    )
+
     # Pipeline principal sobre `facturas_comercial`. Usa la variante clásica
     # de `$lookup` con `localField`/`foreignField` — ~3x más rápido que la
     # variante con `let`/`pipeline` porque MongoDB puede usar el índice
@@ -4775,6 +4843,24 @@ async def _comparativa_resumen_origenes_impl(
             "_origen": {"$ifNull": ["$origen_comercial", "desconocido"]},
             "_has_sii": has_sii_expr,
         }},
+    ]
+    # Filtro post-lookup por tipo_factura del SII match
+    if aplicar_filtro_tipo_com:
+        or_clauses: list[dict] = []
+        if _tipos_real:
+            or_clauses.append({"$and": [
+                {"_has_sii": True},
+                {"_sii.tipo_factura": {"$in": _tipos_real}},
+            ]})
+        if _incluir_sin_clasif:
+            or_clauses.append({"_has_sii": False})
+        if len(or_clauses) > 1:
+            pipeline.append({"$match": {"$or": or_clauses}})
+        elif or_clauses:
+            pipeline.append({"$match": or_clauses[0]})
+        else:
+            pipeline.append({"$match": {"_id": None}})
+    pipeline.extend([
         {"$addFields": {
             "_coincide": {
                 "$cond": [
@@ -4796,7 +4882,7 @@ async def _comparativa_resumen_origenes_impl(
             "coincidencias": {"$sum": {"$cond": ["$_coincide", 1, 0]}},
         }},
         {"$sort": {"total_facturas": -1}},
-    ]
+    ])
 
     grupos = await _db.facturas_comercial.aggregate(
         pipeline, allowDiskUse=True,
