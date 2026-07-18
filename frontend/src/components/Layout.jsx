@@ -26,6 +26,7 @@ import {
   Sliders,
   Banknote,
   FileText,
+  Grid3X3,
 } from "lucide-react";
 import { useEnv } from "@/contexts/EnvContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -56,6 +57,7 @@ const NAV_TREE = [
     children: [
       { to: "/", label: "Resumen", icon: LayoutDashboard, end: true, testId: "nav-dashboard" },
       { to: "/comparativa", label: "Comparativa SII", icon: GitCompareArrows, testId: "nav-comparativa", perm: "comparativa.view" },
+      { to: "/cuadro-mensual", label: "Cuadro mensual", icon: Grid3X3, testId: "nav-cuadro-mensual", perm: "comparativa.view" },
       { to: "/carga-datos", label: "Carga de datos", icon: Upload, testId: "nav-carga-datos", permAny: ["conciliacion.view", "conciliacion.import", "comercial.import", "consultas.mensual"] },
       { to: "/consulta", label: "Consulta unitaria", icon: FileSearch, testId: "nav-unit", perm: "consultas.unitaria" },
       { to: "/batch", label: "Consulta batch (CSV)", icon: FileSpreadsheet, testId: "nav-batch", perm: "consultas.batch" },

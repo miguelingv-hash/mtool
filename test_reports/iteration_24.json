@@ -1,0 +1,33 @@
+{
+  "summary": "Frontend E2E de 'Cuadro de Conciliación Mensual' (/cuadro-mensual). Login inyectando cookie monitorsii_access con JWT minteado. Todos los data-testid principales presentes y funcionando salvo la carga del detalle expandido, que se queda en 'Cargando facturas del tramo…' porque /api/comparativa/bundle con filtros periodo+tipos_factura no responde en 45s. La UI del cuadro carga bien en ~15-25s en frío, tabla con 5 filas + TOTAL, filtros auto-seleccionan 2026, tabs BASER/TotalEnergies presentes, botón Recargar dispara request 200, Exportar cuadro descarga cuadro_mensual_A74251836_2026.csv correctamente. La fila TOTAL con fondo oscuro (slate-900) también renderiza al final.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/comparativa/bundle?nif_titular=A74251836&ejercicio=2026&periodo=06&tipos_factura=R5&limit=20", "issue": "No responde dentro de 45s cuando se pide detalle por (periodo, tipo). Impacta directamente la expansión inline de filas del Cuadro Mensual — la UI se queda mostrando el spinner 'Cargando facturas del tramo…' y nunca aparece el botón 'Abrir en Comparativa'. Aunque el endpoint del cuadro mensual sí termina (~15-25s en frío), bundle con estos filtros no."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Expandir fila del cuadro mensual → DetalleFacturas", "issue": "La llamada a /api/comparativa/bundle con params {nif_titular,ejercicio,periodo,tipos_factura} no retorna dentro de un tiempo razonable (>45s). El componente DetalleFacturas se monta correctamente y muestra el spinner, pero el usuario nunca llega a ver la lista ni el botón 'Abrir en Comparativa'. No es un bug de la UI (la integración está bien cableada); el problema es de rendimiento del endpoint bundle con filtros de periodo+tipo. Sugerencia: usar índice compuesto (nif_titular, ejercicio, periodo, tipo_factura) o limitar count() cuando limit<=20.", "affected_selectors": ["cuadro-detalle-open-comparativa"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Investigar rendimiento de /api/comparativa/bundle cuando se filtra por (nif_titular, ejercicio, periodo, tipos_factura) con limit=20 — se queda >45s. Considerar índice o skip de count() para casos con limit pequeño. Es lo único que bloquea el flujo de expansión de filas en /cuadro-mensual."
+  ],
+  "critical_code_review_comments": [
+    "CuadroMensual.jsx: en el useEffect de carga de sociedades falta dependencia 'nifSel' (linter warning) — está OK funcionalmente porque hay guard `!nifSel` pero ESLint lo marcará.",
+    "El DetalleFacturas reutiliza /comparativa/bundle sin timeout ni cancel visible al usuario si tarda demasiado. Añadir toast+ botón 'Reintentar' si el detalle tarda >20s mejoraría la UX cuando el backend está lento.",
+    "El SIGLO tab de origen se muestra a la derecha del scroll horizontal — recomiendo fijar Periodo/Tipo con sticky left para que sigan visibles al desplazar horizontalmente."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (no re-testeado backend)", "frontend": "88% (7/8 checks OK; sólo falla el detalle inline por lentitud de /comparativa/bundle)"},
+  "test_credentials": "Admin: miguelingv@gmail.com — JWT minteado con auth.create_access_token e inyectado como cookie 'monitorsii_access' en dominio soap-factura-batch.preview.emergentagent.com.",
+  "seed_data_creation": "Ninguna. Sólo lectura.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "El endpoint /api/comparativa/cuadro-mensual funciona (~15-25s en frío BASER 2026, luego <1s por cache TTL=300). El endpoint /api/comparativa/bundle es demasiado lento con filtros (periodo, tipo) — es el bloqueante. Todo lo demás del /cuadro-mensual está OK: navegación desde nav-cuadro-mensual, tabs BASER/TotalEnergies con data-testid correctos, filtros Ejercicio/Mes con auto-selección de último ejercicio (2026), tabla con 5 filas + fila TOTAL (bg oscuro), Recargar y Exportar CSV funcionando (descarga cuadro_mensual_A74251836_2026.csv).",
+  "rca of the issue": "En la expansión de fila, DetalleFacturas.load() hace GET /comparativa/bundle?nif_titular=A74251836&ejercicio=2026&periodo=06&tipos_factura=R5&limit=20&only_diffs=false. La request no responde en 45s (probablemente hace un count() completo sobre la colección o le falta índice compuesto {nif_titular, ejercicio, periodo, tipo_factura}). Mitigación 1: añadir índice compuesto. Mitigación 2: pasar skip_count=true o similar cuando limit<=20 para evitar count(). Reproducción: entrar a /cuadro-mensual, esperar a que cargue la tabla, hacer click en cualquier fila expandible."
+}

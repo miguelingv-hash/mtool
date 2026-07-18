@@ -11,6 +11,7 @@ import BatchQuery from "@/pages/BatchQuery";
 import History from "@/pages/History";
 import Logs from "@/pages/Logs";
 import Comparativa from "@/pages/Comparativa";
+import CuadroMensual from "@/pages/CuadroMensual";
 import CargaDatos from "@/pages/CargaDatos";
 import Configuracion from "@/pages/Configuracion";
 import ConciliacionNewman from "@/pages/ConciliacionNewman";
@@ -44,6 +45,7 @@ function App() {
             <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
               <Route index element={<Dashboard />} />
               <Route path="/comparativa" element={<ProtectedRoute requires="comparativa.view"><Comparativa /></ProtectedRoute>} />
+              <Route path="/cuadro-mensual" element={<ProtectedRoute requires="comparativa.view"><CuadroMensual /></ProtectedRoute>} />
               <Route path="/carga-datos" element={<ProtectedRoute requiresAny={["conciliacion.view", "conciliacion.import", "comercial.import", "consultas.mensual"]}><CargaDatos /></ProtectedRoute>} />
               <Route path="/consulta" element={<ProtectedRoute requires="consultas.unitaria"><UnitQuery /></ProtectedRoute>} />
               <Route path="/batch" element={<ProtectedRoute requires="consultas.batch"><BatchQuery /></ProtectedRoute>} />

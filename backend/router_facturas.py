@@ -5063,6 +5063,412 @@ async def _comparativa_tipos_factura_impl(
     return {"items": items, "total": sum(i["n"] for i in items)}
 
 
+# ---------------------------------------------------------------------------
+# Cuadro de Conciliación Mensual (por sociedad / ejercicio)
+# ---------------------------------------------------------------------------
+# Devuelve un pivot por (periodo, tipo_factura) con Base + Cuota + Nº de
+# facturas para SII y cada origen comercial (SIGLO / SAP FI), las diferencias
+# y el % de conciliación por importe y por número de facturas.
+#
+# Diseño de rendimiento:
+#   - 2 aggregations en paralelo (SII / Comercial). Ambos usan $group tras
+#     $match sobre índices (nif_titular, ejercicio) → memoria acotada.
+#   - El comercial cruza vía $lookup con SII para heredar `tipo_factura`
+#     (que no existe en `facturas_comercial`). Los comerciales sin match
+#     SII van al bucket `_sin_clasificar`.
+#   - matches_num_serie (para % conciliación por número de facturas) se
+#     calcula con un tercer aggregation que agrupa comerciales-con-match.
+#   - Cacheado con TTL de 5 min (mismo pool que el resto de comparativa).
+
+@router.get("/comparativa/cuadro-mensual")
+async def comparativa_cuadro_mensual(
+    nif_titular: str,
+    ejercicio: str,
+    periodo: Optional[str] = None,
+):
+    """Cuadro de conciliación mensual para una sociedad y un ejercicio.
+
+    Params obligatorios: `nif_titular`, `ejercicio`. Opcional `periodo`
+    (CSV de meses "01,02,..."). Devuelve una fila por combinación
+    (periodo, tipo_factura) presente en SII o en Comercial.
+
+    Estructura de respuesta:
+    {
+      "filtros": {"nif_titular": "...", "ejercicio": "2024", "periodo": "..."},
+      "origenes": ["SIGLO", "SAP"],  # detectados en scope
+      "rows": [
+        {
+          "periodo": "01",
+          "tipo_factura": "F1",
+          "sii": {"base": .., "cuota": .., "n": ..},
+          "comercial_por_origen": {
+             "SIGLO": {"base": .., "cuota": .., "n": ..},
+             "SAP":   {"base": .., "cuota": .., "n": .., "invertido": true}
+          },
+          "delta_por_origen": {
+             "SIGLO": {"base": ..(sii-siglo).., "cuota": .., "n": ..},
+             "SAP":   {...}
+          },
+          "pct_conciliacion_por_origen": {
+             "SIGLO": {"base": .., "cuota": .., "facturas": ..},
+             "SAP":   {...}
+          }
+        },
+        ...
+      ],
+      "totales": { ... misma estructura pero como fila TOTAL ... }
+    }
+    """
+    if not nif_titular or not ejercicio:
+        raise HTTPException(400, "nif_titular y ejercicio son obligatorios")
+    cache_key = ("cuadro-mensual", nif_titular.upper(), str(ejercicio), periodo)
+    return await _cached_or_compute(
+        cache_key,
+        lambda: _comparativa_cuadro_mensual_impl(
+            nif_titular=nif_titular.upper(),
+            ejercicio=str(ejercicio),
+            periodo=periodo,
+        ),
+    )
+
+
+async def _comparativa_cuadro_mensual_impl(
+    nif_titular: str,
+    ejercicio: str,
+    periodo: Optional[str] = None,
+):
+    config = await _load_comparativa_config()
+    filtro_sii, filtro_com = await _build_filtros(
+        ejercicio=ejercicio,
+        periodo=periodo,
+        num_serie=None,
+        excluir_base_cero=config["excluir_comercial_base_cero"],
+        nif_titular=nif_titular,
+        tipos_factura=None,
+    )
+    excluir_tipo_iva_cero = config.get("excluir_comercial_tipo_iva_cero", True)
+    inv_map: dict = config.get("invertir_signo_por_origen") or {}
+
+    # --- SII: $group por (periodo, tipo_factura) sumando detalle o cabecera --
+    sii_pipeline = [
+        {"$match": filtro_sii},
+        {"$project": {
+            "_id": 0,
+            "periodo": {"$ifNull": ["$periodo", "??"]},
+            "tipo_factura": {"$ifNull": ["$tipo_factura", "??"]},
+            "_base": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    {"$reduce": {
+                        "input": {"$ifNull": ["$detalle_iva", []]},
+                        "initialValue": 0.0,
+                        "in": {"$add": [
+                            "$$value",
+                            {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+                        ]},
+                    }},
+                    {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
+                ],
+            },
+            "_cuota": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    {"$reduce": {
+                        "input": {"$ifNull": ["$detalle_iva", []]},
+                        "initialValue": 0.0,
+                        "in": {"$add": [
+                            "$$value",
+                            {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+                        ]},
+                    }},
+                    {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
+                ],
+            },
+        }},
+        {"$group": {
+            "_id": {"periodo": "$periodo", "tipo": "$tipo_factura"},
+            "base": {"$sum": "$_base"},
+            "cuota": {"$sum": "$_cuota"},
+            "n": {"$sum": 1},
+        }},
+    ]
+
+    # --- Comercial: $lookup para heredar `tipo_factura` desde SII match ------
+    if excluir_tipo_iva_cero:
+        det_base_expr = {"$reduce": {
+            "input": {"$ifNull": ["$detalle_iva", []]},
+            "initialValue": 0.0,
+            "in": {"$add": [
+                "$$value",
+                {"$cond": [
+                    {"$and": [
+                        {"$ne": [{"$ifNull": ["$$this.tipo_impositivo", None]}, None]},
+                        {"$ne": [{"$toDouble": {"$ifNull": ["$$this.tipo_impositivo", 0]}}, 0]},
+                    ]},
+                    {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+                    0.0,
+                ]},
+            ]},
+        }}
+        det_cuota_expr = {"$reduce": {
+            "input": {"$ifNull": ["$detalle_iva", []]},
+            "initialValue": 0.0,
+            "in": {"$add": [
+                "$$value",
+                {"$cond": [
+                    {"$and": [
+                        {"$ne": [{"$ifNull": ["$$this.tipo_impositivo", None]}, None]},
+                        {"$ne": [{"$toDouble": {"$ifNull": ["$$this.tipo_impositivo", 0]}}, 0]},
+                    ]},
+                    {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+                    0.0,
+                ]},
+            ]},
+        }}
+        header_base_expr = {"$cond": [
+            {"$and": [
+                {"$ne": [{"$ifNull": ["$tipo_impositivo", None]}, None]},
+                {"$ne": [{"$toDouble": {"$ifNull": ["$tipo_impositivo", 0]}}, 0]},
+            ]},
+            {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
+            0.0,
+        ]}
+        header_cuota_expr = {"$cond": [
+            {"$and": [
+                {"$ne": [{"$ifNull": ["$tipo_impositivo", None]}, None]},
+                {"$ne": [{"$toDouble": {"$ifNull": ["$tipo_impositivo", 0]}}, 0]},
+            ]},
+            {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
+            0.0,
+        ]}
+    else:
+        det_base_expr = {"$reduce": {
+            "input": {"$ifNull": ["$detalle_iva", []]},
+            "initialValue": 0.0,
+            "in": {"$add": [
+                "$$value",
+                {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+            ]},
+        }}
+        det_cuota_expr = {"$reduce": {
+            "input": {"$ifNull": ["$detalle_iva", []]},
+            "initialValue": 0.0,
+            "in": {"$add": [
+                "$$value",
+                {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+            ]},
+        }}
+        header_base_expr = {"$toDouble": {"$ifNull": ["$base_imponible", 0]}}
+        header_cuota_expr = {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}}
+
+    com_pipeline = [
+        {"$match": filtro_com},
+        {"$lookup": {
+            "from": "facturas_sii",
+            "localField": "num_serie_factura",
+            "foreignField": "num_serie_factura",
+            "as": "_sii_docs",
+        }},
+        {"$addFields": {
+            "_sii_tipo": {"$arrayElemAt": ["$_sii_docs.tipo_factura", 0]},
+        }},
+        {"$project": {
+            "_id": 0,
+            "periodo": {"$ifNull": ["$periodo", "??"]},
+            "origen": {"$ifNull": ["$origen_comercial", "DESCONOCIDO"]},
+            "_tipo": {"$ifNull": ["$_sii_tipo", "_sin_clasificar"]},
+            "_base": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    det_base_expr,
+                    header_base_expr,
+                ],
+            },
+            "_cuota": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    det_cuota_expr,
+                    header_cuota_expr,
+                ],
+            },
+            "_matched": {"$gt": [{"$size": "$_sii_docs"}, 0]},
+        }},
+        {"$group": {
+            "_id": {
+                "periodo": "$periodo",
+                "tipo": "$_tipo",
+                "origen": "$origen",
+            },
+            "base": {"$sum": "$_base"},
+            "cuota": {"$sum": "$_cuota"},
+            "n": {"$sum": 1},
+            "n_matched": {"$sum": {"$cond": ["$_matched", 1, 0]}},
+        }},
+    ]
+
+    import asyncio as _aio
+    sii_res, com_res = await _aio.gather(
+        _db.facturas_sii.aggregate(sii_pipeline, allowDiskUse=True).to_list(None),
+        _db.facturas_comercial.aggregate(com_pipeline, allowDiskUse=True).to_list(None),
+    )
+
+    # Estructura intermedia: rows[(periodo,tipo)] = {sii, com_por_origen, matches_por_origen}
+    rows: dict[tuple, dict] = {}
+    origenes_set: set[str] = set()
+
+    def _row(k):
+        return rows.setdefault(k, {
+            "periodo": k[0],
+            "tipo_factura": k[1],
+            "sii": {"base": 0.0, "cuota": 0.0, "n": 0},
+            "comercial_por_origen": {},
+            "matches_por_origen": {},
+        })
+
+    for r in sii_res:
+        per = r["_id"].get("periodo") or "??"
+        tipo = r["_id"].get("tipo") or "??"
+        row = _row((per, tipo))
+        row["sii"] = {
+            "base": round(float(r.get("base") or 0), 2),
+            "cuota": round(float(r.get("cuota") or 0), 2),
+            "n": int(r.get("n") or 0),
+        }
+
+    for r in com_res:
+        per = r["_id"].get("periodo") or "??"
+        tipo = r["_id"].get("tipo") or "_sin_clasificar"
+        origen = r["_id"].get("origen") or "DESCONOCIDO"
+        origenes_set.add(origen)
+        base = float(r.get("base") or 0)
+        cuota = float(r.get("cuota") or 0)
+        invertido = bool(inv_map.get(origen))
+        if invertido:
+            base = -base
+            cuota = -cuota
+        row = _row((per, tipo))
+        row["comercial_por_origen"][origen] = {
+            "base": round(base, 2),
+            "cuota": round(cuota, 2),
+            "n": int(r.get("n") or 0),
+            "invertido": invertido,
+        }
+        row["matches_por_origen"][origen] = int(r.get("n_matched") or 0)
+
+    # Helper de % conciliación (mismo estilo que /comparativa/totales).
+    def _pct(sii_val: float, com_val: float) -> Optional[float]:
+        if sii_val == 0 and com_val == 0:
+            return 1.0
+        denom = abs(sii_val) if sii_val != 0 else abs(com_val)
+        if denom == 0:
+            return None
+        return round(1.0 - abs(sii_val - com_val) / denom, 6)
+
+    def _pct_facturas(n_sii: int, n_com: int, matches: int) -> Optional[float]:
+        universo = n_sii + n_com - matches
+        if universo <= 0:
+            return 1.0 if (n_sii == 0 and n_com == 0) else None
+        return round(matches / universo, 6)
+
+    origenes = sorted(origenes_set)
+
+    # Materializar filas con deltas + pct + rellenar orígenes ausentes con 0
+    result_rows: list[dict] = []
+    for (per, tipo), row in rows.items():
+        sii = row["sii"]
+        deltas: dict[str, dict] = {}
+        pcts: dict[str, dict] = {}
+        for og in origenes:
+            com = row["comercial_por_origen"].get(og) or {
+                "base": 0.0, "cuota": 0.0, "n": 0, "invertido": bool(inv_map.get(og)),
+            }
+            row["comercial_por_origen"][og] = com
+            matches = row["matches_por_origen"].get(og, 0)
+            deltas[og] = {
+                "base": round(sii["base"] - com["base"], 2),
+                "cuota": round(sii["cuota"] - com["cuota"], 2),
+                "n": sii["n"] - com["n"],
+            }
+            pcts[og] = {
+                "base": _pct(sii["base"], com["base"]),
+                "cuota": _pct(sii["cuota"], com["cuota"]),
+                "facturas": _pct_facturas(sii["n"], com["n"], matches),
+            }
+        row["delta_por_origen"] = deltas
+        row["pct_conciliacion_por_origen"] = pcts
+        row.pop("matches_por_origen", None)
+        result_rows.append(row)
+
+    # Orden: por periodo ASC, luego tipo_factura (F1,F2,...,R1..R5,_sin_clasificar)
+    TIPO_ORDER = {
+        "F1": 1, "F2": 2, "F3": 3, "F4": 4,
+        "R1": 5, "R2": 6, "R3": 7, "R4": 8, "R5": 9,
+        "_sin_clasificar": 99, "??": 100,
+    }
+    result_rows.sort(key=lambda r: (
+        r["periodo"],
+        TIPO_ORDER.get(r["tipo_factura"], 50),
+        r["tipo_factura"],
+    ))
+
+    # Fila de totales globales (suma de todas las filas)
+    total_sii = {"base": 0.0, "cuota": 0.0, "n": 0}
+    total_com: dict[str, dict] = {
+        og: {"base": 0.0, "cuota": 0.0, "n": 0, "invertido": bool(inv_map.get(og))}
+        for og in origenes
+    }
+    total_matches: dict[str, int] = {og: 0 for og in origenes}
+    for r in result_rows:
+        total_sii["base"] += r["sii"]["base"]
+        total_sii["cuota"] += r["sii"]["cuota"]
+        total_sii["n"] += r["sii"]["n"]
+        for og in origenes:
+            c = r["comercial_por_origen"].get(og) or {}
+            total_com[og]["base"] += float(c.get("base") or 0)
+            total_com[og]["cuota"] += float(c.get("cuota") or 0)
+            total_com[og]["n"] += int(c.get("n") or 0)
+    # matches por origen para totales: recomputamos a partir del com_res
+    for r in com_res:
+        og = r["_id"].get("origen") or "DESCONOCIDO"
+        total_matches[og] = total_matches.get(og, 0) + int(r.get("n_matched") or 0)
+
+    total_deltas: dict[str, dict] = {}
+    total_pcts: dict[str, dict] = {}
+    for og in origenes:
+        c = total_com[og]
+        c["base"] = round(c["base"], 2)
+        c["cuota"] = round(c["cuota"], 2)
+        total_deltas[og] = {
+            "base": round(total_sii["base"] - c["base"], 2),
+            "cuota": round(total_sii["cuota"] - c["cuota"], 2),
+            "n": total_sii["n"] - c["n"],
+        }
+        total_pcts[og] = {
+            "base": _pct(total_sii["base"], c["base"]),
+            "cuota": _pct(total_sii["cuota"], c["cuota"]),
+            "facturas": _pct_facturas(
+                total_sii["n"], c["n"], total_matches.get(og, 0),
+            ),
+        }
+    total_sii["base"] = round(total_sii["base"], 2)
+    total_sii["cuota"] = round(total_sii["cuota"], 2)
+
+    return {
+        "filtros": {
+            "nif_titular": nif_titular,
+            "ejercicio": ejercicio,
+            "periodo": periodo,
+        },
+        "origenes": origenes,
+        "rows": result_rows,
+        "totales": {
+            "sii": total_sii,
+            "comercial_por_origen": total_com,
+            "delta_por_origen": total_deltas,
+            "pct_conciliacion_por_origen": total_pcts,
+        },
+    }
+
 
 @router.get("/comparativa/export")
 async def comparativa_export(
