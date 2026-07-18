@@ -3129,6 +3129,7 @@ async def _build_filtros(
     num_serie: Optional[str],
     excluir_base_cero: bool = False,
     nif_titular: Optional[str] = None,
+    tipos_factura: Optional[str] = None,
 ) -> tuple[dict, dict]:
     """Construye filtros Mongo para SII y comercial a partir de los parámetros
     de consulta. No aplica restricciones implícitas: el universo SII se acota
@@ -3142,6 +3143,12 @@ async def _build_filtros(
     Para `facturas_comercial` se aceptan también docs sin `nif_titular`
     (cargados antes de añadir el campo) — así no se pierde data legacy hasta
     que el usuario haga backfill explícito vía la subida comercial.
+
+    Si `tipos_factura` (CSV: "F1,F2,R1,...") viene informado, se aplica al
+    `tipo_factura` de SII. El comercial NO se filtra directamente porque su
+    campo `tipo_factura` está vacío en todos los docs — la clasificación
+    viene del SII cruzado por `num_serie_factura`. Los `solo_comercial` (sin
+    SII match) se controlan aparte con el pseudo-código `_sin_clasificar`.
     """
     import re
 
@@ -3162,6 +3169,18 @@ async def _build_filtros(
         elif len(periodos_list) > 1:
             filtro_sii["periodo"] = {"$in": periodos_list}
             filtro_com["periodo"] = {"$in": periodos_list}
+    # Filtro por tipo de factura (F1, F2, R1...). El pseudo-código
+    # `_sin_clasificar` NO se aplica al filtro_sii (por definición un doc
+    # SII siempre tiene tipo). Se gestiona en la aggregation aguas abajo.
+    if tipos_factura:
+        codes = [t.strip() for t in str(tipos_factura).split(",") if t.strip()]
+        codes_real = [c for c in codes if c != "_sin_clasificar"]
+        if codes_real:
+            # Sólo aplicamos $in si NO están todos los tipos posibles marcados
+            # (equivale a "sin filtro"). Consideramos todos = F1..F4 + R1..R5.
+            TODOS_TIPOS = {"F1", "F2", "F3", "F4", "R1", "R2", "R3", "R4", "R5"}
+            if set(codes_real) != TODOS_TIPOS:
+                filtro_sii["tipo_factura"] = {"$in": codes_real}
     if num_serie:
         regex_ns = {"$regex": re.escape(num_serie), "$options": "i"}
         filtro_sii["num_serie_factura"] = regex_ns
@@ -3287,6 +3306,7 @@ async def comparativa_bundle(
     sort_by: Optional[str] = None,
     sort_dir: str = "desc",
     nif_titular: Optional[str] = None,
+    tipos_factura: Optional[str] = None,
 ):
     """Endpoint agregado que devuelve las 3 vistas de la Comparativa en una
     sola petición: `list`, `totales`, `resumen_origenes`.
@@ -3309,7 +3329,7 @@ async def comparativa_bundle(
     cache_key = (
         "bundle",
         skip, limit, only_diffs, ejercicio, periodo, num_serie,
-        estado, sort_by, sort_dir, nif_titular,
+        estado, sort_by, sort_dir, nif_titular, tipos_factura,
     )
     return await _cached_or_compute(
         cache_key,
@@ -3317,7 +3337,7 @@ async def comparativa_bundle(
             skip=skip, limit=limit, only_diffs=only_diffs,
             ejercicio=ejercicio, periodo=periodo, num_serie=num_serie,
             estado=estado, sort_by=sort_by, sort_dir=sort_dir,
-            nif_titular=nif_titular,
+            nif_titular=nif_titular, tipos_factura=tipos_factura,
         ),
     )
 
@@ -3326,7 +3346,7 @@ async def _comparativa_bundle_impl(
     skip: int, limit: int, only_diffs: bool,
     ejercicio: Optional[str], periodo: Optional[str], num_serie: Optional[str],
     estado: Optional[str], sort_by: Optional[str], sort_dir: str,
-    nif_titular: Optional[str],
+    nif_titular: Optional[str], tipos_factura: Optional[str] = None,
 ):
     """Ejecuta las 3 sub-queries secuencialmente para que compartan cache y
     no compitan por CPU/event loop."""
@@ -3345,15 +3365,17 @@ async def _comparativa_bundle_impl(
             skip=skip, limit=limit, only_diffs=only_diffs,
             ejercicio=ejercicio, periodo=periodo, num_serie=num_serie,
             estado=estado, sort_by=sort_by, sort_dir=sort_dir,
-            nif_titular=nif_titular,
+            nif_titular=nif_titular, tipos_factura=tipos_factura,
         ),
         _comparativa_totales_impl(
             ejercicio=ejercicio, periodo=periodo,
             num_serie=num_serie, nif_titular=nif_titular,
+            tipos_factura=tipos_factura,
         ),
         _comparativa_resumen_origenes_impl(
             ejercicio=ejercicio, periodo=periodo,
             num_serie=num_serie, nif_titular=nif_titular,
+            tipos_factura=tipos_factura,
         ),
     )
     # Enriquecemos `totales.diferencias` con la métrica de conciliación
@@ -3395,6 +3417,7 @@ async def _comparativa_impl(
     sort_by: Optional[str] = None,
     sort_dir: str = "desc",
     nif_titular: Optional[str] = None,
+    tipos_factura: Optional[str] = None,
 ):
     """Implementación real de `/comparativa`. Separada del endpoint para
     poder envolverla con cache + single-flight sin duplicar la firma."""
@@ -3403,7 +3426,16 @@ async def _comparativa_impl(
         ejercicio, periodo, num_serie,
         excluir_base_cero=config["excluir_comercial_base_cero"],
         nif_titular=nif_titular,
+        tipos_factura=tipos_factura,
     )
+    # Parseamos `tipos_factura` para la lógica del bucket "_sin_clasificar"
+    # (solo_comercial, que no tiene contraparte SII y por tanto tipo=null).
+    tipos_set: set[str] = set()
+    incluir_sin_clasificar = True
+    if tipos_factura:
+        _codes = [t.strip() for t in str(tipos_factura).split(",") if t.strip()]
+        incluir_sin_clasificar = "_sin_clasificar" in _codes
+        tipos_set = {c for c in _codes if c != "_sin_clasificar"}
 
     # Cortafuegos anti-OOM (relajado): sólo se aplica cuando el path elegido
     # necesita cargar el universo comercial en RAM para hacer diff en Python.
@@ -3428,6 +3460,21 @@ async def _comparativa_impl(
                 f"({universo_com:,} facturas comerciales). Selecciona una "
                 f"sociedad concreta o filtra por ejercicio/periodo.",
             )
+
+    # ------------------------------------------------------------------
+    # FAST-PATH `estado=solo_comercial` (aggregation nativa Mongo).
+    # Nota: los solo_comercial NO tienen contraparte SII → tampoco tienen
+    # `tipo_factura`. Si el usuario filtra por tipos SIN marcar el
+    # pseudo-código `_sin_clasificar`, no debemos mostrar ninguno.
+    if estado == "solo_comercial" and tipos_factura and not incluir_sin_clasificar:
+        return {
+            "total": 0,
+            "skip": skip,
+            "limit": limit,
+            "campos_canonicos": CAMPOS_CANONICOS,
+            "campos_numericos": CAMPOS_NUMERICOS,
+            "items": [],
+        }
 
     # FAST-PATH `estado=solo_comercial` (aggregation nativa Mongo).
     #
@@ -3824,6 +3871,30 @@ async def _comparativa_impl(
             pipeline.append({"$match": {"_estado": {"$ne": "coincide"}}})
         # (all: sin filtro adicional, incluimos las 3 categorías desde comercial)
 
+        # Filtro por tipos de factura (F1, F2, R1... + _sin_clasificar).
+        # Se aplica POST-LOOKUP porque el $lookup con localField no puede
+        # filtrar por campos del `from` (que serían `_sii.tipo_factura`).
+        # Nota: los `solo_comercial` no tienen `_sii` → su `_sii.tipo_factura`
+        # es null. Los excluimos si `_sin_clasificar` NO está marcado.
+        if tipos_set or (tipos_factura and not incluir_sin_clasificar):
+            tipo_match_clauses: list[dict] = []
+            if tipos_set:
+                tipo_match_clauses.append({
+                    "_sii.tipo_factura": {"$in": list(tipos_set)},
+                })
+            if incluir_sin_clasificar:
+                # _sin_clasificar activo: también dejamos pasar solo_comercial
+                # (sin `_has_sii` y por tanto sin `_sii.tipo_factura`).
+                tipo_match_clauses.append({"_has_sii": False})
+            if len(tipo_match_clauses) > 1:
+                pipeline.append({"$match": {"$or": tipo_match_clauses}})
+            elif tipo_match_clauses:
+                pipeline.append({"$match": tipo_match_clauses[0]})
+            else:
+                # _sin_clasificar NO activo y sin tipos_set → sólo dejamos
+                # pasar los que tienen SII match (comportamiento estricto).
+                pipeline.append({"$match": {"_has_sii": True}})
+
         # Sort
         SORT_DB_FIELD = {
             "num_serie_factura": "num_serie_factura",
@@ -4191,6 +4262,7 @@ async def _comparativa_totales_impl(
     periodo: Optional[str] = None,
     num_serie: Optional[str] = None,
     nif_titular: Optional[str] = None,
+    tipos_factura: Optional[str] = None,
 ):
     """Totales por origen usando **aggregation pipeline** nativo Mongo.
 
@@ -4210,6 +4282,7 @@ async def _comparativa_totales_impl(
         ejercicio, periodo, num_serie,
         excluir_base_cero=config["excluir_comercial_base_cero"],
         nif_titular=nif_titular,
+        tipos_factura=tipos_factura,
     )
 
     excluir_tipo_iva_cero = config.get("excluir_comercial_tipo_iva_cero", True)
@@ -4594,6 +4667,7 @@ async def _comparativa_resumen_origenes_impl(
     periodo: Optional[str] = None,
     num_serie: Optional[str] = None,
     nif_titular: Optional[str] = None,
+    tipos_factura: Optional[str] = None,
 ):
     """Resumen agregado por `origen_comercial` con **aggregation nativa**.
 
@@ -4816,6 +4890,92 @@ async def _comparativa_nifs_titulares_impl():
         "sociedades": sociedades,
         "comercial_sin_nif": comercial_sin_nif,
     }
+
+
+
+@router.get("/comparativa/tipos-factura")
+async def comparativa_tipos_factura(
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+    nif_titular: Optional[str] = None,
+):
+    """Devuelve contadores por `tipo_factura` para poblar el filtro
+    multi-select. Cada bucket contiene el nº de facturas SII (F1..F4/R1..R5)
+    dentro del ámbito filtrado + un bucket `_sin_clasificar` con las
+    comerciales sin match SII (por definición sin tipo conocido).
+    """
+    cache_key = ("tipos-factura", ejercicio, periodo, nif_titular)
+    return await _cached_or_compute(
+        cache_key,
+        lambda: _comparativa_tipos_factura_impl(
+            ejercicio=ejercicio, periodo=periodo, nif_titular=nif_titular,
+        ),
+    )
+
+
+# Catálogo canónico de tipos de factura AEAT (XSD SuministroInformacion).
+_TIPOS_FACTURA_CATALOG = [
+    ("F1", "Factura normal", "normal"),
+    ("F2", "Simplificada / tique", "normal"),
+    ("F3", "Reemplaza simplificada", "normal"),
+    ("F4", "Resumen de facturas", "normal"),
+    ("R1", "Errores 80.1, 80.2, 80.6 LIVA", "abono"),
+    ("R2", "Artículo 80.3 LIVA", "abono"),
+    ("R3", "Artículo 80.4 LIVA", "abono"),
+    ("R4", "Otro motivo (abono)", "abono"),
+    ("R5", "Simplificada rectificada", "abono"),
+]
+
+
+async def _comparativa_tipos_factura_impl(
+    ejercicio: Optional[str] = None,
+    periodo: Optional[str] = None,
+    nif_titular: Optional[str] = None,
+):
+    filtro_sii, filtro_com = await _build_filtros(
+        ejercicio, periodo, num_serie=None,
+        excluir_base_cero=False,
+        nif_titular=nif_titular,
+    )
+    # Contadores por tipo_factura en SII
+    sii_pipe = [
+        {"$match": filtro_sii},
+        {"$group": {"_id": "$tipo_factura", "n": {"$sum": 1}}},
+    ]
+    sii_counts: dict[str, int] = {}
+    for r in await _db.facturas_sii.aggregate(sii_pipe).to_list(None):
+        tipo = r.get("_id") or "(null)"
+        sii_counts[tipo] = int(r.get("n") or 0)
+
+    # `_sin_clasificar`: comerciales sin contraparte SII en el ámbito.
+    solo_com_pipe = [
+        {"$match": filtro_com},
+        {"$lookup": {
+            "from": "facturas_sii",
+            "localField": "num_serie_factura",
+            "foreignField": "num_serie_factura",
+            "as": "_s",
+        }},
+        {"$match": {"_s": {"$size": 0}}},
+        {"$count": "n"},
+    ]
+    _r = await _db.facturas_comercial.aggregate(
+        solo_com_pipe, allowDiskUse=True,
+    ).to_list(1)
+    sin_clasificar = int((_r[0].get("n") if _r else 0) or 0)
+
+    items = [
+        {"code": code, "label": label, "categoria": cat, "n": sii_counts.get(code, 0)}
+        for code, label, cat in _TIPOS_FACTURA_CATALOG
+    ]
+    items.append({
+        "code": "_sin_clasificar",
+        "label": "Sólo en Comercial (sin tipo)",
+        "categoria": "otros",
+        "n": sin_clasificar,
+    })
+    return {"items": items, "total": sum(i["n"] for i in items)}
+
 
 
 @router.get("/comparativa/export")

@@ -311,6 +311,15 @@ export default function Comparativa() {
   // (expandiendo los trimestres a sus tres meses correspondientes).
   const [quartersSel, setQuartersSel] = useState([]);
   const [monthsSel, setMonthsSel] = useState([]);
+  // Filtro por tipo de factura (F1, F2, R1... + _sin_clasificar para
+  // solo_comercial). Por defecto TODOS marcados = sin filtro.
+  const ALL_TIPOS_FACTURA = [
+    "F1", "F2", "F3", "F4",
+    "R1", "R2", "R3", "R4", "R5",
+    "_sin_clasificar",
+  ];
+  const [tiposFacturaSel, setTiposFacturaSel] = useState(ALL_TIPOS_FACTURA);
+  const [tiposFacturaCatalog, setTiposFacturaCatalog] = useState([]);
   const [filtroNumSerie, setFiltroNumSerie] = useState(initialNumSerie);
   const [filtroNumSerieDebounced, setFiltroNumSerieDebounced] = useState(initialNumSerie);
   const [filtroEstado, setFiltroEstado] = useState(initialNumSerie ? "all" : "diffs"); // diffs|all|coincide|discrepancia|solo_sii|solo_comercial
@@ -424,6 +433,15 @@ export default function Comparativa() {
       if (effectivePeriodo) params.periodo = effectivePeriodo;
       if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
       if (filtroNif !== "__all__") params.nif_titular = filtroNif;
+      // Filtro por tipo de factura: sólo enviamos si NO están todos los
+      // buckets seleccionados (equivale a "sin filtro"). Reduce tamaño de
+      // query y aprovecha mejor el cache.
+      if (
+        tiposFacturaSel.length > 0 &&
+        tiposFacturaSel.length < ALL_TIPOS_FACTURA.length
+      ) {
+        params.tipos_factura = tiposFacturaSel.join(",");
+      }
       if (sortBy) {
         params.sort_by = sortBy;
         params.sort_dir = sortDir;
@@ -569,7 +587,22 @@ export default function Comparativa() {
   useEffect(() => {
     if (filtroNif === null) return;  // esperamos a que se decida el NIF
     load();
-  }, [filtroEstado, page, pageSize, filtroEjercicio, effectivePeriodo, filtroNumSerieDebounced, sortBy, sortDir, filtroNif]);
+  }, [filtroEstado, page, pageSize, filtroEjercicio, effectivePeriodo, filtroNumSerieDebounced, sortBy, sortDir, filtroNif, tiposFacturaSel]);
+
+  // Recarga contadores por tipo_factura cuando cambia el ámbito
+  // (sociedad, ejercicio, período). Se usa para poblar la tarjeta de
+  // filtro con contadores en vivo por bucket.
+  useEffect(() => {
+    const p = {};
+    if (filtroEjercicio !== "__all__") p.ejercicio = filtroEjercicio;
+    if (effectivePeriodo) p.periodo = effectivePeriodo;
+    if (filtroNif && filtroNif !== "__all__") p.nif_titular = filtroNif;
+    api
+      .get("/comparativa/tipos-factura", { params: p })
+      .then((r) => setTiposFacturaCatalog(r.data?.items || []))
+      .catch(() => {});
+  }, [filtroEjercicio, effectivePeriodo, filtroNif]);
+
 
   // Reset paginación al cambiar filtros
   useEffect(() => {
@@ -1023,6 +1056,123 @@ export default function Comparativa() {
         <p className="text-[10px] text-slate-400 leading-relaxed">
           Multi-selección. Trimestres y meses son mutuamente excluyentes:
           marcar un trimestre limpia los meses, y viceversa.
+        </p>
+      </div>
+
+      {/* Filtro por tipo de factura (F1, F2, R1... + _sin_clasificar) */}
+      <div className="border border-slate-200 bg-slate-50/40 p-4 mb-6 space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <Label
+            className="text-xs uppercase tracking-wider text-slate-600"
+            data-testid="filter-tipos-factura-label"
+          >
+            Tipo de factura
+          </Label>
+          <div className="flex gap-2 text-[10px]">
+            <button
+              type="button"
+              className="px-2 py-1 border border-slate-300 hover:bg-slate-100 rounded-none"
+              data-testid="tipos-factura-todos"
+              onClick={() => setTiposFacturaSel(ALL_TIPOS_FACTURA)}
+            >
+              Todos
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 border border-slate-300 hover:bg-slate-100 rounded-none"
+              data-testid="tipos-factura-solo-normales"
+              onClick={() =>
+                setTiposFacturaSel(["F1", "F2", "F3", "F4"])
+              }
+            >
+              Sólo normales
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 border border-slate-300 hover:bg-slate-100 rounded-none"
+              data-testid="tipos-factura-solo-abonos"
+              onClick={() =>
+                setTiposFacturaSel(["R1", "R2", "R3", "R4", "R5"])
+              }
+            >
+              Sólo abonos
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 border border-slate-300 hover:bg-slate-100 rounded-none text-slate-500"
+              data-testid="tipos-factura-ninguno"
+              onClick={() => setTiposFacturaSel([])}
+            >
+              Ninguno
+            </button>
+          </div>
+        </div>
+
+        {/* Grupos: normales (F*), abonos (R*), otros (_sin_clasificar) */}
+        {["normal", "abono", "otros"].map((cat) => {
+          const buckets = tiposFacturaCatalog.filter((it) => it.categoria === cat);
+          if (buckets.length === 0) return null;
+          const heading = {
+            normal: "Facturas normales",
+            abono: "Rectificativas / abonos",
+            otros: "Otros",
+          }[cat];
+          return (
+            <div key={cat} className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider text-slate-400">
+                {heading}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {buckets.map((it) => {
+                  const checked = tiposFacturaSel.includes(it.code);
+                  const disabled = it.n === 0;
+                  return (
+                    <label
+                      key={it.code}
+                      className={`flex items-center gap-2 px-2.5 py-1.5 border text-xs cursor-pointer transition-colors ${
+                        checked
+                          ? "border-slate-800 bg-slate-800 text-white"
+                          : "border-slate-300 hover:border-slate-500 bg-white"
+                      } ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
+                      data-testid={`tipo-factura-${it.code}`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="hidden"
+                        checked={checked}
+                        disabled={disabled}
+                        onChange={() => {
+                          setTiposFacturaSel((prev) =>
+                            prev.includes(it.code)
+                              ? prev.filter((c) => c !== it.code)
+                              : [...prev, it.code],
+                          );
+                        }}
+                      />
+                      <span className="font-mono font-semibold">
+                        {it.code === "_sin_clasificar" ? "—" : it.code}
+                      </span>
+                      <span>{it.label}</span>
+                      <span
+                        className={`ml-1 text-[10px] ${
+                          checked ? "text-slate-300" : "text-slate-500"
+                        }`}
+                      >
+                        {(it.n || 0).toLocaleString("es-ES")}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+
+        <p className="text-[10px] text-slate-400 leading-relaxed">
+          Multi-selección. Por defecto todos marcados (sin filtro). El
+          bucket <span className="font-mono">—</span> corresponde a
+          facturas sólo en Comercial que no tienen contraparte SII y por
+          tanto sin tipo conocido.
         </p>
       </div>
 
