@@ -465,6 +465,7 @@ Nueva sección independiente bajo el menú **Monitor SII** (ruta `/cuadro-mensua
   - Pipeline: 2 aggregations en paralelo (SII $group por periodo+tipo; Comercial $lookup+$group por periodo+origen+tipo heredado de SII). Comerciales sin match SII se agrupan como `_sin_clasificar`.
   - Aplica inversión de signo (`invertir_signo_por_origen`) y excluye tipo_impositivo=0 según config.
   - Devuelve `rows` (una fila por combinación) + `totales` (fila TOTAL) + `origenes` detectados en scope.
+  - **Delta y % conciliación se calculan sobre `comercial_total` (SIGLO + SAP FI sumados)**, no por origen individual. Estructura de fila: `sii`, `comercial_por_origen`, `comercial_total`, `delta`, `pct_conciliacion`.
 - **`GET /api/comparativa`** ahora acepta el param `tipos_factura` (antes sólo estaba en `/comparativa/bundle`).
 
 ### Frontend

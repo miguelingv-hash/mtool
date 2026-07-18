@@ -367,17 +367,16 @@ export default function CuadroMensual() {
       "SII_Base",
       "SII_Cuota",
       "SII_N",
-      ...orig.flatMap((o) => [
-        `${o}_Base`,
-        `${o}_Cuota`,
-        `${o}_N`,
-        `Delta_${o}_Base`,
-        `Delta_${o}_Cuota`,
-        `Delta_${o}_N`,
-        `Pct_${o}_Base`,
-        `Pct_${o}_Cuota`,
-        `Pct_${o}_N`,
-      ]),
+      ...orig.flatMap((o) => [`${o}_Base`, `${o}_Cuota`, `${o}_N`]),
+      "Comercial_Total_Base",
+      "Comercial_Total_Cuota",
+      "Comercial_Total_N",
+      "Delta_Base",
+      "Delta_Cuota",
+      "Delta_N",
+      "Pct_Base",
+      "Pct_Cuota",
+      "Pct_N",
     ];
     const rows = [header];
     for (const r of data.rows || []) {
@@ -390,20 +389,22 @@ export default function CuadroMensual() {
       ];
       for (const o of orig) {
         const c = r.comercial_por_origen?.[o] || {};
-        const d = r.delta_por_origen?.[o] || {};
-        const p = r.pct_conciliacion_por_origen?.[o] || {};
-        line.push(
-          c.base ?? 0,
-          c.cuota ?? 0,
-          c.n ?? 0,
-          d.base ?? 0,
-          d.cuota ?? 0,
-          d.n ?? 0,
-          p.base ?? "",
-          p.cuota ?? "",
-          p.facturas ?? "",
-        );
+        line.push(c.base ?? 0, c.cuota ?? 0, c.n ?? 0);
       }
+      const ct = r.comercial_total || {};
+      const d = r.delta || {};
+      const p = r.pct_conciliacion || {};
+      line.push(
+        ct.base ?? 0,
+        ct.cuota ?? 0,
+        ct.n ?? 0,
+        d.base ?? 0,
+        d.cuota ?? 0,
+        d.n ?? 0,
+        p.base ?? "",
+        p.cuota ?? "",
+        p.facturas ?? "",
+      );
       rows.push(line);
     }
     // TOTAL
@@ -417,20 +418,22 @@ export default function CuadroMensual() {
     ];
     for (const o of orig) {
       const c = t.comercial_por_origen?.[o] || {};
-      const d = t.delta_por_origen?.[o] || {};
-      const p = t.pct_conciliacion_por_origen?.[o] || {};
-      tRow.push(
-        c.base ?? 0,
-        c.cuota ?? 0,
-        c.n ?? 0,
-        d.base ?? 0,
-        d.cuota ?? 0,
-        d.n ?? 0,
-        p.base ?? "",
-        p.cuota ?? "",
-        p.facturas ?? "",
-      );
+      tRow.push(c.base ?? 0, c.cuota ?? 0, c.n ?? 0);
     }
+    const tct = t.comercial_total || {};
+    const td = t.delta || {};
+    const tp = t.pct_conciliacion || {};
+    tRow.push(
+      tct.base ?? 0,
+      tct.cuota ?? 0,
+      tct.n ?? 0,
+      td.base ?? 0,
+      td.cuota ?? 0,
+      td.n ?? 0,
+      tp.base ?? "",
+      tp.cuota ?? "",
+      tp.facturas ?? "",
+    );
     rows.push(tRow);
 
     const csv = rows
@@ -630,38 +633,38 @@ export default function CuadroMensual() {
                     >
                       {labelOrigenComercial(o)} · Nº
                     </TableHead>
-                    <TableHead
-                      className="text-[11px] uppercase tracking-wider text-white text-right bg-slate-700"
-                    >
-                      Δ Base
-                    </TableHead>
-                    <TableHead
-                      className="text-[11px] uppercase tracking-wider text-white text-right bg-slate-700"
-                    >
-                      Δ Cuota
-                    </TableHead>
-                    <TableHead
-                      className="text-[11px] uppercase tracking-wider text-white text-right bg-slate-700"
-                    >
-                      Δ Nº
-                    </TableHead>
-                    <TableHead
-                      className="text-[11px] uppercase tracking-wider text-white text-right bg-emerald-900/40"
-                    >
-                      % Base
-                    </TableHead>
-                    <TableHead
-                      className="text-[11px] uppercase tracking-wider text-white text-right bg-emerald-900/40"
-                    >
-                      % Cuota
-                    </TableHead>
-                    <TableHead
-                      className="text-[11px] uppercase tracking-wider text-white text-right bg-emerald-900/40"
-                    >
-                      % Nº
-                    </TableHead>
                   </Fragment>
                 ))}
+                {/* Bloque agregado: Σ Comercial (SIGLO + SAP FI) */}
+                <TableHead className="text-[11px] uppercase tracking-wider text-white text-right bg-slate-800 border-l border-slate-600">
+                  Σ Comercial · Base
+                </TableHead>
+                <TableHead className="text-[11px] uppercase tracking-wider text-white text-right bg-slate-800">
+                  Σ Comercial · Cuota
+                </TableHead>
+                <TableHead className="text-[11px] uppercase tracking-wider text-white text-right bg-slate-800">
+                  Σ Comercial · Nº
+                </TableHead>
+                {/* Bloque Δ único: SII − Σ Comercial */}
+                <TableHead className="text-[11px] uppercase tracking-wider text-white text-right bg-slate-700 border-l border-slate-600">
+                  Δ Base
+                </TableHead>
+                <TableHead className="text-[11px] uppercase tracking-wider text-white text-right bg-slate-700">
+                  Δ Cuota
+                </TableHead>
+                <TableHead className="text-[11px] uppercase tracking-wider text-white text-right bg-slate-700">
+                  Δ Nº
+                </TableHead>
+                {/* Bloque % conciliación único */}
+                <TableHead className="text-[11px] uppercase tracking-wider text-white text-right bg-emerald-900/40 border-l border-slate-600">
+                  % Base
+                </TableHead>
+                <TableHead className="text-[11px] uppercase tracking-wider text-white text-right bg-emerald-900/40">
+                  % Cuota
+                </TableHead>
+                <TableHead className="text-[11px] uppercase tracking-wider text-white text-right bg-emerald-900/40">
+                  % Nº
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -706,63 +709,55 @@ export default function CuadroMensual() {
                       </TableCell>
                       {origenes.map((o) => {
                         const c = r.comercial_por_origen?.[o] || {};
-                        const d = r.delta_por_origen?.[o] || {};
-                        const p = r.pct_conciliacion_por_origen?.[o] || {};
                         return (
                           <Fragment key={`${key}-${o}`}>
-                            <TableCell
-                              className="font-mono text-xs tabular-nums text-right"
-                            >
+                            <TableCell className="font-mono text-xs tabular-nums text-right">
                               {fmtEur(c.base)}
                             </TableCell>
-                            <TableCell
-                              className="font-mono text-xs tabular-nums text-right"
-                            >
+                            <TableCell className="font-mono text-xs tabular-nums text-right">
                               {fmtEur(c.cuota)}
                             </TableCell>
-                            <TableCell
-                              className="font-mono text-xs tabular-nums text-right"
-                            >
+                            <TableCell className="font-mono text-xs tabular-nums text-right">
                               {fmtInt(c.n)}
-                            </TableCell>
-                            <TableCell
-                              className="font-mono text-xs tabular-nums text-right bg-slate-50"
-                            >
-                              <DeltaCell value={d.base} mode="eur" />
-                            </TableCell>
-                            <TableCell
-                              className="font-mono text-xs tabular-nums text-right bg-slate-50"
-                            >
-                              <DeltaCell value={d.cuota} mode="eur" />
-                            </TableCell>
-                            <TableCell
-                              className="font-mono text-xs tabular-nums text-right bg-slate-50"
-                            >
-                              <DeltaCell value={d.n} mode="int" />
-                            </TableCell>
-                            <TableCell
-                              className="text-right bg-emerald-50/40"
-                            >
-                              <PctCell value={p.base} />
-                            </TableCell>
-                            <TableCell
-                              className="text-right bg-emerald-50/40"
-                            >
-                              <PctCell value={p.cuota} />
-                            </TableCell>
-                            <TableCell
-                              className="text-right bg-emerald-50/40"
-                            >
-                              <PctCell value={p.facturas} />
                             </TableCell>
                           </Fragment>
                         );
                       })}
+                      {/* Σ Comercial */}
+                      <TableCell className="font-mono text-xs tabular-nums text-right bg-slate-100 border-l border-slate-200">
+                        {fmtEur(r.comercial_total?.base)}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs tabular-nums text-right bg-slate-100">
+                        {fmtEur(r.comercial_total?.cuota)}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs tabular-nums text-right bg-slate-100">
+                        {fmtInt(r.comercial_total?.n)}
+                      </TableCell>
+                      {/* Δ SII − Σ Comercial */}
+                      <TableCell className="font-mono text-xs tabular-nums text-right bg-slate-50 border-l border-slate-200">
+                        <DeltaCell value={r.delta?.base} mode="eur" />
+                      </TableCell>
+                      <TableCell className="font-mono text-xs tabular-nums text-right bg-slate-50">
+                        <DeltaCell value={r.delta?.cuota} mode="eur" />
+                      </TableCell>
+                      <TableCell className="font-mono text-xs tabular-nums text-right bg-slate-50">
+                        <DeltaCell value={r.delta?.n} mode="int" />
+                      </TableCell>
+                      {/* % conciliación */}
+                      <TableCell className="text-right bg-emerald-50/40 border-l border-slate-200">
+                        <PctCell value={r.pct_conciliacion?.base} />
+                      </TableCell>
+                      <TableCell className="text-right bg-emerald-50/40">
+                        <PctCell value={r.pct_conciliacion?.cuota} />
+                      </TableCell>
+                      <TableCell className="text-right bg-emerald-50/40">
+                        <PctCell value={r.pct_conciliacion?.facturas} />
+                      </TableCell>
                     </TableRow>
                     {isOpen && (
                       <TableRow className="hover:bg-transparent">
                         <TableCell
-                          colSpan={6 + origenes.length * 9}
+                          colSpan={6 + origenes.length * 3 + 9}
                           className="p-0"
                         >
                           <DetalleFacturas
@@ -798,58 +793,50 @@ export default function CuadroMensual() {
                   </TableCell>
                   {origenes.map((o) => {
                     const c = totales.comercial_por_origen?.[o] || {};
-                    const d = totales.delta_por_origen?.[o] || {};
-                    const p = totales.pct_conciliacion_por_origen?.[o] || {};
                     return (
                       <Fragment key={`total-${o}`}>
-                        <TableCell
-                          className="font-mono text-xs tabular-nums text-right"
-                        >
+                        <TableCell className="font-mono text-xs tabular-nums text-right">
                           {fmtEur(c.base)}
                         </TableCell>
-                        <TableCell
-                          className="font-mono text-xs tabular-nums text-right"
-                        >
+                        <TableCell className="font-mono text-xs tabular-nums text-right">
                           {fmtEur(c.cuota)}
                         </TableCell>
-                        <TableCell
-                          className="font-mono text-xs tabular-nums text-right"
-                        >
+                        <TableCell className="font-mono text-xs tabular-nums text-right">
                           {fmtInt(c.n)}
-                        </TableCell>
-                        <TableCell
-                          className="font-mono text-xs tabular-nums text-right"
-                        >
-                          {fmtEur(d.base)}
-                        </TableCell>
-                        <TableCell
-                          className="font-mono text-xs tabular-nums text-right"
-                        >
-                          {fmtEur(d.cuota)}
-                        </TableCell>
-                        <TableCell
-                          className="font-mono text-xs tabular-nums text-right"
-                        >
-                          {fmtInt(d.n)}
-                        </TableCell>
-                        <TableCell
-                          className="text-right font-mono text-xs tabular-nums"
-                        >
-                          {fmtPct(p.base)}
-                        </TableCell>
-                        <TableCell
-                          className="text-right font-mono text-xs tabular-nums"
-                        >
-                          {fmtPct(p.cuota)}
-                        </TableCell>
-                        <TableCell
-                          className="text-right font-mono text-xs tabular-nums"
-                        >
-                          {fmtPct(p.facturas)}
                         </TableCell>
                       </Fragment>
                     );
                   })}
+                  {/* Σ Comercial total */}
+                  <TableCell className="font-mono text-xs tabular-nums text-right border-l border-slate-700">
+                    {fmtEur(totales.comercial_total?.base)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs tabular-nums text-right">
+                    {fmtEur(totales.comercial_total?.cuota)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs tabular-nums text-right">
+                    {fmtInt(totales.comercial_total?.n)}
+                  </TableCell>
+                  {/* Δ total */}
+                  <TableCell className="font-mono text-xs tabular-nums text-right border-l border-slate-700">
+                    {fmtEur(totales.delta?.base)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs tabular-nums text-right">
+                    {fmtEur(totales.delta?.cuota)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs tabular-nums text-right">
+                    {fmtInt(totales.delta?.n)}
+                  </TableCell>
+                  {/* % total */}
+                  <TableCell className="text-right font-mono text-xs tabular-nums border-l border-slate-700">
+                    {fmtPct(totales.pct_conciliacion?.base)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs tabular-nums">
+                    {fmtPct(totales.pct_conciliacion?.cuota)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs tabular-nums">
+                    {fmtPct(totales.pct_conciliacion?.facturas)}
+                  </TableCell>
                 </TableRow>
               )}
             </TableBody>

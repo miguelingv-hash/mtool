@@ -68,25 +68,36 @@ def test_cuadro_mensual_baser_2026():
     assert "tipo_factura" in row
     assert "sii" in row and all(k in row["sii"] for k in ("base", "cuota", "n"))
     assert "comercial_por_origen" in row
-    assert "delta_por_origen" in row
-    assert "pct_conciliacion_por_origen" in row
+    assert "comercial_total" in row and all(
+        k in row["comercial_total"] for k in ("base", "cuota", "n")
+    )
+    assert "delta" in row and all(k in row["delta"] for k in ("base", "cuota", "n"))
+    assert "pct_conciliacion" in row and all(
+        k in row["pct_conciliacion"] for k in ("base", "cuota", "facturas")
+    )
 
-    # Cada origen debe tener los tres bloques
+    # Cada origen debe existir en comercial_por_origen
     for og in d["origenes"]:
         assert og in row["comercial_por_origen"]
-        assert og in row["delta_por_origen"]
-        assert og in row["pct_conciliacion_por_origen"]
 
-    # Delta coherente: sii - comercial (por base)
+    # Delta debe ser SII − Σ Comercial (no por origen individual)
     for row in d["rows"]:
-        for og in d["origenes"]:
-            sii_base = row["sii"]["base"]
-            com_base = row["comercial_por_origen"][og]["base"]
-            d_base = row["delta_por_origen"][og]["base"]
-            assert abs(round(sii_base - com_base, 2) - d_base) < 0.01, (
-                f"Delta mal calculado para {row['periodo']}/{row['tipo_factura']}/{og}: "
-                f"sii={sii_base} com={com_base} delta={d_base}"
-            )
+        sii_base = row["sii"]["base"]
+        com_tot_base = row["comercial_total"]["base"]
+        d_base = row["delta"]["base"]
+        assert abs(round(sii_base - com_tot_base, 2) - d_base) < 0.01, (
+            f"Delta base mal calculado para {row['periodo']}/{row['tipo_factura']}: "
+            f"sii={sii_base} com_total={com_tot_base} delta={d_base}"
+        )
+        # comercial_total.base = suma de todos los orígenes
+        suma_orig = round(
+            sum(row["comercial_por_origen"][og]["base"] for og in d["origenes"]),
+            2,
+        )
+        assert abs(suma_orig - com_tot_base) < 0.01, (
+            f"comercial_total.base no coincide con suma de orígenes: "
+            f"suma={suma_orig} total={com_tot_base}"
+        )
 
 
 def test_totales_coinciden_con_endpoint_totales():
@@ -116,6 +127,15 @@ def test_totales_coinciden_con_endpoint_totales():
         f"totales={tot['sii']['base']}"
     )
     assert cuadro["totales"]["sii"]["n"] == tot["sii"]["n_facturas"]
+
+    # comercial_total del cuadro debe cuadrar con comercial_total de /totales
+    assert abs(
+        cuadro["totales"]["comercial_total"]["base"] - tot["comercial_total"]["base"]
+    ) < 1
+    assert (
+        cuadro["totales"]["comercial_total"]["n"]
+        == tot["comercial_total"]["n_facturas"]
+    )
 
     # Cada origen: coincidencia en base y n_facturas.
     for og in cuadro["origenes"]:

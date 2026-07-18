@@ -5375,30 +5375,37 @@ async def _comparativa_cuadro_mensual_impl(
 
     origenes = sorted(origenes_set)
 
-    # Materializar filas con deltas + pct + rellenar orígenes ausentes con 0
+    # Materializar filas con comercial_total agregado + delta/pct únicos
+    # (SII vs Σ comerciales). Los detalles por origen se mantienen para
+    # display, pero el Δ/%% conciliación se calculan sobre el total.
     result_rows: list[dict] = []
     for (per, tipo), row in rows.items():
         sii = row["sii"]
-        deltas: dict[str, dict] = {}
-        pcts: dict[str, dict] = {}
+        # Rellena orígenes ausentes con 0 y suma comercial_total
+        c_tot = {"base": 0.0, "cuota": 0.0, "n": 0}
+        matches_total = 0
         for og in origenes:
             com = row["comercial_por_origen"].get(og) or {
                 "base": 0.0, "cuota": 0.0, "n": 0, "invertido": bool(inv_map.get(og)),
             }
             row["comercial_por_origen"][og] = com
-            matches = row["matches_por_origen"].get(og, 0)
-            deltas[og] = {
-                "base": round(sii["base"] - com["base"], 2),
-                "cuota": round(sii["cuota"] - com["cuota"], 2),
-                "n": sii["n"] - com["n"],
-            }
-            pcts[og] = {
-                "base": _pct(sii["base"], com["base"]),
-                "cuota": _pct(sii["cuota"], com["cuota"]),
-                "facturas": _pct_facturas(sii["n"], com["n"], matches),
-            }
-        row["delta_por_origen"] = deltas
-        row["pct_conciliacion_por_origen"] = pcts
+            c_tot["base"] += com["base"]
+            c_tot["cuota"] += com["cuota"]
+            c_tot["n"] += com["n"]
+            matches_total += row["matches_por_origen"].get(og, 0)
+        c_tot["base"] = round(c_tot["base"], 2)
+        c_tot["cuota"] = round(c_tot["cuota"], 2)
+        row["comercial_total"] = c_tot
+        row["delta"] = {
+            "base": round(sii["base"] - c_tot["base"], 2),
+            "cuota": round(sii["cuota"] - c_tot["cuota"], 2),
+            "n": sii["n"] - c_tot["n"],
+        }
+        row["pct_conciliacion"] = {
+            "base": _pct(sii["base"], c_tot["base"]),
+            "cuota": _pct(sii["cuota"], c_tot["cuota"]),
+            "facturas": _pct_facturas(sii["n"], c_tot["n"], matches_total),
+        }
         row.pop("matches_por_origen", None)
         result_rows.append(row)
 
@@ -5420,7 +5427,7 @@ async def _comparativa_cuadro_mensual_impl(
         og: {"base": 0.0, "cuota": 0.0, "n": 0, "invertido": bool(inv_map.get(og))}
         for og in origenes
     }
-    total_matches: dict[str, int] = {og: 0 for og in origenes}
+    total_matches_all: int = 0
     for r in result_rows:
         total_sii["base"] += r["sii"]["base"]
         total_sii["cuota"] += r["sii"]["cuota"]
@@ -5430,31 +5437,37 @@ async def _comparativa_cuadro_mensual_impl(
             total_com[og]["base"] += float(c.get("base") or 0)
             total_com[og]["cuota"] += float(c.get("cuota") or 0)
             total_com[og]["n"] += int(c.get("n") or 0)
-    # matches por origen para totales: recomputamos a partir del com_res
+    # matches totales acumulados (todos los orígenes; num_serie es único
+    # en `facturas_comercial` así que no hay doble-conteo).
     for r in com_res:
-        og = r["_id"].get("origen") or "DESCONOCIDO"
-        total_matches[og] = total_matches.get(og, 0) + int(r.get("n_matched") or 0)
+        total_matches_all += int(r.get("n_matched") or 0)
 
-    total_deltas: dict[str, dict] = {}
-    total_pcts: dict[str, dict] = {}
+    total_comercial: dict = {"base": 0.0, "cuota": 0.0, "n": 0}
     for og in origenes:
         c = total_com[og]
         c["base"] = round(c["base"], 2)
         c["cuota"] = round(c["cuota"], 2)
-        total_deltas[og] = {
-            "base": round(total_sii["base"] - c["base"], 2),
-            "cuota": round(total_sii["cuota"] - c["cuota"], 2),
-            "n": total_sii["n"] - c["n"],
-        }
-        total_pcts[og] = {
-            "base": _pct(total_sii["base"], c["base"]),
-            "cuota": _pct(total_sii["cuota"], c["cuota"]),
-            "facturas": _pct_facturas(
-                total_sii["n"], c["n"], total_matches.get(og, 0),
-            ),
-        }
+        total_comercial["base"] += c["base"]
+        total_comercial["cuota"] += c["cuota"]
+        total_comercial["n"] += c["n"]
+    total_comercial["base"] = round(total_comercial["base"], 2)
+    total_comercial["cuota"] = round(total_comercial["cuota"], 2)
+
     total_sii["base"] = round(total_sii["base"], 2)
     total_sii["cuota"] = round(total_sii["cuota"], 2)
+
+    total_delta = {
+        "base": round(total_sii["base"] - total_comercial["base"], 2),
+        "cuota": round(total_sii["cuota"] - total_comercial["cuota"], 2),
+        "n": total_sii["n"] - total_comercial["n"],
+    }
+    total_pct = {
+        "base": _pct(total_sii["base"], total_comercial["base"]),
+        "cuota": _pct(total_sii["cuota"], total_comercial["cuota"]),
+        "facturas": _pct_facturas(
+            total_sii["n"], total_comercial["n"], total_matches_all,
+        ),
+    }
 
     return {
         "filtros": {
@@ -5467,8 +5480,9 @@ async def _comparativa_cuadro_mensual_impl(
         "totales": {
             "sii": total_sii,
             "comercial_por_origen": total_com,
-            "delta_por_origen": total_deltas,
-            "pct_conciliacion_por_origen": total_pcts,
+            "comercial_total": total_comercial,
+            "delta": total_delta,
+            "pct_conciliacion": total_pct,
         },
     }
 
