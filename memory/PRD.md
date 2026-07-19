@@ -751,3 +751,28 @@ Coincidencias totales tras todos los fixes:
   - Sí aparecen con `only_diffs=false` con estado=coincide
 - Todos los tests previos (iter23-28) siguen pasando (**23/23 PASS**).
 
+
+## iter29 (Feb 2026) — Manual de Usuario + Tooltips + Fix >100%
+
+### Cambios
+1. **Fix % conciliación >100%**: la métrica `pct_conciliado_facturas`
+   usaba `matches_sii` de `resumen_origenes` (sin `excluir_comercial_base_cero`)
+   contra `n_facturas` de `totales` (con exclusión). Podía dar 102.96%.
+   Fix: cap `matches_total = min(matches, sii_n, com_n)` y también cap final
+   del ratio `min(matches/universo, 1.0)`.
+2. **Tooltips en Resumen de Conciliación**: hover con explicación completa
+   en `% en €`, `% en nº facturas`, `facturas SII`, `comerciales`,
+   `X con contraparte de Y`, `Δ Base`, `Δ Cuota`, `Δ Canónico`.
+3. **Manual de usuario**: nueva página `/manual-monitor-sii` accesible desde
+   el menú `Monitor SII → Manual de usuario`. Incluye:
+   - Descripción del módulo
+   - Glosario de 10 conceptos clave con `<HelpCircle>` visual
+   - FAQ con 5 preguntas frecuentes
+   - Explicación de `importe canónico`, estados de conciliación,
+     inversión de signo por origen, tipos de factura, filtros.
+
+### Archivos nuevos
+- `/app/frontend/src/pages/ManualMonitorSII.jsx`
+- Ruta protegida en `App.js` (`comparativa.view`)
+- Nav item `nav-manual-monitor-sii` en Layout.jsx
+

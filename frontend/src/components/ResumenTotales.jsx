@@ -234,17 +234,28 @@ export default function ResumenTotales({ filtros, refreshKey, enabled = true, in
             ) : (
               <>
                 <Badge
-                  className="bg-amber-600 hover:bg-amber-600 text-white"
+                  className="bg-amber-600 hover:bg-amber-600 text-white cursor-help"
                   data-testid="badge-conciliado-importe"
-                  title="Porcentaje de conciliación en IMPORTE (€) — min(base, cuota)"
+                  title={
+                    "% de conciliación por IMPORTE (€).\n" +
+                    "Se calcula como 1 − |Δ| / SII sobre BASE y CUOTA, " +
+                    "y se muestra el mínimo de ambos.\n" +
+                    "100% = SII y Comercial cuadran al céntimo."
+                  }
                 >
                   {pctImporteMin !== null ? formatPct(pctImporteMin) : "—"} en €
                 </Badge>
                 <Badge
                   variant="outline"
-                  className="border-amber-300 text-amber-800 bg-amber-50"
+                  className="border-amber-300 text-amber-800 bg-amber-50 cursor-help"
                   data-testid="badge-conciliado-facturas"
-                  title="Porcentaje de facturas conciliadas (matches / unión de num_serie)"
+                  title={
+                    "% de facturas conciliadas por Nº.\n" +
+                    "Fórmula: matches / (SII ∪ Comercial).\n" +
+                    "matches = facturas presentes en ambas fuentes " +
+                    "(cruzadas por num_serie_factura).\n" +
+                    "Universo = SII + Comercial − matches (unión sin duplicados)."
+                  }
                 >
                   {pctFacturas !== null && pctFacturas !== undefined
                     ? formatPct(pctFacturas)
@@ -254,12 +265,34 @@ export default function ResumenTotales({ filtros, refreshKey, enabled = true, in
               </>
             )}
             <div className="text-xs text-slate-600">
-              {sii?.n_facturas?.toLocaleString("es-ES") || 0} facturas SII ·{" "}
-              {total?.n_facturas?.toLocaleString("es-ES") || 0} comerciales
+              <span
+                className="cursor-help underline decoration-dotted decoration-slate-400"
+                title="Nº total de facturas presentes en la base de datos del SII (registros descargados de AEAT)."
+              >
+                {sii?.n_facturas?.toLocaleString("es-ES") || 0} facturas SII
+              </span>
+              {" · "}
+              <span
+                className="cursor-help underline decoration-dotted decoration-slate-400"
+                title={
+                  "Nº total de facturas del sistema comercial (SIGLO + SAP FI), " +
+                  "importadas vía CSV. Incluye todos los orígenes filtrados."
+                }
+              >
+                {total?.n_facturas?.toLocaleString("es-ES") || 0} comerciales
+              </span>
               {matchesN !== null && matchesN !== undefined && universoN ? (
                 <>
                   {" · "}
-                  <span className="text-slate-500">
+                  <span
+                    className="text-slate-500 cursor-help underline decoration-dotted decoration-slate-400"
+                    title={
+                      "matches = facturas cruzadas por num_serie_factura " +
+                      "que existen en SII y en Comercial simultáneamente.\n" +
+                      "universo = SII + Comercial − matches (nº de facturas " +
+                      "únicas en cualquiera de las 2 fuentes)."
+                    }
+                  >
                     {matchesN.toLocaleString("es-ES")} con contraparte de{" "}
                     {universoN.toLocaleString("es-ES")}
                   </span>
@@ -269,12 +302,29 @@ export default function ResumenTotales({ filtros, refreshKey, enabled = true, in
           </div>
           {!conciliado100 && diff && (
             <div className="flex items-center gap-4 text-xs flex-wrap">
-              <span className="text-slate-500">Δ Base</span>
+              <span
+                className="text-slate-500 cursor-help underline decoration-dotted decoration-slate-400"
+                title={
+                  "Δ Base = SII.base − Comercial.base.\n" +
+                  "Signo positivo = SII > Comercial. Signo negativo = Comercial > SII.\n" +
+                  "Los orígenes con inversión activa (SIGLO/SAP) ya tienen el signo compensado."
+                }
+              >
+                Δ Base
+              </span>
               <span className="font-mono font-semibold text-rose-700 tabular-nums">
                 {formatEUR(diff.base)}
               </span>
               <span className="text-slate-300">·</span>
-              <span className="text-slate-500">Δ Cuota</span>
+              <span
+                className="text-slate-500 cursor-help underline decoration-dotted decoration-slate-400"
+                title={
+                  "Δ Cuota = SII.cuota_repercutida − Comercial.cuota.\n" +
+                  "Diferencia agregada del IVA repercutido entre ambas fuentes."
+                }
+              >
+                Δ Cuota
+              </span>
               <span className="font-mono font-semibold text-rose-700 tabular-nums">
                 {formatEUR(diff.cuota)}
               </span>
@@ -282,8 +332,15 @@ export default function ResumenTotales({ filtros, refreshKey, enabled = true, in
                 <>
                   <span className="text-slate-300">·</span>
                   <span
-                    className="text-slate-500"
-                    title="Δ del importe canónico (base+cuota). Refleja la reconciliación real cuando hay desglose asimétrico (No Sujeta, etc.)"
+                    className="text-slate-500 cursor-help underline decoration-dotted decoration-slate-400"
+                    title={
+                      "Δ Canónico = SII.canonico − Comercial.canonico.\n" +
+                      "canonico = importe_total (prioritario) o base+cuota como fallback.\n" +
+                      "Refleja la reconciliación REAL cuando hay desglose asimétrico:\n" +
+                      "• Facturas No Sujeta (SII sólo tiene importe_total)\n" +
+                      "• Facturas con partes exentas (importe_total ≠ base+cuota)\n" +
+                      "Verde = cuadra en su conjunto aunque los desgloses no."
+                    }
                   >
                     Δ Canónico
                   </span>

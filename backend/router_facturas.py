@@ -3457,9 +3457,16 @@ async def _comparativa_bundle_impl(
         )
         sii_n = int((totales.get("sii") or {}).get("n_facturas") or 0)
         com_n = int((totales.get("comercial_total") or {}).get("n_facturas") or 0)
+        # `matches_sii` viene de `resumen_origenes` que usa filtros ligeramente
+        # distintos que `totales` (p.ej. no aplica `excluir_comercial_base_cero`).
+        # Cap para que matches_total nunca supere `min(sii_n, com_n)` — es la
+        # cota teórica de coincidencias posibles.
+        if sii_n > 0 and com_n > 0:
+            matches_total = min(matches_total, sii_n, com_n)
         universo = sii_n + com_n - matches_total
         pct_fact = (
-            round(matches_total / universo, 6) if universo > 0 else None
+            round(min(matches_total / universo, 1.0), 6)
+            if universo > 0 else None
         )
         diff = totales.setdefault("diferencias", {})
         diff["matches_num_serie"] = matches_total
