@@ -592,15 +592,34 @@ export default function Comparativa() {
   // Recarga contadores por tipo_factura cuando cambia el ámbito
   // (sociedad, ejercicio, período). Se usa para poblar la tarjeta de
   // filtro con contadores en vivo por bucket.
+  // AbortController: si el usuario cambia NIF antes de que termine el
+  // fetch anterior, cancelamos la petición obsoleta para que no
+  // sobrescriba el catálogo con datos de la sociedad anterior (bug del
+  // mismatch buckets vs Resumen).
+  const tiposFacturaAbortRef = useRef(null);
   useEffect(() => {
+    if (tiposFacturaAbortRef.current) {
+      tiposFacturaAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    tiposFacturaAbortRef.current = controller;
     const p = {};
     if (filtroEjercicio !== "__all__") p.ejercicio = filtroEjercicio;
     if (effectivePeriodo) p.periodo = effectivePeriodo;
     if (filtroNif && filtroNif !== "__all__") p.nif_titular = filtroNif;
     api
-      .get("/comparativa/tipos-factura", { params: p })
+      .get("/comparativa/tipos-factura", { params: p, signal: controller.signal })
       .then((r) => setTiposFacturaCatalog(r.data?.items || []))
-      .catch(() => {});
+      .catch((err) => {
+        // Ignorar cancelaciones explícitas
+        if (
+          err?.name === "CanceledError" ||
+          err?.name === "AbortError" ||
+          err?.code === "ERR_CANCELED"
+        ) {
+          return;
+        }
+      });
   }, [filtroEjercicio, effectivePeriodo, filtroNif]);
 
 

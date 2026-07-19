@@ -189,6 +189,11 @@ async def cleanup_orphan_jobs():
         # Audit trail — índices para el listado/filtros del historial de imports.
         from imports_log import ensure_indexes as _audit_indexes  # noqa: WPS433
         await _audit_indexes(_db)
+        # iter25: índices compuestos que aprovechan el `tipo_factura`
+        # denormalizado en `facturas_comercial`. Sub-segundo para filtros
+        # comunes por (sociedad, ejercicio, periodo, tipo_factura).
+        from backfill_tipo_factura import ensure_indexes_iter25  # noqa: WPS433
+        await ensure_indexes_iter25(_db, _logger)
     except Exception:  # noqa: BLE001
         _logger.exception("No se pudieron crear los índices al arranque")
 
@@ -3169,18 +3174,43 @@ async def _build_filtros(
         elif len(periodos_list) > 1:
             filtro_sii["periodo"] = {"$in": periodos_list}
             filtro_com["periodo"] = {"$in": periodos_list}
-    # Filtro por tipo de factura (F1, F2, R1...). El pseudo-código
-    # `_sin_clasificar` NO se aplica al filtro_sii (por definición un doc
-    # SII siempre tiene tipo). Se gestiona en la aggregation aguas abajo.
+    # Filtro por tipo de factura (F1, F2, R1...). Refactor iter25:
+    # `tipo_factura` ahora está denormalizado en `facturas_comercial`
+    # (via backfill), por tanto se aplica DIRECTAMENTE en filtro_com
+    # sin necesidad de $lookup con SII. `_sin_clasificar` == comercial
+    # sin tipo (null/ausente/vacío).
     if tipos_factura:
         codes = [t.strip() for t in str(tipos_factura).split(",") if t.strip()]
         codes_real = [c for c in codes if c != "_sin_clasificar"]
-        if codes_real:
-            # Sólo aplicamos $in si NO están todos los tipos posibles marcados
-            # (equivale a "sin filtro"). Consideramos todos = F1..F4 + R1..R5.
-            TODOS_TIPOS = {"F1", "F2", "F3", "F4", "R1", "R2", "R3", "R4", "R5"}
-            if set(codes_real) != TODOS_TIPOS:
-                filtro_sii["tipo_factura"] = {"$in": codes_real}
+        incluir_sin_clasif = "_sin_clasificar" in codes
+        TODOS_TIPOS = {"F1", "F2", "F3", "F4", "R1", "R2", "R3", "R4", "R5"}
+        # SII sólo tiene los tipos "reales" (nunca `_sin_clasificar`).
+        if codes_real and set(codes_real) != TODOS_TIPOS:
+            filtro_sii["tipo_factura"] = {"$in": codes_real}
+
+        # Comercial: acepta docs con tipo en codes_real, más los sin
+        # tipo (null/vacío) si _sin_clasificar está seleccionado.
+        clauses_com: list[dict] = []
+        if codes_real and set(codes_real) != TODOS_TIPOS:
+            clauses_com.append({"tipo_factura": {"$in": codes_real}})
+        elif codes_real:
+            # todos los tipos reales marcados → clásula = tipo_factura ∈ TODOS
+            clauses_com.append({"tipo_factura": {"$in": list(TODOS_TIPOS)}})
+        if incluir_sin_clasif:
+            clauses_com.append({"$or": [
+                {"tipo_factura": None},
+                {"tipo_factura": ""},
+                {"tipo_factura": {"$exists": False}},
+            ]})
+        if len(clauses_com) > 1:
+            filtro_com["$or"] = clauses_com
+        elif len(clauses_com) == 1:
+            # Fusionar la única clásula con el resto del filtro
+            for k, v in clauses_com[0].items():
+                filtro_com[k] = v
+        else:
+            # No hay nada seleccionado → resultado vacío por definición.
+            filtro_com["_id"] = None
     if num_serie:
         regex_ns = {"$regex": re.escape(num_serie), "$options": "i"}
         filtro_sii["num_serie_factura"] = regex_ns
@@ -4431,56 +4461,11 @@ async def _comparativa_totales_impl(
     # se aplica indirectamente: comercial cuenta como tipo X si su match
     # SII (por num_serie único) es de tipo X. Los solo_comercial (sin
     # match SII) sólo cuentan si `_sin_clasificar` está seleccionado.
-    _tipos_codes = (
-        [t.strip() for t in str(tipos_factura).split(",") if t.strip()]
-        if tipos_factura else []
-    )
-    _tipos_real = [c for c in _tipos_codes if c != "_sin_clasificar"]
-    _incluir_sin_clasif = "_sin_clasificar" in _tipos_codes
-    _TODOS_TIPOS = {"F1", "F2", "F3", "F4", "R1", "R2", "R3", "R4", "R5"}
-    aplicar_filtro_tipo_com = (
-        tipos_factura is not None
-        and (
-            set(_tipos_real) != _TODOS_TIPOS
-            or not _incluir_sin_clasif
-        )
-    )
-
+    # Refactor iter25: `tipo_factura` denormalizado en comercial.
+    # `_build_filtros` ya aplica el filtro directamente en `filtro_com`
+    # → sin necesidad de `$lookup` (antes tardaba 40-60s).
     com_pipeline: list[dict] = [
         {"$match": filtro_com},
-    ]
-    if aplicar_filtro_tipo_com:
-        # $lookup con foreignField clásico (aprovecha índice único).
-        com_pipeline.extend([
-            {"$lookup": {
-                "from": "facturas_sii",
-                "localField": "num_serie_factura",
-                "foreignField": "num_serie_factura",
-                "as": "_sii_docs",
-            }},
-            {"$addFields": {
-                "_sii_tipo": {"$arrayElemAt": ["$_sii_docs.tipo_factura", 0]},
-                "_has_sii": {"$gt": [{"$size": "$_sii_docs"}, 0]},
-            }},
-        ])
-        # Construye el $match según selección:
-        #   - si hay tipos reales: aceptamos comerciales cuyo SII match ∈ set
-        #   - si _sin_clasificar: aceptamos también comerciales sin SII match
-        or_clauses: list[dict] = []
-        if _tipos_real:
-            or_clauses.append({"_sii_tipo": {"$in": _tipos_real}})
-        if _incluir_sin_clasif:
-            or_clauses.append({"_has_sii": False})
-        if len(or_clauses) > 1:
-            com_pipeline.append({"$match": {"$or": or_clauses}})
-        elif or_clauses:
-            com_pipeline.append({"$match": or_clauses[0]})
-        else:
-            # Ni tipos_real ni _sin_clasificar → nada cuenta.
-            com_pipeline.append({"$match": {"_id": None}})
-        com_pipeline.append({"$project": {"_sii_docs": 0, "_sii_tipo": 0, "_has_sii": 0}})
-
-    com_pipeline.extend([
         {"$project": {
             "_id": 0,
             "origen": {"$ifNull": ["$origen_comercial", "DESCONOCIDO"]},
@@ -4507,7 +4492,7 @@ async def _comparativa_totales_impl(
             "n_facturas": {"$sum": 1},
             "ultima_fecha_expedicion": {"$max": "$fecha_expedicion"},
         }},
-    ])
+    ]
     com_res = await _db.facturas_comercial.aggregate(
         com_pipeline, allowDiskUse=True,
     ).to_list(length=None)
@@ -4812,20 +4797,9 @@ async def _comparativa_resumen_origenes_impl(
         else {"$ne": ["$_sii", None]}
     )
 
-    # Filtro por tipo_factura: aplica al comercial vía SII match (el campo
-    # no existe en comerciales). solo_comercial (sin SII) sólo cuenta si
-    # `_sin_clasificar` está en la selección del usuario.
-    _tipos_codes = (
-        [t.strip() for t in str(tipos_factura).split(",") if t.strip()]
-        if tipos_factura else []
-    )
-    _tipos_real = [c for c in _tipos_codes if c != "_sin_clasificar"]
-    _incluir_sin_clasif = "_sin_clasificar" in _tipos_codes
-    _TODOS_TIPOS = {"F1", "F2", "F3", "F4", "R1", "R2", "R3", "R4", "R5"}
-    aplicar_filtro_tipo_com = (
-        tipos_factura is not None
-        and (set(_tipos_real) != _TODOS_TIPOS or not _incluir_sin_clasif)
-    )
+    # Filtro por tipo_factura: refactor iter25 — ahora `tipo_factura`
+    # está en `facturas_comercial` (denormalizado), así que ya se aplicó
+    # en `_build_filtros` sobre `filtro_com`. No necesitamos post-lookup.
 
     # Pipeline principal sobre `facturas_comercial`. Usa la variante clásica
     # de `$lookup` con `localField`/`foreignField` — ~3x más rápido que la
@@ -4847,22 +4821,6 @@ async def _comparativa_resumen_origenes_impl(
             "_has_sii": has_sii_expr,
         }},
     ]
-    # Filtro post-lookup por tipo_factura del SII match
-    if aplicar_filtro_tipo_com:
-        or_clauses: list[dict] = []
-        if _tipos_real:
-            or_clauses.append({"$and": [
-                {"_has_sii": True},
-                {"_sii.tipo_factura": {"$in": _tipos_real}},
-            ]})
-        if _incluir_sin_clasif:
-            or_clauses.append({"_has_sii": False})
-        if len(or_clauses) > 1:
-            pipeline.append({"$match": {"$or": or_clauses}})
-        elif or_clauses:
-            pipeline.append({"$match": or_clauses[0]})
-        else:
-            pipeline.append({"$match": {"_id": None}})
     pipeline.extend([
         {"$addFields": {
             "_coincide": {
@@ -5021,6 +4979,17 @@ async def _comparativa_tipos_factura_impl(
     periodo: Optional[str] = None,
     nif_titular: Optional[str] = None,
 ):
+    """Contadores por `tipo_factura` en el scope filtrado.
+
+    Refactor iter25: elimina el `$lookup` sobre 1M+ docs para
+    `_sin_clasificar`. Ahora `tipo_factura` está denormalizado en
+    `facturas_comercial` (backfill iter25), así que:
+      - Buckets F1..R5: `$group` en SII por `tipo_factura` (rápido con índice).
+      - `_sin_clasificar`: `count_documents` en Comercial donde
+        `tipo_factura` es null/ausente (rápido con nuevo índice
+        `nif_ejerc_per_tipo_com_idx`).
+    De ~15-30s en cache-miss pasa a <500ms.
+    """
     filtro_sii, filtro_com = await _build_filtros(
         ejercicio, periodo, num_serie=None,
         excluir_base_cero=False,
@@ -5036,22 +5005,17 @@ async def _comparativa_tipos_factura_impl(
         tipo = r.get("_id") or "(null)"
         sii_counts[tipo] = int(r.get("n") or 0)
 
-    # `_sin_clasificar`: comerciales sin contraparte SII en el ámbito.
-    solo_com_pipe = [
-        {"$match": filtro_com},
-        {"$lookup": {
-            "from": "facturas_sii",
-            "localField": "num_serie_factura",
-            "foreignField": "num_serie_factura",
-            "as": "_s",
-        }},
-        {"$match": {"_s": {"$size": 0}}},
-        {"$count": "n"},
-    ]
-    _r = await _db.facturas_comercial.aggregate(
-        solo_com_pipe, allowDiskUse=True,
-    ).to_list(1)
-    sin_clasificar = int((_r[0].get("n") if _r else 0) or 0)
+    # `_sin_clasificar`: comerciales sin `tipo_factura` (backfill ya lo
+    # marca null cuando no hay match SII). count_documents con el índice
+    # compuesto es sub-segundo.
+    sin_clasificar = await _db.facturas_comercial.count_documents({
+        **filtro_com,
+        "$or": [
+            {"tipo_factura": None},
+            {"tipo_factura": ""},
+            {"tipo_factura": {"$exists": False}},
+        ],
+    })
 
     items = [
         {"code": code, "label": label, "categoria": cat, "n": sii_counts.get(code, 0)}
@@ -5133,6 +5097,31 @@ async def comparativa_cuadro_mensual(
             periodo=periodo,
         ),
     )
+
+
+@router.post("/admin/backfill-tipo-factura")
+async def admin_backfill_tipo_factura(
+    nif_titular: Optional[str] = None,
+    _: dict = Depends(require_permission("sii.wipe")),
+):
+    """Lanza el backfill de `tipo_factura` desde SII a Comercial.
+
+    Ejecución síncrona (bloquea el request hasta terminar; con 1M docs
+    puede tardar 1-2 min). El endpoint devuelve el reporte con contadores.
+
+    Idempotente: se puede lanzar múltiples veces. Sólo `POST` para
+    evitar disparos accidentales desde el navegador.
+    """
+    from backfill_tipo_factura import (
+        backfill_tipo_factura_comercial,
+        ensure_indexes_iter25,
+    )
+    await ensure_indexes_iter25(_db, _logger)
+    report = await backfill_tipo_factura_comercial(
+        _db, _logger, nif_titular=nif_titular,
+    )
+    invalidate_comparativa_cache()
+    return {"ok": True, "report": report}
 
 
 async def _comparativa_cuadro_mensual_impl(
@@ -5264,22 +5253,16 @@ async def _comparativa_cuadro_mensual_impl(
         header_base_expr = {"$toDouble": {"$ifNull": ["$base_imponible", 0]}}
         header_cuota_expr = {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}}
 
+    # Refactor iter25: `tipo_factura` denormalizado en Comercial → no
+    # necesitamos `$lookup` con SII. n_matched (facturas comerciales que
+    # tienen contraparte SII) = las que tienen tipo_factura no-null.
     com_pipeline = [
         {"$match": filtro_com},
-        {"$lookup": {
-            "from": "facturas_sii",
-            "localField": "num_serie_factura",
-            "foreignField": "num_serie_factura",
-            "as": "_sii_docs",
-        }},
-        {"$addFields": {
-            "_sii_tipo": {"$arrayElemAt": ["$_sii_docs.tipo_factura", 0]},
-        }},
         {"$project": {
             "_id": 0,
             "periodo": {"$ifNull": ["$periodo", "??"]},
             "origen": {"$ifNull": ["$origen_comercial", "DESCONOCIDO"]},
-            "_tipo": {"$ifNull": ["$_sii_tipo", "_sin_clasificar"]},
+            "_tipo": {"$ifNull": ["$tipo_factura", "_sin_clasificar"]},
             "_base": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
@@ -5294,7 +5277,13 @@ async def _comparativa_cuadro_mensual_impl(
                     header_cuota_expr,
                 ],
             },
-            "_matched": {"$gt": [{"$size": "$_sii_docs"}, 0]},
+            "_matched": {"$cond": [
+                {"$and": [
+                    {"$ne": [{"$ifNull": ["$tipo_factura", None]}, None]},
+                    {"$ne": ["$tipo_factura", ""]},
+                ]},
+                True, False,
+            ]},
         }},
         {"$group": {
             "_id": {

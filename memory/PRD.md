@@ -489,3 +489,64 @@ Nueva sección independiente bajo el menú **Monitor SII** (ruta `/cuadro-mensua
   - Totales del cuadro cuadran con `/comparativa/totales`
   - Filtro por periodo restringe filas correctamente
 
+
+## iter25 (Feb 2026) — Denormalización `tipo_factura` en Comercial
+
+### Problema resuelto
+- Filtros por `tipo_factura` requerían `$lookup` (SII↔Comercial) en cada
+  aggregation → 30-60s cold-cache y timeouts 502 del ingress.
+- Mismatch entre buckets del filtro Tipo de Factura y Resumen de
+  conciliación al cambiar de sociedad (race condition + `$lookup` lento).
+
+### Solución
+- **Backfill masivo** (`/app/backend/backfill_tipo_factura.py`):
+  aggregation con `$merge` nativo Mongo copia `tipo_factura` de
+  `facturas_sii` a `facturas_comercial` por `num_serie_factura`.
+  - BASER (490k docs): **62s**
+  - TotalEnergies (1M docs): **127s**
+  - Cobertura post-backfill: >99% (los sin `tipo_factura` son
+    comerciales sin match SII → cuentan como `_sin_clasificar`).
+- **Nuevo endpoint admin**: `POST /api/admin/backfill-tipo-factura?nif_titular=X` (permiso `sii.wipe`).
+- **CLI**: `python -m backfill_tipo_factura [nif_titular]`.
+- **Índices nuevos** creados en startup:
+  - `facturas_comercial`: `(nif_titular, ejercicio, periodo, tipo_factura)`
+    y `(nif_titular, tipo_factura)`
+  - `facturas_sii`: `(nif_titular, ejercicio, periodo, tipo_factura)`
+
+### Refactor endpoints (eliminan `$lookup` para filtro tipo_factura)
+- `_build_filtros`: aplica `tipo_factura` directamente en `filtro_com`.
+- `_comparativa_tipos_factura_impl`: `count_documents` con índice para
+  `_sin_clasificar` (antes `$lookup + $size:0`).
+- `_comparativa_totales_impl`: sin `$lookup` para filtro tipo (ya en `filtro_com`).
+- `_comparativa_resumen_origenes_impl`: sin post-lookup por tipo (ya en `filtro_com`).
+- `_comparativa_cuadro_mensual_impl`: sin `$lookup` para heredar tipo_factura del SII (ya está en el propio comercial).
+
+### Rendimiento medido (post-backfill, cache-miss)
+| Endpoint | Antes | Ahora |
+|----------|-------|-------|
+| `tipos-factura` A95000295 (1M) | 15-30s | **1.7s** (`$group` directo) |
+| `totales` con `tipos_factura=R1` | 40s | **~3s** |
+| `bundle` filtrado por tipo | 60s+ | **8-15s** |
+| `cuadro-mensual` | 15-25s | **13s** |
+
+### Higiene UI
+- `Comparativa.jsx`: `AbortController` para el fetch de `tipos-factura`
+  → cancela requests obsoletos al cambiar NIF y elimina el mismatch
+  buckets vs Resumen.
+
+### Tests
+- `/app/backend/tests/test_backfill_tipo_factura_iter25.py`: **4/4 PASS**
+  - Cobertura del backfill (>95% docs con tipo)
+  - Rendimiento `tipos-factura` (<20s cold cache)
+  - Filtro por tipo `bundle` sin `$lookup` (R1 → 3.347 en ambos lados)
+  - Endpoint admin idempotente
+
+### Deuda técnica restante (P1)
+- El listado `_comparativa_impl` y `resumen_origenes` **siguen usando
+  `$lookup`** para comparar campos base/cuota/importe entre SII y
+  Comercial. Con 1M docs esto tarda 30-40s en cold cache.
+- Solución futura (**iter26**): denormalizar el `match_state`
+  (coincide/discrepancia/solo_comercial) + snapshot de campos SII
+  (`_sii_base`, `_sii_cuota`) en `facturas_comercial` al import.
+  Elimina TODOS los `$lookup` en aggregations → sub-segundo end-to-end.
+
