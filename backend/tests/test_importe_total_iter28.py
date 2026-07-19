@@ -63,7 +63,13 @@ def test_canonical_prioriza_importe_total():
 
 def test_factura_con_parte_exenta_coincide():
     """Caso del usuario iter28: factura 1NSN260600001319 con parte exenta
-    de 1,99€. Antes = discrepancia, ahora = coincide."""
+    de 1,99€. Antes = discrepancia, ahora = coincide.
+
+    Con iter28.2 (exclusión inline de líneas tipo_impositivo=null), esta
+    factura coincide por CAMPOS directamente (post-exclusión base+cuota
+    cuadran), no por canonical. La marca `reconciliada_por_importe_canonico`
+    puede ser False.
+    """
     r = SESSION.get(
         f"{BASE_URL}/comparativa",
         params={"num_serie": "1NSN260600001319", "only_diffs": "false"},
@@ -76,10 +82,6 @@ def test_factura_con_parte_exenta_coincide():
     assert it["estado"] == "coincide", (
         f"Esperaba coincide (parte exenta), got {it['estado']}"
     )
-    assert it["reconciliada_por_importe_canonico"] is True
-    info = it["diferencias"]["_reconciliada_por_importe_canonico"]
-    assert abs(info["sii_canonical"] - 113.48) < 0.01
-    assert abs(info["comercial_canonical"] - 113.48) < 0.01
 
 
 def test_importe_total_backfill_cubre_mayoria_comerciales():

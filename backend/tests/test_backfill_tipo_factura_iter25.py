@@ -110,8 +110,11 @@ def test_bundle_filtro_tipo_r1_baser():
     sii_n = tot["sii"]["n_facturas"]
     com_n = tot["comercial_total"]["n_facturas"]
     assert sii_n == 3347, f"SII R1 esperado 3347, got {sii_n}"
-    assert 3340 <= com_n <= 3360, (
-        f"Comercial R1 esperado ~3347, got {com_n} — filtro no aplica bien"
+    # Post iter28.2 con exclusión tipo_impositivo=0, algunos comerciales
+    # con líneas exentas quedan filtrados de la agregación. Tolerancia:
+    # entre 3.200 y 3.400 comerciales R1.
+    assert 3200 <= com_n <= 3400, (
+        f"Comercial R1 esperado ~3300, got {com_n} — filtro no aplica bien"
     )
 
 

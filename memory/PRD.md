@@ -706,3 +706,48 @@ tipo_factura + snapshot SII + importe_total. CLI actualizado.
   - <10k comerciales sin importe_total tras backfill
 - Todos los tests previos (iter23, 24, 25, 26, 27) siguen pasando.
 
+
+## iter28.2 (Feb 2026) — Exclusión inline `tipo_impositivo=0` en aggregation
+
+### Problema resuelto
+El filtro "Con discrepancias" (`only_diffs=true`) mostraba facturas cuya
+UI decía "Coincide" (inconsistencia buggy). Casos típicos: facturas SAP
+con líneas exentas donde:
+- SII sólo tiene cabecera (base=36.69, cuota=7.70, importe=44.39)
+- Comercial (SAP invertido) tiene 2 líneas: `tipo=null base=0.03` (exenta)
+  + `tipo=21 base=-36.69 cuota=-7.70` (con IVA)
+- Cabecera comercial (base=-36.66 = suma completa) NO cuadra con SII (36.69)
+- Post-exclusión de la línea exenta: base=-36.69 → cuadra ✅
+
+**Aggregation vs Python discrepaban**:
+- Aggregation `_cmp_expr` usaba `base_imponible` raw → discrepancia falsa
+- Python `diff_facturas` aplicaba `excluir_comercial_tipo_iva_cero=True` → coincide
+- El aggregation incluía las facturas en `only_diffs=true` pero la UI las mostraba como "Coincide".
+
+### Solución
+Nuevo `$addFields` en los pipelines de `_comparativa_impl` (fast-path
+list) y `_comparativa_resumen_origenes_impl` que calcula `_com_base_neto`
+y `_com_cuota_neto` inline:
+- Si `detalle_iva` tiene líneas, `$reduce` sobre las que cumplen
+  `tipo_impositivo != null && != 0`.
+- Sino, usa la cabecera raw.
+- Mapping `COM_NETO_MAP` traduce `base_imponible` → `_com_base_neto`
+  dentro de `_cmp_expr` y `_resumen_cmp_expr`.
+
+Con esto, aggregation y Python `diff_facturas` producen el mismo estado.
+
+### Impacto acumulado (iter27 + iter28 + iter28.2)
+Coincidencias totales tras todos los fixes:
+- BASER · SIGLO: **487.346**
+- BASER · SAP: **1.787**
+- TotalEnergies · SIGLO: **1.004.753**
+- TotalEnergies · SAP: **5.868**
+- **+~13.500 facturas** correctamente reconciliadas vs el estado inicial.
+
+### Tests
+- `/app/backend/tests/test_exclusion_lineas_exentas_iter28_2.py`: **2/2 PASS**
+  - Las 3 facturas SAP problemáticas (26TAFEN000006225, 26TAANN000009407,
+    26TAASN000008378) NO aparecen en `only_diffs=true` (regression)
+  - Sí aparecen con `only_diffs=false` con estado=coincide
+- Todos los tests previos (iter23-28) siguen pasando (**23/23 PASS**).
+

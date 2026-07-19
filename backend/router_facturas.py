@@ -3822,6 +3822,16 @@ async def _comparativa_impl(
             "cuota_repercutida": "_sii_cuota",
             "importe_total": "_sii_importe_total",
         }
+        # iter28.2: mapping del campo comercial al valor "neto" (post
+        # exclusión de líneas tipo_impositivo=0/null). Los campos "_neto"
+        # se calculan en un $addFields aguas arriba. Sin esto, el
+        # aggregation marcaba "discrepancia" en facturas donde Python
+        # `diff_facturas` (con exclusión aplicada) marca "coincide".
+        COM_NETO_MAP = {
+            "base_imponible": "_com_base_neto",
+            "cuota_repercutida": "_com_cuota_neto",
+            # importe_total: comparación directa (sin exclusión)
+        }
 
         def _cmp_expr(sii_field: str, base_field_com: str):
             """Devuelve una expresión $switch que compara sii vs comercial.
@@ -3829,8 +3839,14 @@ async def _comparativa_impl(
             Refactor iter26: usa los campos snapshot `_sii_base`,
             `_sii_cuota`, `_sii_importe_total` denormalizados en el propio
             doc comercial. Sin `$lookup` → coste O(N) evitado.
+
+            iter28.2: usa `_com_base_neto`/`_com_cuota_neto` (calculados
+            con exclusión de líneas tipo_impositivo=0/null) en vez del
+            campo raw, para alinear con la lógica de Python `diff_facturas`
+            cuando `excluir_comercial_tipo_iva_cero=True`.
             """
             sii_snapshot = SNAPSHOT_MAP.get(sii_field, f"_sii_{sii_field}")
+            com_field = COM_NETO_MAP.get(base_field_com, base_field_com)
             branches = []
             for og in origenes_invertidos:
                 branches.append({
@@ -3838,7 +3854,7 @@ async def _comparativa_impl(
                     "then": {"$lte": [
                         {"$abs": {"$add": [
                             {"$ifNull": [f"${sii_snapshot}", 0]},
-                            {"$ifNull": [f"${base_field_com}", 0]},
+                            {"$ifNull": [f"${com_field}", 0]},
                         ]}},
                         0.01,
                     ]},
@@ -3846,7 +3862,7 @@ async def _comparativa_impl(
             direct_cmp = {"$lte": [
                 {"$abs": {"$subtract": [
                     {"$ifNull": [f"${sii_snapshot}", 0]},
-                    {"$ifNull": [f"${base_field_com}", 0]},
+                    {"$ifNull": [f"${com_field}", 0]},
                 ]}},
                 0.01,
             ]}
@@ -3914,6 +3930,50 @@ async def _comparativa_impl(
         else:
             coincide_canonical = coincide_canonical_direct
 
+        # iter28.2: `_com_base_neto` y `_com_cuota_neto` — recalculan
+        # base/cuota del comercial EXCLUYENDO líneas con tipo_impositivo
+        # null/0 (misma lógica que Python `diff_facturas` con la config
+        # `excluir_comercial_tipo_iva_cero=True`). Sin esto, aggregation
+        # y Python discrepan y el filtro `only_diffs=true` incluye filas
+        # que luego la UI muestra como "Coincide".
+        excluir_tipo_cero = bool(cfg.get("excluir_comercial_tipo_iva_cero", True))
+        if excluir_tipo_cero:
+            _det_ok_cond = {
+                "$and": [
+                    {"$ne": [{"$ifNull": ["$$this.tipo_impositivo", None]}, None]},
+                    {"$ne": [{"$toDouble": {"$ifNull": ["$$this.tipo_impositivo", 0]}}, 0]},
+                ]
+            }
+            _sum_det_field_neto = lambda campo: {"$reduce": {
+                "input": {"$ifNull": ["$detalle_iva", []]},
+                "initialValue": 0.0,
+                "in": {"$add": [
+                    "$$value",
+                    {"$cond": [
+                        _det_ok_cond,
+                        {"$toDouble": {"$ifNull": [f"$$this.{campo}", 0]}},
+                        0.0,
+                    ]},
+                ]},
+            }}
+            com_base_neto_expr = {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    _sum_det_field_neto("base_imponible"),
+                    {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
+                ],
+            }
+            com_cuota_neto_expr = {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                    _sum_det_field_neto("cuota_repercutida"),
+                    {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
+                ],
+            }
+        else:
+            com_base_neto_expr = {"$toDouble": {"$ifNull": ["$base_imponible", 0]}}
+            com_cuota_neto_expr = {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}}
+
         # Refactor iter26: pipeline sin `$lookup` masivo. Usamos el snapshot
         # `_has_sii` (denormalizado por el backfill). El `$lookup` diferido
         # se aplica DESPUÉS del `$skip`/`$limit` — máximo 50 filas.
@@ -3923,6 +3983,9 @@ async def _comparativa_impl(
                 # Normaliza `_has_sii` (algunos docs pre-backfill pueden
                 # no tenerlo). Ausente → False (solo_comercial).
                 "_has_sii_bool": {"$eq": [{"$ifNull": ["$_has_sii", False]}, True]},
+                # iter28.2: valores comerciales POST-exclusión tipo_iva=0.
+                "_com_base_neto": com_base_neto_expr,
+                "_com_cuota_neto": com_cuota_neto_expr,
             }},
             {"$addFields": {
                 "_coincide_header": {
@@ -4859,6 +4922,10 @@ async def _comparativa_resumen_origenes_impl(
         Refactor iter26: usa los campos snapshot `_sii_base`, `_sii_cuota`,
         `_sii_importe_total` directamente en el doc comercial (denormalizados
         por el backfill). Sin `$lookup` → sub-segundo en 1M+ docs.
+
+        iter28.2: usa `_com_base_neto`/`_com_cuota_neto` (post exclusión
+        tipo_impositivo=0/null) en vez del campo raw, para alinear con
+        `diff_facturas` de Python.
         """
         # Mapeo de campos SII → snapshot correspondiente en el comercial
         SNAPSHOT_MAP = {
@@ -4866,11 +4933,16 @@ async def _comparativa_resumen_origenes_impl(
             "cuota_repercutida": "_sii_cuota",
             "importe_total": "_sii_importe_total",
         }
+        COM_NETO_MAP = {
+            "base_imponible": "_com_base_neto",
+            "cuota_repercutida": "_com_cuota_neto",
+        }
         sii_field = SNAPSHOT_MAP.get(field, f"_sii_{field}")
+        com_field = COM_NETO_MAP.get(field, field)
         direct = {"$lte": [
             {"$abs": {"$subtract": [
                 {"$ifNull": [f"${sii_field}", 0]},
-                {"$ifNull": [f"${field}", 0]},
+                {"$ifNull": [f"${com_field}", 0]},
             ]}},
             0.01,
         ]}
@@ -4881,7 +4953,7 @@ async def _comparativa_resumen_origenes_impl(
              "then": {"$lte": [
                  {"$abs": {"$add": [
                      {"$ifNull": [f"${sii_field}", 0]},
-                     {"$ifNull": [f"${field}", 0]},
+                     {"$ifNull": [f"${com_field}", 0]},
                  ]}},
                  0.01,
              ]}}
@@ -4955,6 +5027,47 @@ async def _comparativa_resumen_origenes_impl(
     else:
         coincide_canonical = coincide_canonical_direct
 
+    # iter28.2: `_com_base_neto` y `_com_cuota_neto` — recalculan
+    # base/cuota EXCLUYENDO líneas tipo_impositivo=0/null (misma lógica
+    # que Python `diff_facturas`), para alinear con la UI.
+    excluir_tipo_cero_r = bool(config.get("excluir_comercial_tipo_iva_cero", True))
+    if excluir_tipo_cero_r:
+        _det_ok_cond_r = {
+            "$and": [
+                {"$ne": [{"$ifNull": ["$$this.tipo_impositivo", None]}, None]},
+                {"$ne": [{"$toDouble": {"$ifNull": ["$$this.tipo_impositivo", 0]}}, 0]},
+            ]
+        }
+        _sum_det_neto_r = lambda c: {"$reduce": {
+            "input": {"$ifNull": ["$detalle_iva", []]},
+            "initialValue": 0.0,
+            "in": {"$add": [
+                "$$value",
+                {"$cond": [
+                    _det_ok_cond_r,
+                    {"$toDouble": {"$ifNull": [f"$$this.{c}", 0]}},
+                    0.0,
+                ]},
+            ]},
+        }}
+        com_base_neto_expr_r = {
+            "$cond": [
+                {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                _sum_det_neto_r("base_imponible"),
+                {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
+            ],
+        }
+        com_cuota_neto_expr_r = {
+            "$cond": [
+                {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                _sum_det_neto_r("cuota_repercutida"),
+                {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
+            ],
+        }
+    else:
+        com_base_neto_expr_r = {"$toDouble": {"$ifNull": ["$base_imponible", 0]}}
+        com_cuota_neto_expr_r = {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}}
+
     # Refactor iter26: pipeline SIN `$lookup`. Todo el trabajo se hace
     # sobre `facturas_comercial` usando los campos snapshot denormalizados
     # por el backfill (`_has_sii`, `_sii_base`, `_sii_cuota`,
@@ -4963,6 +5076,8 @@ async def _comparativa_resumen_origenes_impl(
         {"$match": filtro_com or {}},
         {"$addFields": {
             "_origen": {"$ifNull": ["$origen_comercial", "desconocido"]},
+            "_com_base_neto": com_base_neto_expr_r,
+            "_com_cuota_neto": com_cuota_neto_expr_r,
         }},
         {"$addFields": {
             "_coincide": {
