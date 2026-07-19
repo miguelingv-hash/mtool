@@ -550,3 +550,53 @@ Nueva sección independiente bajo el menú **Monitor SII** (ruta `/cuadro-mensua
   (`_sii_base`, `_sii_cuota`) en `facturas_comercial` al import.
   Elimina TODOS los `$lookup` en aggregations → sub-segundo end-to-end.
 
+
+## iter26 (Feb 2026) — FASE B: Snapshot SII denormalizado en Comercial
+
+### Solución
+Denormalizar en cada doc de `facturas_comercial` los campos SII agregados
+(base, cuota, importe, fecha, estado) + `_has_sii` (bool). Con esto se
+elimina el `$lookup` masivo tanto en `resumen-origenes` como en el fast-path
+de la listado (`_comparativa_impl`).
+
+- **Nueva función backfill**: `backfill_snapshot_sii_en_comercial` con
+  `$merge` nativo Mongo. Segundo pass explícito `update_many` marca
+  `_has_sii=False` en los docs sin match SII.
+- **Bug corregido**: el proyecto `_has_sii: True` en `$project` se
+  interpretaba como "incluye el campo tal cual" (no como literal booleano).
+  Solución: `_has_sii: {"$literal": True}`.
+- **Índices nuevos**: `(nif_titular, _has_sii)` y `(nif_titular,
+  origen_comercial, _has_sii)` en `facturas_comercial`.
+- **Endpoint admin** `POST /api/admin/backfill-tipo-factura` ahora ejecuta
+  también el snapshot iter26. CLI actualizado.
+
+### Rendimiento medido (post-backfill)
+| Endpoint | Antes (iter25) | Ahora (iter26) |
+|----------|---------------|----------------|
+| `resumen-origenes` A95000295 | 30-35s | **1.6-2.8s** (cache-miss) / **40ms** (cache-hit) |
+| `bundle` sin filtros TotalEnergies | 60s+ 502 | **7s** |
+| `bundle` con `estado=discrepancia` | 30s | **3.4s** |
+| `bundle` cache-hit | 40ms | **48ms** |
+| `cuadro-mensual` | 13s | **13s** (mismo — usa otra pipeline) |
+
+### Backfill ejecutado
+- BASER (490k docs): tipo=35s + snapshot=64s
+- TotalEnergies (1M docs): tipo=66s + snapshot=86s
+- Cobertura: 99.2% has_sii=True, 0.8% solo_comercial (sin match SII real)
+
+### Refactor de endpoints
+- `_comparativa_resumen_origenes_impl`: pipeline sin `$lookup`, usa
+  `_has_sii`, `_sii_base`, `_sii_cuota` directamente.
+- `_comparativa_impl` (fast-path >50k docs): pipeline sin `$lookup`
+  masivo. El `$lookup` diferido dentro del `$facet.items` sólo actúa
+  sobre los ≤50 docs paginados (necesario para el diff detallado
+  campo a campo que `diff_facturas` calcula en Python).
+
+### Tests
+- `/app/backend/tests/test_snapshot_sii_iter26.py`: **4/4 PASS** en 28s
+  - Snapshot denormalizado correcto (>95% con `_has_sii`)
+  - `resumen-origenes` <2s cache-hit
+  - Bundle sin filtros TotalEnergies <15s
+  - Filtro `estado=discrepancia` coherente
+- Todos los tests anteriores (iter23, 24, 25) siguen pasando.
+
