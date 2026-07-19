@@ -251,6 +251,94 @@ async def ensure_indexes_iter26(db: Any, logger: logging.Logger | None = None) -
     log.info("[backfill] Índices iter26 creados/verificados")
 
 
+async def backfill_importe_total_comercial(
+    db: Any,
+    logger: logging.Logger | None = None,
+    nif_titular: str | None = None,
+) -> dict:
+    """iter28: Deriva `importe_total` en comerciales que no lo tienen.
+
+    Muchos CSVs (SIGLO en particular) no traen `importe_total`. Cuando
+    hay `detalle_iva`, podemos derivarlo como `sum(base + cuota)` de las
+    líneas. Sin este campo, la reconciliación por importe canónico falla
+    cuando SII declara importe_total pero base+cuota no cuadra
+    (facturas con partes exentas/no sujetas).
+
+    Strategy: aggregation `$merge` que calcula `importe_total` a partir
+    de la suma completa (INCLUYENDO líneas exentas — el importe total
+    incluye todo lo que factura, con o sin IVA).
+
+    Sólo actualiza docs con `detalle_iva` presente Y `importe_total`
+    ausente/0.
+    """
+    log = logger or logging.getLogger(__name__)
+    import time
+    t0 = time.monotonic()
+
+    match_stage: dict = {
+        "$or": [
+            {"importe_total": None},
+            {"importe_total": 0},
+            {"importe_total": {"$exists": False}},
+        ],
+        "detalle_iva.0": {"$exists": True},  # al menos 1 línea de detalle
+    }
+    if nif_titular:
+        match_stage["nif_titular"] = nif_titular.strip().upper()
+
+    total_pre = await db.facturas_comercial.count_documents(match_stage)
+    log.info(
+        "[backfill importe_total] %d comerciales sin importe_total y con "
+        "detalle_iva (nif=%s)",
+        total_pre, nif_titular or "*",
+    )
+
+    # Pipeline: calcula importe_total = suma(base+cuota) del detalle_iva
+    # completo, y hace $merge en la propia colección.
+    pipeline: list[dict] = [
+        {"$match": match_stage},
+        {"$project": {
+            "_id": 0,
+            "num_serie_factura": 1,
+            "importe_total": {
+                "$reduce": {
+                    "input": {"$ifNull": ["$detalle_iva", []]},
+                    "initialValue": 0.0,
+                    "in": {"$add": [
+                        "$$value",
+                        {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+                        {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+                    ]},
+                },
+            },
+        }},
+        # Descartamos filas con importe calculado 0 (no aportan nada).
+        {"$match": {"importe_total": {"$ne": 0}}},
+        {"$merge": {
+            "into": "facturas_comercial",
+            "on": "num_serie_factura",
+            "whenMatched": "merge",
+            "whenNotMatched": "discard",
+        }},
+    ]
+    await db.facturas_comercial.aggregate(pipeline, allowDiskUse=True).to_list(1)
+
+    total_post = await db.facturas_comercial.count_documents(match_stage)
+    actualizados = total_pre - total_post
+    dur = time.monotonic() - t0
+    log.info(
+        "[backfill importe_total] Completado en %.1fs. Actualizados=%d, "
+        "quedan sin importe=%d",
+        dur, actualizados, total_post,
+    )
+    return {
+        "duracion_s": round(dur, 1),
+        "sin_importe_pre": total_pre,
+        "sin_importe_post": total_post,
+        "actualizados": actualizados,
+    }
+
+
 async def ensure_indexes_iter25(db: Any, logger: logging.Logger | None = None) -> None:
     """Crea los índices compuestos que aprovechan el tipo_factura ahora
     denormalizado en facturas_comercial. Idempotente.
@@ -303,11 +391,16 @@ if __name__ == "__main__":
         await ensure_indexes_iter26(db, log)
         report1 = await backfill_tipo_factura_comercial(db, log, nif_titular=nif)
         report2 = await backfill_snapshot_sii_en_comercial(db, log, nif_titular=nif)
+        # iter28: rellenar importe_total en comerciales donde falta
+        report3 = await backfill_importe_total_comercial(db, log, nif_titular=nif)
         print("\nReporte tipo_factura:")
         for k, v in report1.items():
             print(f"  {k}: {v}")
         print("\nReporte snapshot SII (iter26):")
         for k, v in report2.items():
+            print(f"  {k}: {v}")
+        print("\nReporte importe_total comercial (iter28):")
+        for k, v in report3.items():
             print(f"  {k}: {v}")
         client.close()
 

@@ -42,7 +42,11 @@ SESSION = _admin_session()
 
 
 def test_diff_facturas_canonical_amount():
-    """Verifica que diff_facturas usa el fallback canónico correctamente."""
+    """Verifica que diff_facturas usa el fallback canónico correctamente.
+
+    iter28: prioridad `importe_total` > `base+cuota`. Cubre facturas con
+    partes exentas donde importe_total ≠ base+cuota.
+    """
     import sys
     sys.path.insert(0, "/app/backend")
     from factura_model import diff_facturas
@@ -52,7 +56,7 @@ def test_diff_facturas_canonical_amount():
     com = {
         "base_imponible": -151.01,
         "cuota_repercutida": -0.53,
-        "importe_total": None,
+        "importe_total": -151.54,
         "origen_comercial": "SIGLO",
     }
     cfg = {
@@ -60,7 +64,6 @@ def test_diff_facturas_canonical_amount():
         "invertir_signo_por_origen": {"SIGLO": True},
     }
     d = diff_facturas(sii, com, cfg)
-    # No debe haber diffs "reales" — sólo la marca de reconciliación canónica
     real_diffs = {k: v for k, v in d.items() if not k.startswith("_")}
     assert not real_diffs, f"Debería reconciliarse por canónico. Diffs: {real_diffs}"
     assert "_reconciliada_por_importe_canonico" in d

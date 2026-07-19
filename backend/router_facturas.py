@@ -394,15 +394,39 @@ async def upsert_facturas_bulk(coleccion: str, datos_list: list, fuente: str):
     Para jobs mensuales con miles de facturas por página, esto reduce ~10000
     round-trips a 1. NO mantiene histórico de versiones (`$push`) para no
     inflar los documentos: prima la velocidad de descarga sobre la auditoría
-    versionada. El histórico sigue disponible para upserts unitarios."""
+    versionada. El histórico sigue disponible para upserts unitarios.
+
+    iter28: para `facturas_comercial`, si el doc tiene `detalle_iva` pero
+    NO tiene `importe_total` (o es 0), lo derivamos como suma completa de
+    (base + cuota) de cada línea. SIGLO no reporta importe_total en su CSV,
+    y sin ese campo la reconciliación por importe canónico falla cuando el
+    SII declara importe_total distinto de base+cuota (facturas con partes
+    exentas / no sujetas).
+    """
     from pymongo import UpdateOne  # noqa: WPS433
     if not datos_list:
         return
     now = datetime.now(timezone.utc).isoformat()
+    es_comercial = coleccion == "facturas_comercial"
     ops = []
     for d in datos_list:
         if not d.get("num_serie_factura"):
             continue
+        # iter28: auto-derivar importe_total en comerciales si falta.
+        if es_comercial:
+            det = d.get("detalle_iva") or []
+            actual = d.get("importe_total")
+            if det and (actual is None or actual == 0 or actual == 0.0):
+                total = 0.0
+                for line in det:
+                    try:
+                        b = float(line.get("base_imponible") or 0)
+                        c = float(line.get("cuota_repercutida") or 0)
+                        total += b + c
+                    except (TypeError, ValueError):
+                        pass
+                if abs(total) > 0.01:
+                    d["importe_total"] = round(total, 2)
         ops.append(
             UpdateOne(
                 {"num_serie_factura": d["num_serie_factura"]},
@@ -3835,19 +3859,20 @@ async def _comparativa_impl(
         # importe_total (típico en facturas No Sujeta), la comparación
         # campo a campo falla — pero la conciliación real cuadra por el
         # importe canónico = (base + cuota) if != 0 else importe_total.
+        # iter28: prioridad importe_total > base+cuota.
         canonical_sii_expr = {
             "$let": {
                 "vars": {
-                    "sum_bc": {"$add": [
-                        {"$ifNull": ["$_sii_base", 0]},
-                        {"$ifNull": ["$_sii_cuota", 0]},
-                    ]},
+                    "importe": {"$ifNull": ["$_sii_importe_total", 0]},
                 },
                 "in": {
                     "$cond": [
-                        {"$lte": [{"$abs": "$$sum_bc"}, 0.01]},
-                        {"$ifNull": ["$_sii_importe_total", 0]},
-                        "$$sum_bc",
+                        {"$gt": [{"$abs": "$$importe"}, 0.01]},
+                        "$$importe",
+                        {"$add": [
+                            {"$ifNull": ["$_sii_base", 0]},
+                            {"$ifNull": ["$_sii_cuota", 0]},
+                        ]},
                     ],
                 },
             },
@@ -3855,16 +3880,16 @@ async def _comparativa_impl(
         canonical_com_expr = {
             "$let": {
                 "vars": {
-                    "sum_bc": {"$add": [
-                        {"$ifNull": ["$base_imponible", 0]},
-                        {"$ifNull": ["$cuota_repercutida", 0]},
-                    ]},
+                    "importe": {"$ifNull": ["$importe_total", 0]},
                 },
                 "in": {
                     "$cond": [
-                        {"$lte": [{"$abs": "$$sum_bc"}, 0.01]},
-                        {"$ifNull": ["$importe_total", 0]},
-                        "$$sum_bc",
+                        {"$gt": [{"$abs": "$$importe"}, 0.01]},
+                        "$$importe",
+                        {"$add": [
+                            {"$ifNull": ["$base_imponible", 0]},
+                            {"$ifNull": ["$cuota_repercutida", 0]},
+                        ]},
                     ],
                 },
             },
@@ -4872,19 +4897,21 @@ async def _comparativa_resumen_origenes_impl(
     # canonical_com = base + cuota          si != 0, si no importe_total
     # coincide_canonical = |canonical_sii - canonical_com| ≤ 0.01
     #                     (con inversión signo si origen invertido)
+    # iter28: prioridad `importe_total` > `base+cuota`. Cubre facturas
+    # con partes exentas/no sujetas donde importe_total ≠ base+cuota.
     canonical_sii_expr = {
         "$let": {
             "vars": {
-                "sum_bc": {"$add": [
-                    {"$ifNull": ["$_sii_base", 0]},
-                    {"$ifNull": ["$_sii_cuota", 0]},
-                ]},
+                "importe": {"$ifNull": ["$_sii_importe_total", 0]},
             },
             "in": {
                 "$cond": [
-                    {"$lte": [{"$abs": "$$sum_bc"}, 0.01]},
-                    {"$ifNull": ["$_sii_importe_total", 0]},
-                    "$$sum_bc",
+                    {"$gt": [{"$abs": "$$importe"}, 0.01]},
+                    "$$importe",
+                    {"$add": [
+                        {"$ifNull": ["$_sii_base", 0]},
+                        {"$ifNull": ["$_sii_cuota", 0]},
+                    ]},
                 ],
             },
         },
@@ -4892,16 +4919,16 @@ async def _comparativa_resumen_origenes_impl(
     canonical_com_expr = {
         "$let": {
             "vars": {
-                "sum_bc": {"$add": [
-                    {"$ifNull": ["$base_imponible", 0]},
-                    {"$ifNull": ["$cuota_repercutida", 0]},
-                ]},
+                "importe": {"$ifNull": ["$importe_total", 0]},
             },
             "in": {
                 "$cond": [
-                    {"$lte": [{"$abs": "$$sum_bc"}, 0.01]},
-                    {"$ifNull": ["$importe_total", 0]},
-                    "$$sum_bc",
+                    {"$gt": [{"$abs": "$$importe"}, 0.01]},
+                    "$$importe",
+                    {"$add": [
+                        {"$ifNull": ["$base_imponible", 0]},
+                        {"$ifNull": ["$cuota_repercutida", 0]},
+                    ]},
                 ],
             },
         },
@@ -5241,6 +5268,7 @@ async def admin_backfill_tipo_factura(
     from backfill_tipo_factura import (
         backfill_tipo_factura_comercial,
         backfill_snapshot_sii_en_comercial,
+        backfill_importe_total_comercial,
         ensure_indexes_iter25,
         ensure_indexes_iter26,
     )
@@ -5252,11 +5280,15 @@ async def admin_backfill_tipo_factura(
     report_snapshot = await backfill_snapshot_sii_en_comercial(
         _db, _logger, nif_titular=nif_titular,
     )
+    report_importe = await backfill_importe_total_comercial(
+        _db, _logger, nif_titular=nif_titular,
+    )
     invalidate_comparativa_cache()
     return {
         "ok": True,
         "report": report_tipo,
         "report_snapshot": report_snapshot,
+        "report_importe_total": report_importe,
     }
 
 

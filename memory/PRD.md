@@ -662,3 +662,47 @@ el fallback canónico también a nivel agregado:
   Δ Base y Δ Cuota individuales no).
 - Mismo ajuste aplicado a `_comparativa_cuadro_mensual_impl` (SII + comercial).
 
+
+## iter28 (Feb 2026) — Prioridad `importe_total` + Backfill `importe_total`
+
+### Problema resuelto
+Facturas con **parte exenta/no sujeta** donde el SII declara
+`base + cuota + parte_exenta = importe_total` pero el desglose (base+cuota)
+NO cuadra por 1 o 2 euros (la parte exenta). Ejemplo del usuario:
+- SII: base=92,14 cuota=19,35 importe=113,48 (diff 1,99€ = parte exenta)
+- Comercial (SIGLO): base=-94,13 cuota=-19,35 importe=null (¡no traído por CSV!)
+
+El comercial tampoco tenía `importe_total` porque SIGLO no lo reporta
+en su CSV → el canonical anterior (base+cuota como prioridad) daba
+111,49 vs 113,48 → discrepancia falsa.
+
+### Solución
+1. **Prioridad de canonical invertida**: `importe_total` > `base+cuota`
+   como fuente de verdad económica. `_canonical_amount()` y las
+   expresiones aggregation (`canonical_sii_expr`, `canonical_com_expr`)
+   ahora priorizan `importe_total` cuando existe y != 0.
+2. **Auto-cálculo importe_total en imports**: `upsert_facturas_bulk`
+   deriva `importe_total = sum(detalle_iva.base + cuota)` cuando falta
+   en comerciales con detalle_iva. Aplica a TODOS los flujos de import
+   (síncrono, async chunked).
+3. **Backfill masivo importe_total**: `backfill_importe_total_comercial`
+   con `$merge` nativo Mongo. Ejecutado sobre datos existentes:
+   **1.513.588 comerciales actualizados** en 90s. Sólo 3.994 quedan sin
+   (facturas con detalle_iva que suma 0).
+
+### Impacto en datos reales (acumulado sobre iter27)
+- TotalEnergies · SIGLO: 1.001.487 → **1.008.641** (+7.154 nuevas coincidencias)
+- TotalEnergies · SAP: 5.856 → 5.857 (+1)
+- Total nuevas facturas reconciliadas iter27 + iter28: **~13.000 facturas**
+
+### Endpoint admin
+`POST /api/admin/backfill-tipo-factura` ahora ejecuta las 3 fases:
+tipo_factura + snapshot SII + importe_total. CLI actualizado.
+
+### Tests
+- `/app/backend/tests/test_importe_total_iter28.py`: **3/3 PASS**
+  - `_canonical_amount` prioriza importe_total
+  - Factura del usuario (1NSN260600001319) reconciliada por canónico
+  - <10k comerciales sin importe_total tras backfill
+- Todos los tests previos (iter23, 24, 25, 26, 27) siguen pasando.
+

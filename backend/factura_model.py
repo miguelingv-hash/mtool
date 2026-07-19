@@ -316,20 +316,22 @@ def _hay_desglose(d: dict | None) -> bool:
 
 
 def _canonical_amount(doc: dict) -> float:
-    """Importe canónico de un doc factura (iter27).
+    """Importe canónico de un doc factura (iter28).
 
-    - Si `base + cuota` != 0 → devuelve esa suma.
-    - Sino → devuelve `importe_total`.
+    - Si `importe_total` existe y != 0 → devuelve `importe_total` (prioritario).
+    - Sino → devuelve `base + cuota`.
 
-    Cubre el caso asimétrico donde una factura No Sujeta declara sólo
-    `importe_total` en un lado y `base + cuota` en el otro.
+    Rationale: `importe_total` es la verdad económica de la factura,
+    incluyendo partes exentas o no sujetas. `base + cuota` es un desglose
+    contable que puede diferir si hay líneas exentas / no sujetas
+    (ej. la factura 1NSN260600001319 con parte exenta de 1,99€).
     """
+    importe_total = _parse_amount(doc.get("importe_total")) or 0.0
+    if abs(importe_total) > 0.01:
+        return importe_total
     b = _parse_amount(doc.get("base_imponible")) or 0.0
     c = _parse_amount(doc.get("cuota_repercutida")) or 0.0
-    total_desglose = b + c
-    if abs(total_desglose) > 0.01:
-        return total_desglose
-    return _parse_amount(doc.get("importe_total")) or 0.0
+    return b + c
 
 
 def diff_facturas(
