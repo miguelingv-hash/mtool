@@ -4349,13 +4349,19 @@ async def _comparativa_totales_impl(
     # ------------------------------------------------------------------
     # Estrategia: en el aggregation, si `detalle_iva` existe y no está vacío,
     # sumamos base/cuota del detalle; en caso contrario, usamos cabecera.
-    # Usamos `$reduce` + `$ifNull` para el desglose.
+    #
+    # iter27: Fallback por importe canónico. Cuando una factura SII no tiene
+    # desglose (base=cuota=0) pero sí importe_total (típico No Sujeta con
+    # clave_regimen_especial=08), tratamos `importe_total` como base para
+    # que el KPI del resumen refleje el peso económico real de la factura.
+    # Sin esto, el usuario ve "0 € en SII" para facturas No Sujeta y una
+    # falsa Δ Base vs Comercial (que sí desglosa esas facturas).
     sii_pipeline = [
         {"$match": filtro_sii},
         {"$project": {
             "_id": 0,
             "fecha_expedicion": 1,
-            "_base": {
+            "_base_raw": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
                     {"$reduce": {
@@ -4369,7 +4375,7 @@ async def _comparativa_totales_impl(
                     {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
                 ],
             },
-            "_cuota": {
+            "_cuota_raw": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
                     {"$reduce": {
@@ -4383,6 +4389,21 @@ async def _comparativa_totales_impl(
                     {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
                 ],
             },
+            "_importe_total": {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
+        }},
+        {"$addFields": {
+            # iter27: si base+cuota ≈ 0 pero hay importe_total, éste va a base.
+            "_base": {
+                "$cond": [
+                    {"$and": [
+                        {"$lte": [{"$abs": {"$add": ["$_base_raw", "$_cuota_raw"]}}, 0.01]},
+                        {"$gt": [{"$abs": "$_importe_total"}, 0.01]},
+                    ]},
+                    "$_importe_total",
+                    "$_base_raw",
+                ],
+            },
+            "_cuota": "$_cuota_raw",
         }},
         {"$group": {
             "_id": None,
@@ -4493,20 +4514,36 @@ async def _comparativa_totales_impl(
             "_id": 0,
             "origen": {"$ifNull": ["$origen_comercial", "DESCONOCIDO"]},
             "fecha_expedicion": 1,
-            "_base": {
+            "_base_raw": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
                     det_base_expr,
                     header_base_expr,
                 ],
             },
-            "_cuota": {
+            "_cuota_raw": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
                     det_cuota_expr,
                     header_cuota_expr,
                 ],
             },
+            "_importe_total": {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
+        }},
+        {"$addFields": {
+            # iter27: mismo fallback canónico que SII — importe_total va a
+            # base si el desglose está a 0.
+            "_base": {
+                "$cond": [
+                    {"$and": [
+                        {"$lte": [{"$abs": {"$add": ["$_base_raw", "$_cuota_raw"]}}, 0.01]},
+                        {"$gt": [{"$abs": "$_importe_total"}, 0.01]},
+                    ]},
+                    "$_importe_total",
+                    "$_base_raw",
+                ],
+            },
+            "_cuota": "$_cuota_raw",
         }},
         {"$group": {
             "_id": "$origen",
@@ -4552,6 +4589,13 @@ async def _comparativa_totales_impl(
 
     diff_base = round(sii_base - com_base, 2)
     diff_cuota = round(sii_cuota - com_cuota, 2)
+    # iter27: importe canónico total = base + cuota. Cuando hay desglose
+    # asimétrico (No Sujeta, etc.) esta suma es la que refleja la realidad
+    # económica y el Δ canónico ≈ 0 aunque los Δ base/cuota individuales
+    # sean != 0.
+    sii_canonico = round(sii_base + sii_cuota, 2)
+    com_canonico = round(com_base + com_cuota, 2)
+    diff_canonico = round(sii_canonico - com_canonico, 2)
 
     def _pct(num: float, denom: float) -> float | None:
         if denom == 0:
@@ -4562,6 +4606,7 @@ async def _comparativa_totales_impl(
         "sii": {
             "base": round(sii_base, 2),
             "cuota": round(sii_cuota, 2),
+            "canonico": sii_canonico,
             "n_facturas": sii_n,
             "ultima_fecha_expedicion": sii_ultima_fecha,
         },
@@ -4569,6 +4614,7 @@ async def _comparativa_totales_impl(
             k: {
                 "base": round(v["base"], 2),
                 "cuota": round(v["cuota"], 2),
+                "canonico": round(v["base"] + v["cuota"], 2),
                 "n_facturas": v["n_facturas"],
                 "invertido": v["invertido"],
                 "ultima_fecha_expedicion": v["ultima_fecha_expedicion"],
@@ -4578,13 +4624,16 @@ async def _comparativa_totales_impl(
         "comercial_total": {
             "base": round(com_base, 2),
             "cuota": round(com_cuota, 2),
+            "canonico": com_canonico,
             "n_facturas": com_n,
         },
         "diferencias": {
             "base": diff_base,
             "cuota": diff_cuota,
+            "canonico": diff_canonico,
             "pct_conciliado_base": _pct(diff_base, sii_base),
             "pct_conciliado_cuota": _pct(diff_cuota, sii_cuota),
+            "pct_conciliado_canonico": _pct(diff_canonico, sii_canonico),
             # Nueva métrica: % conciliado por NÚMERO de facturas.
             # matches / (union SII ∪ Comercial por num_serie).
             "matches_num_serie": matches_num_serie,
@@ -5229,13 +5278,16 @@ async def _comparativa_cuadro_mensual_impl(
     inv_map: dict = config.get("invertir_signo_por_origen") or {}
 
     # --- SII: $group por (periodo, tipo_factura) sumando detalle o cabecera --
+    # iter27: fallback canónico — si base+cuota=0 pero importe_total>0
+    # (facturas No Sujeta), tratamos importe_total como base para que
+    # el cuadro refleje el peso económico real.
     sii_pipeline = [
         {"$match": filtro_sii},
         {"$project": {
             "_id": 0,
             "periodo": {"$ifNull": ["$periodo", "??"]},
             "tipo_factura": {"$ifNull": ["$tipo_factura", "??"]},
-            "_base": {
+            "_base_raw": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
                     {"$reduce": {
@@ -5249,7 +5301,7 @@ async def _comparativa_cuadro_mensual_impl(
                     {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
                 ],
             },
-            "_cuota": {
+            "_cuota_raw": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
                     {"$reduce": {
@@ -5263,6 +5315,20 @@ async def _comparativa_cuadro_mensual_impl(
                     {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
                 ],
             },
+            "_importe_total": {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
+        }},
+        {"$addFields": {
+            "_base": {
+                "$cond": [
+                    {"$and": [
+                        {"$lte": [{"$abs": {"$add": ["$_base_raw", "$_cuota_raw"]}}, 0.01]},
+                        {"$gt": [{"$abs": "$_importe_total"}, 0.01]},
+                    ]},
+                    "$_importe_total",
+                    "$_base_raw",
+                ],
+            },
+            "_cuota": "$_cuota_raw",
         }},
         {"$group": {
             "_id": {"periodo": "$periodo", "tipo": "$tipo_factura"},
@@ -5343,6 +5409,7 @@ async def _comparativa_cuadro_mensual_impl(
     # Refactor iter25: `tipo_factura` denormalizado en Comercial → no
     # necesitamos `$lookup` con SII. n_matched (facturas comerciales que
     # tienen contraparte SII) = las que tienen tipo_factura no-null.
+    # iter27: fallback canónico también aquí (mismo que en SII).
     com_pipeline = [
         {"$match": filtro_com},
         {"$project": {
@@ -5350,20 +5417,21 @@ async def _comparativa_cuadro_mensual_impl(
             "periodo": {"$ifNull": ["$periodo", "??"]},
             "origen": {"$ifNull": ["$origen_comercial", "DESCONOCIDO"]},
             "_tipo": {"$ifNull": ["$tipo_factura", "_sin_clasificar"]},
-            "_base": {
+            "_base_raw": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
                     det_base_expr,
                     header_base_expr,
                 ],
             },
-            "_cuota": {
+            "_cuota_raw": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
                     det_cuota_expr,
                     header_cuota_expr,
                 ],
             },
+            "_importe_total": {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
             "_matched": {"$cond": [
                 {"$and": [
                     {"$ne": [{"$ifNull": ["$tipo_factura", None]}, None]},
@@ -5371,6 +5439,19 @@ async def _comparativa_cuadro_mensual_impl(
                 ]},
                 True, False,
             ]},
+        }},
+        {"$addFields": {
+            "_base": {
+                "$cond": [
+                    {"$and": [
+                        {"$lte": [{"$abs": {"$add": ["$_base_raw", "$_cuota_raw"]}}, 0.01]},
+                        {"$gt": [{"$abs": "$_importe_total"}, 0.01]},
+                    ]},
+                    "$_importe_total",
+                    "$_base_raw",
+                ],
+            },
+            "_cuota": "$_cuota_raw",
         }},
         {"$group": {
             "_id": {

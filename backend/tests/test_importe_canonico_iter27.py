@@ -134,6 +134,26 @@ def test_endpoint_marca_factura_no_sujeta_como_coincide():
     assert it["reconciliada_por_importe_canonico"] is True
 
 
+def test_totales_incluye_importe_canonico_en_sii():
+    """iter27: el endpoint /comparativa/totales debe reflejar el importe
+    canónico en el KPI SII cuando la factura es No Sujeta (sin desglose)."""
+    r = SESSION.get(
+        f"{BASE_URL}/comparativa/totales",
+        params={"num_serie": "1NSN260600000453"},
+        timeout=60,
+    )
+    assert r.status_code == 200
+    d = r.json()
+    # SII base debe ser 151.54 (importe_total), no 0
+    assert abs(d["sii"]["base"] - 151.54) < 0.01, (
+        f"SII base esperado 151.54 (canonico), got {d['sii']['base']}"
+    )
+    # Δ canónico debe ser ≈ 0 (la conciliación real cuadra)
+    assert abs(d["diferencias"]["canonico"]) < 0.01, (
+        f"Δ canónico esperado ≈0, got {d['diferencias']['canonico']}"
+    )
+
+
 def test_resumen_origenes_incluye_reconciliadas_canonicas():
     """Tras iter27, TotalEnergies debe tener MÁS coincidencias que las que
     tenía con el filtro estricto base+cuota (>1M en SIGLO)."""

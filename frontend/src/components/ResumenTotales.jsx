@@ -268,7 +268,7 @@ export default function ResumenTotales({ filtros, refreshKey, enabled = true, in
             </div>
           </div>
           {!conciliado100 && diff && (
-            <div className="flex items-center gap-4 text-xs">
+            <div className="flex items-center gap-4 text-xs flex-wrap">
               <span className="text-slate-500">Δ Base</span>
               <span className="font-mono font-semibold text-rose-700 tabular-nums">
                 {formatEUR(diff.base)}
@@ -278,6 +278,27 @@ export default function ResumenTotales({ filtros, refreshKey, enabled = true, in
               <span className="font-mono font-semibold text-rose-700 tabular-nums">
                 {formatEUR(diff.cuota)}
               </span>
+              {diff.canonico !== undefined && diff.canonico !== null && (
+                <>
+                  <span className="text-slate-300">·</span>
+                  <span
+                    className="text-slate-500"
+                    title="Δ del importe canónico (base+cuota). Refleja la reconciliación real cuando hay desglose asimétrico (No Sujeta, etc.)"
+                  >
+                    Δ Canónico
+                  </span>
+                  <span
+                    className={`font-mono font-semibold tabular-nums ${
+                      Math.abs(diff.canonico) < 0.01
+                        ? "text-emerald-700"
+                        : "text-rose-700"
+                    }`}
+                    data-testid="totales-diff-canonico"
+                  >
+                    {formatEUR(diff.canonico)}
+                  </span>
+                </>
+              )}
             </div>
           )}
         </div>

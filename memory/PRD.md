@@ -642,10 +642,23 @@ como discrepancia:
   canónicos SII vs Comercial.
 
 ### Tests
-- `/app/backend/tests/test_importe_canonico_iter27.py`: **5/5 PASS**
+- `/app/backend/tests/test_importe_canonico_iter27.py`: **6/6 PASS**
   - `diff_facturas` reconcilia el caso No Sujeta
   - No aplica si ya coincidían campo a campo
   - No reconcilia si canónico no cuadra
   - Endpoint marca la factura del usuario (1NSN260600000453) como coincide
+  - **`/comparativa/totales` refleja `base=151.54` en SII y Δ canónico ≈ 0 para el caso No Sujeta**
   - resumen-origenes recoge las nuevas coincidencias en KPIs
+
+### Ajuste adicional (aggregation totales)
+El endpoint `/comparativa/totales` (KPIs del Resumen de Conciliación) aplica
+el fallback canónico también a nivel agregado:
+- Si una factura tiene `base+cuota=0` y `importe_total>0`, `importe_total`
+  se suma a `base` en el KPI (SII y Comercial). Así el resumen refleja el
+  peso económico real de las facturas No Sujeta en vez de mostrarlas como 0€.
+- **Nueva métrica `canonico`** en `sii`, `comercial_por_origen`,
+  `comercial_total` y `diferencias`: `base + cuota` agregado. El Δ canónico
+  aparece en la UI en verde cuando la conciliación real cuadra (aunque
+  Δ Base y Δ Cuota individuales no).
+- Mismo ajuste aplicado a `_comparativa_cuadro_mensual_impl` (SII + comercial).
 
