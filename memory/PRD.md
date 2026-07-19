@@ -600,3 +600,52 @@ de la listado (`_comparativa_impl`).
   - Filtro `estado=discrepancia` coherente
 - Todos los tests anteriores (iter23, 24, 25) siguen pasando.
 
+
+## iter27 (Feb 2026) — Reconciliación por Importe Canónico
+
+### Problema resuelto
+Facturas No Sujeta (`clave_regimen_especial=08`) y desgloses asimétricos:
+el SII sólo declara `importe_total` sin base/cuota, y el Comercial (SIGLO
+o SAP FI) desglosa en base + cuota. La suma cuadra realmente, pero la
+comparación campo a campo marcaba discrepancia falsa.
+
+### Solución
+Nueva regla de comparación **por importe canónico**:
+- `canonical = base + cuota` si el desglose es != 0, si no `importe_total`
+- Si `|sii_canonical - com_canonical| ≤ 0.01€` (con inversión de signo),
+  la factura se marca como **`coincide`** y se retiran los diffs de
+  base/cuota/importe del detalle.
+- La UI muestra un badge amarillo "Coincide por importe canónico" en la
+  lista y un aviso explicativo en el detalle.
+
+### Impacto en datos reales
++5.741 facturas se reconcilian automáticamente que antes marcábamos
+como discrepancia:
+- TotalEnergies · SIGLO: 995.873 → **1.001.487** (+5.614)
+- TotalEnergies · SAP: 5.854 → **5.856** (+2)
+- BASER · SIGLO: 485.552 → **485.677** (+125)
+
+### Cambios técnicos
+- **Backend** (`factura_model.diff_facturas`): nueva función helper
+  `_canonical_amount()`. Si el único contenido del diff son
+  base/cuota/importe y el canónico cuadra, se retiran y se añade la
+  marca `_reconciliada_por_importe_canonico`.
+- **Backend** (`_build_row_from_docs`): considera `coincide` cuando sólo
+  hay diffs internos (empiezan por `_`). Añade flag
+  `reconciliada_por_importe_canonico` al row.
+- **Aggregation pipelines** (`resumen-origenes`, list fast-path):
+  expresión `coincide_canonical` con `$let`/`$switch` para respetar
+  inversión de signo. El `_coincide` acepta `$or` entre campo-a-campo
+  y canónico.
+- **Frontend** (`Comparativa.jsx`): badge en la columna "Campos con
+  diferencias" y aviso en el Sheet de detalle con los valores
+  canónicos SII vs Comercial.
+
+### Tests
+- `/app/backend/tests/test_importe_canonico_iter27.py`: **5/5 PASS**
+  - `diff_facturas` reconcilia el caso No Sujeta
+  - No aplica si ya coincidían campo a campo
+  - No reconcilia si canónico no cuadra
+  - Endpoint marca la factura del usuario (1NSN260600000453) como coincide
+  - resumen-origenes recoge las nuevas coincidencias en KPIs
+

@@ -3111,11 +3111,18 @@ def _build_row_from_docs(
     com = _aplicar_exclusion_tipo_iva_cero(com, config)
     if sii and com:
         d = diff_facturas(sii, com, config)
+        # iter27: si el único contenido del diff es la marca de reconciliación
+        # por importe canónico, la factura se considera "coincide" (los diffs
+        # de base/cuota/importe ya se retiraron en `diff_facturas`).
+        real_diffs = {k: v for k, v in d.items() if not k.startswith("_")}
+        reconciliada = d.get("_reconciliada_por_importe_canonico")
+        estado = "coincide" if (not real_diffs) else "discrepancia"
         return {
             "num_serie_factura": ns,
-            "estado": "coincide" if not d else "discrepancia",
+            "estado": estado,
             "en_sii": True, "en_comercial": True,
             "diferencias": d, "sii": sii, "comercial": com,
+            "reconciliada_por_importe_canonico": reconciliada is not None,
         }
     if sii:
         return {
@@ -3823,6 +3830,65 @@ async def _comparativa_impl(
                 return {"$switch": {"branches": branches, "default": direct_cmp}}
             return direct_cmp
 
+        # iter27: expresión "coincide por importe canónico" (fallback).
+        # Cuando SII o Comercial no tienen desglose base/cuota pero sí
+        # importe_total (típico en facturas No Sujeta), la comparación
+        # campo a campo falla — pero la conciliación real cuadra por el
+        # importe canónico = (base + cuota) if != 0 else importe_total.
+        canonical_sii_expr = {
+            "$let": {
+                "vars": {
+                    "sum_bc": {"$add": [
+                        {"$ifNull": ["$_sii_base", 0]},
+                        {"$ifNull": ["$_sii_cuota", 0]},
+                    ]},
+                },
+                "in": {
+                    "$cond": [
+                        {"$lte": [{"$abs": "$$sum_bc"}, 0.01]},
+                        {"$ifNull": ["$_sii_importe_total", 0]},
+                        "$$sum_bc",
+                    ],
+                },
+            },
+        }
+        canonical_com_expr = {
+            "$let": {
+                "vars": {
+                    "sum_bc": {"$add": [
+                        {"$ifNull": ["$base_imponible", 0]},
+                        {"$ifNull": ["$cuota_repercutida", 0]},
+                    ]},
+                },
+                "in": {
+                    "$cond": [
+                        {"$lte": [{"$abs": "$$sum_bc"}, 0.01]},
+                        {"$ifNull": ["$importe_total", 0]},
+                        "$$sum_bc",
+                    ],
+                },
+            },
+        }
+        coincide_canonical_direct = {"$lte": [
+            {"$abs": {"$subtract": [canonical_sii_expr, canonical_com_expr]}},
+            0.01,
+        ]}
+        if origenes_invertidos:
+            _inv_branches = [
+                {"case": {"$eq": ["$origen_comercial", og]},
+                 "then": {"$lte": [
+                     {"$abs": {"$add": [canonical_sii_expr, canonical_com_expr]}},
+                     0.01,
+                 ]}}
+                for og in origenes_invertidos
+            ]
+            coincide_canonical = {"$switch": {
+                "branches": _inv_branches,
+                "default": coincide_canonical_direct,
+            }}
+        else:
+            coincide_canonical = coincide_canonical_direct
+
         # Refactor iter26: pipeline sin `$lookup` masivo. Usamos el snapshot
         # `_has_sii` (denormalizado por el backfill). El `$lookup` diferido
         # se aplica DESPUÉS del `$skip`/`$limit` — máximo 50 filas.
@@ -3837,9 +3903,11 @@ async def _comparativa_impl(
                 "_coincide_header": {
                     "$cond": [
                         "$_has_sii_bool",
-                        # Comparación a nivel cabecera usando el snapshot.
-                        {"$and": [
-                            _cmp_expr(f, f) for f in campos_comparados
+                        # Comparación campo a campo O por importe canónico
+                        # (fallback iter27 para No Sujeta y desgloses asimétricos)
+                        {"$or": [
+                            {"$and": [_cmp_expr(f, f) for f in campos_comparados]},
+                            coincide_canonical,
                         ]},
                         False,
                     ],
@@ -4747,6 +4815,70 @@ async def _comparativa_resumen_origenes_impl(
         ]
         return {"$switch": {"branches": branches, "default": direct}}
 
+    # iter27: expresión "coincide por importe canónico" — cubre casos
+    # asimétricos como facturas No Sujeta (SII sólo tiene importe_total,
+    # comercial desglosa en base+cuota).
+    #
+    # canonical_sii = _sii_base + _sii_cuota si != 0, si no _sii_importe_total
+    # canonical_com = base + cuota          si != 0, si no importe_total
+    # coincide_canonical = |canonical_sii - canonical_com| ≤ 0.01
+    #                     (con inversión signo si origen invertido)
+    canonical_sii_expr = {
+        "$let": {
+            "vars": {
+                "sum_bc": {"$add": [
+                    {"$ifNull": ["$_sii_base", 0]},
+                    {"$ifNull": ["$_sii_cuota", 0]},
+                ]},
+            },
+            "in": {
+                "$cond": [
+                    {"$lte": [{"$abs": "$$sum_bc"}, 0.01]},
+                    {"$ifNull": ["$_sii_importe_total", 0]},
+                    "$$sum_bc",
+                ],
+            },
+        },
+    }
+    canonical_com_expr = {
+        "$let": {
+            "vars": {
+                "sum_bc": {"$add": [
+                    {"$ifNull": ["$base_imponible", 0]},
+                    {"$ifNull": ["$cuota_repercutida", 0]},
+                ]},
+            },
+            "in": {
+                "$cond": [
+                    {"$lte": [{"$abs": "$$sum_bc"}, 0.01]},
+                    {"$ifNull": ["$importe_total", 0]},
+                    "$$sum_bc",
+                ],
+            },
+        },
+    }
+    # Comparación canonical con inversión: si origen invertido → suma;
+    # si no → resta. Tolerancia 0.01.
+    coincide_canonical_direct = {"$lte": [
+        {"$abs": {"$subtract": [canonical_sii_expr, canonical_com_expr]}},
+        0.01,
+    ]}
+    if origenes_invertidos_resumen:
+        _inv_branches = [
+            {"case": {"$eq": ["$origen_comercial", og]},
+             "then": {"$lte": [
+                 {"$abs": {"$add": [canonical_sii_expr, canonical_com_expr]}},
+                 0.01,
+             ]}}
+            for og in origenes_invertidos_resumen
+        ]
+        coincide_canonical = {"$switch": {
+            "branches": _inv_branches,
+            "default": coincide_canonical_direct,
+        }}
+    else:
+        coincide_canonical = coincide_canonical_direct
+
     # Refactor iter26: pipeline SIN `$lookup`. Todo el trabajo se hace
     # sobre `facturas_comercial` usando los campos snapshot denormalizados
     # por el backfill (`_has_sii`, `_sii_base`, `_sii_cuota`,
@@ -4760,9 +4892,15 @@ async def _comparativa_resumen_origenes_impl(
             "_coincide": {
                 "$cond": [
                     {"$eq": [{"$ifNull": ["$_has_sii", False]}, True]},
-                    # Coincidencia según `campos_comparados` configurados.
-                    # Respeta inversión de signo por origen.
-                    {"$and": [_resumen_cmp_expr(f) for f in campos_comparados]},
+                    # Coincidencia según `campos_comparados` configurados
+                    # (respetando inversión de signo por origen). iter27:
+                    # además, si el importe canónico cuadra, se considera
+                    # coincide aunque los campos individuales no coincidan
+                    # (cubre facturas No Sujeta / desglose asimétrico).
+                    {"$or": [
+                        {"$and": [_resumen_cmp_expr(f) for f in campos_comparados]},
+                        coincide_canonical,
+                    ]},
                     False,
                 ],
             },

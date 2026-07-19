@@ -1452,9 +1452,23 @@ export default function Comparativa() {
                       </div>
                     </TableCell>
                     <TableCell className="text-xs text-slate-700">
-                      {Object.keys(r.diferencias).length
-                        ? Object.keys(r.diferencias).join(", ")
-                        : "—"}
+                      {(() => {
+                        const camposDiff = Object.keys(r.diferencias || {}).filter(
+                          (k) => !k.startsWith("_"),
+                        );
+                        if (r.reconciliada_por_importe_canonico) {
+                          return (
+                            <span
+                              className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 bg-amber-50 text-amber-800 border border-amber-200 font-sans"
+                              title="Los campos base y cuota difieren pero el importe total canónico (base+cuota o importe_total) cuadra. Típico en facturas No Sujeta."
+                              data-testid={`badge-canonical-${r.num_serie_factura}`}
+                            >
+                              Coincide por importe canónico
+                            </span>
+                          );
+                        }
+                        return camposDiff.length ? camposDiff.join(", ") : "—";
+                      })()}
                     </TableCell>
                     <TableCell className="text-right">
                       <button
@@ -1580,7 +1594,37 @@ export default function Comparativa() {
                       Comercial · {labelOrigenComercial(detail.comercial.origen_comercial)}
                     </span>
                   )}
+                  {detail.reconciliada_por_importe_canonico && (
+                    <span
+                      className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 bg-amber-50 text-amber-800 border border-amber-200"
+                      title="Los campos base/cuota difieren pero la suma canónica cuadra"
+                      data-testid="detail-badge-canonical"
+                    >
+                      Reconciliada por importe canónico
+                    </span>
+                  )}
                 </div>
+                {detail.reconciliada_por_importe_canonico &&
+                  detail.diferencias?._reconciliada_por_importe_canonico && (
+                    <div
+                      className="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 px-3 py-2"
+                      data-testid="detail-canonical-info"
+                    >
+                      <strong>Reconciliación por importe canónico:</strong>{" "}
+                      SII{" "}
+                      <span className="font-mono">
+                        {detail.diferencias._reconciliada_por_importe_canonico.sii_canonical.toFixed(2)}€
+                      </span>{" "}
+                      ≈ Comercial{" "}
+                      <span className="font-mono">
+                        {detail.diferencias._reconciliada_por_importe_canonico.comercial_canonical.toFixed(2)}€
+                      </span>
+                      . Los campos <em>base_imponible</em> y{" "}
+                      <em>cuota_repercutida</em> difieren en el desglose (típico
+                      en facturas No Sujeta), pero la conciliación cuadra en
+                      su conjunto.
+                    </div>
+                  )}
               </SheetHeader>
               <div className="mt-4 border border-slate-200">
                 <Table>
@@ -1620,7 +1664,8 @@ export default function Comparativa() {
                           "cuota_repercutida",
                         ].includes(campo);
                         const isDiff =
-                          !!detail.diferencias[campo] ||
+                          (!!detail.diferencias[campo] &&
+                            !campo.startsWith("_")) ||
                           (hasTramoDiff && isCampoDesglose);
                         const vs = detail.sii?.[campo];
                         const vc = detail.comercial?.[campo];

@@ -315,6 +315,23 @@ def _hay_desglose(d: dict | None) -> bool:
     return bool(det) and len(det) > 0
 
 
+def _canonical_amount(doc: dict) -> float:
+    """Importe canónico de un doc factura (iter27).
+
+    - Si `base + cuota` != 0 → devuelve esa suma.
+    - Sino → devuelve `importe_total`.
+
+    Cubre el caso asimétrico donde una factura No Sujeta declara sólo
+    `importe_total` en un lado y `base + cuota` en el otro.
+    """
+    b = _parse_amount(doc.get("base_imponible")) or 0.0
+    c = _parse_amount(doc.get("cuota_repercutida")) or 0.0
+    total_desglose = b + c
+    if abs(total_desglose) > 0.01:
+        return total_desglose
+    return _parse_amount(doc.get("importe_total")) or 0.0
+
+
 def diff_facturas(
     a: Optional[dict],
     b: Optional[dict],
@@ -334,6 +351,14 @@ def diff_facturas(
     `tipo_impositivo` (líneas exentas por `causa_exencion`). El resultado
     aparece como `diffs["detalle_iva"] = [tramos]` con la forma documentada en
     `_diff_tramos`.
+
+    **Fallback por importe canónico (iter27)**: cuando un lado no tiene
+    desglose (base+cuota ≈ 0) pero sí tiene `importe_total`, y el importe
+    canónico (base+cuota o importe_total según proceda) cuadra con el otro
+    lado con tolerancia 0.01€, la factura se marca como coincide global
+    y NO se reportan diffs en base/cuota/importe. El diccionario devuelto
+    incluye la marca `"_reconciliada_por_importe_canonico": True` para
+    que la UI muestre un badge informativo.
     """
     a = a or {}
     b = b or {}
@@ -410,4 +435,30 @@ def diff_facturas(
         # Solo añadimos detalle_iva al diff si hay al menos un tramo con discrepancia.
         if any(t["diff"] for t in tramos):
             diffs["detalle_iva"] = tramos
+
+    # Fallback iter27: si hay diffs SÓLO en {base_imponible, cuota_repercutida,
+    # importe_total} y el importe canónico cuadra (SII vs Comercial con
+    # inversión aplicada), la factura se reconcilia globalmente. Retiramos
+    # esos campos del diff y marcamos con `_reconciliada_por_importe_canonico`.
+    if diffs and not detalle_mode:
+        campos_asimetricos = {"base_imponible", "cuota_repercutida", "importe_total"}
+        if set(diffs.keys()).issubset(campos_asimetricos):
+            can_a = _canonical_amount(a)
+            can_b = _canonical_amount(b)
+            if invertir:
+                can_b = -can_b
+            if abs(can_a - can_b) <= 0.01:
+                # Reconciliada por importe canónico: retiramos los diffs
+                # de base/cuota/importe (siguen visibles como valores pero
+                # no cuentan como diff a efectos de estado).
+                for k in list(diffs.keys()):
+                    if k in campos_asimetricos:
+                        del diffs[k]
+                # Guardamos los valores canónicos post-inversión (mismo
+                # signo/magnitud) para que la UI muestre "SII X ≈ Com X".
+                diffs["_reconciliada_por_importe_canonico"] = {
+                    "sii_canonical": round(can_a, 2),
+                    "comercial_canonical": round(can_b, 2),
+                }
+
     return diffs
