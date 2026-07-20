@@ -40,10 +40,12 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
+  Radio,
 } from "lucide-react";
 import { toast } from "sonner";
 import { labelOrigenComercial } from "@/lib/origenes";
 import ResumenTotales from "@/components/ResumenTotales";
+import ConsultaSIIDialog from "@/components/ConsultaSIIDialog";
 
 const ESTADO_PILL = {
   coincide: { label: "Coincide", cls: "pill-success", Icon: CheckCircle2 },
@@ -352,6 +354,7 @@ export default function Comparativa() {
   const [sortBy, setSortBy] = useState(null);   // 'num_serie_factura' | 'estado' | 'importe_sii' | 'importe_comercial' | 'fecha_expedicion' | null
   const [sortDir, setSortDir] = useState("desc"); // 'asc' | 'desc'
   const [detail, setDetail] = useState(null);
+  const [consultaSiiRow, setConsultaSiiRow] = useState(null);
   // Contador que se incrementa cada vez que se recargan los items de la
   // tabla. Lo usamos como prop refreshKey en ResumenTotales para que el
   // resumen se vuelva a calcular tras imports/recargas.
@@ -1471,13 +1474,23 @@ export default function Comparativa() {
                       })()}
                     </TableCell>
                     <TableCell className="text-right">
-                      <button
-                        onClick={() => setDetail(r)}
-                        className="text-slate-500 hover:text-slate-900"
-                        data-testid={`view-comp-${r.num_serie_factura}`}
-                      >
-                        <Eye className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => setConsultaSiiRow(r)}
+                          className="text-slate-400 hover:text-emerald-600"
+                          title="Consultar SII en vivo con certificado"
+                          data-testid={`consulta-sii-row-${r.num_serie_factura}`}
+                        >
+                          <Radio className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => setDetail(r)}
+                          className="text-slate-500 hover:text-slate-900"
+                          data-testid={`view-comp-${r.num_serie_factura}`}
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 );
@@ -1626,6 +1639,22 @@ export default function Comparativa() {
                     </div>
                   )}
               </SheetHeader>
+
+              <div className="mt-3 flex items-center justify-between border border-slate-200 bg-slate-50/60 px-3 py-2">
+                <div className="text-xs text-slate-600">
+                  Lanza una consulta unitaria en vivo al SII para esta factura.
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setConsultaSiiRow(detail)}
+                  data-testid="btn-consulta-sii-detail"
+                >
+                  <Radio className="h-4 w-4 mr-1.5" />
+                  Consultar SII ahora
+                </Button>
+              </div>
+
               <div className="mt-4 border border-slate-200">
                 <Table>
                   <TableHeader>
@@ -1738,6 +1767,40 @@ export default function Comparativa() {
           )}
         </SheetContent>
       </Sheet>
+
+      <ConsultaSIIDialog
+        open={!!consultaSiiRow}
+        onOpenChange={(o) => !o && setConsultaSiiRow(null)}
+        factura={buildFacturaFromRow(consultaSiiRow)}
+        onSuccess={() => {
+          // Refrescar el listado para reflejar el nuevo estado_factura
+          // persistido por el backend en `facturas_sii`.
+          load();
+          setRefreshTick((t) => t + 1);
+        }}
+      />
     </div>
   );
+}
+
+/**
+ * Extrae los campos que necesita el endpoint /sii/consulta-unitaria-cert
+ * a partir de una fila de la comparativa. Prefiere datos de SII y hace
+ * fallback a los del comercial.
+ */
+function buildFacturaFromRow(row) {
+  if (!row) return null;
+  const sii = row.sii || {};
+  const com = row.comercial || {};
+  return {
+    num_serie_factura: row.num_serie_factura,
+    nif_titular: sii.nif_titular || com.nif_titular,
+    nif_emisor: sii.nif_emisor || com.nif_emisor,
+    ejercicio: String(sii.ejercicio || com.ejercicio || ""),
+    periodo: String(sii.periodo || com.periodo || ""),
+    fecha_expedicion: sii.fecha_expedicion || com.fecha_expedicion,
+    nombre_titular: sii.nombre_titular || com.nombre_titular,
+    nombre_emisor: sii.nombre_emisor || com.nombre_emisor,
+    estado_previo: sii.estado_factura || sii.estado,
+  };
 }

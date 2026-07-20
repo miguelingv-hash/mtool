@@ -810,3 +810,29 @@ Caso concreto detectado: `1TSS260600000552` (SIGLO, F2, BASER, base=cuota=0€).
 
 Ambos PASS (2/2).
 
+
+
+## iter30 (Feb 2026) — Consulta SII en vivo desde el listado
+
+### Feature
+Desde cualquier fila del listado de Comparativa (o desde el Sheet de detalle),
+el usuario puede lanzar una consulta SOAP unitaria al SII de la AEAT con su
+certificado digital `.pfx/.p12`.
+
+### UX elegida
+- **Modo cert**: pedir cert + password en cada consulta (no persistir).
+- **Entrada**: icono `Radio` en la columna de acciones + botón "Consultar SII
+  ahora" dentro del Sheet de detalle.
+- **Detección sociedad**: automática por `nif_titular` (A74251836→BASER,
+  A95000295→TotalEnergies).
+- **Persistencia**: siempre. `POST /api/sii/consulta-unitaria-cert` inserta en
+  `consultas` (histórico) y actualiza `facturas_sii` vía `upsert_factura` si
+  el estado devuelto difiere del almacenado.
+
+### Archivos nuevos
+- `/app/frontend/src/lib/sociedades.js`: mapa hardcodeado NIF→sociedad.
+- `/app/frontend/src/components/ConsultaSIIDialog.jsx`: modal reutilizable.
+
+### Archivos modificados
+- `/app/frontend/src/pages/Comparativa.jsx`: botón por fila + en Sheet,
+  `consultaSiiRow` state, helper `buildFacturaFromRow`.
