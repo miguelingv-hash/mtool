@@ -5077,6 +5077,28 @@ async def _comparativa_resumen_origenes_impl(
             "_com_cuota_neto": com_cuota_neto_expr_r,
         }},
         {"$addFields": {
+            # iter30 (2026-02): fallback canónico — cuando base+cuota=0 y
+            # `importe_total` != 0 (facturas No Sujeta / desglose
+            # asimétrico), la base efectiva es el importe_total. Alinea
+            # los totales de este endpoint con `_comparativa_totales_impl`
+            # (banner de KPIs `ResumenTotales`) para que ambos cuadros
+            # muestren los mismos números.
+            "_com_base_final": {
+                "$cond": [
+                    {"$and": [
+                        {"$lte": [{"$abs": {"$add": [
+                            "$_com_base_neto", "$_com_cuota_neto",
+                        ]}}, 0.01]},
+                        {"$gt": [{"$abs": {
+                            "$toDouble": {"$ifNull": ["$importe_total", 0]},
+                        }}, 0.01]},
+                    ]},
+                    {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
+                    "$_com_base_neto",
+                ],
+            },
+        }},
+        {"$addFields": {
             "_coincide": {
                 "$cond": [
                     {"$eq": [{"$ifNull": ["$_has_sii", False]}, True]},
@@ -5096,8 +5118,17 @@ async def _comparativa_resumen_origenes_impl(
         {"$group": {
             "_id": "$_origen",
             "total_facturas": {"$sum": 1},
-            "base_total": {"$sum": {"$ifNull": ["$base_imponible", 0]}},
-            "cuota_total": {"$sum": {"$ifNull": ["$cuota_repercutida", 0]}},
+            # iter30 (2026-02): usamos `_com_base_final` (que incluye el
+            # fallback canónico) y `_com_cuota_neto` (que ya aplica la
+            # exclusión de líneas con tipo_impositivo=0) en lugar del
+            # campo top-level. Así los totales del panel "Conciliación
+            # exacta" cuadran con el banner de KPIs (`ResumenTotales`) y
+            # con la lógica de matching (`_resumen_cmp_expr`). Antes
+            # divergían: p.ej. SIGLO mostraba base=14.514.682 aquí y
+            # 14.510.070 en el KPI (diff = líneas exentas + fallback
+            # canónico de facturas No Sujeta).
+            "base_total": {"$sum": "$_com_base_final"},
+            "cuota_total": {"$sum": "$_com_cuota_neto"},
             "importe_total": {"$sum": {"$ifNull": ["$importe_total", 0]}},
             "matches_sii": {"$sum": {
                 "$cond": [
