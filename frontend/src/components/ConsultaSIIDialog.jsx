@@ -24,12 +24,13 @@ import {
   Eye,
   EyeOff,
   X,
-  CheckCircle2,
   AlertCircle,
   RefreshCw,
+  FileSearch,
 } from "lucide-react";
 import { toast } from "sonner";
 import { detectarSociedad } from "@/lib/sociedades";
+import EstadoBadge from "@/components/EstadoBadge";
 
 const ENTORNOS = [
   { value: "produccion", label: "Producción (AEAT real)" },
@@ -165,7 +166,7 @@ export default function ConsultaSIIDialog({
     }
   };
 
-  const estadoFactura = result?.respuesta?.datos_factura?.estado_factura;
+  const estadoFactura = result?.respuesta?.estado_factura;
   const estadoPrevio = factura?.estado_previo;
   const estadoDifiere =
     estadoFactura &&
@@ -344,65 +345,89 @@ export default function ConsultaSIIDialog({
         {/* Resultado */}
         {result && (
           <div
-            className="border border-emerald-200 bg-emerald-50/40 px-4 py-3 space-y-2"
+            className="border border-slate-200 bg-slate-50/40 px-4 py-4 space-y-3"
             data-testid="consulta-sii-result"
           >
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-              <span className="text-sm font-medium text-emerald-900">
-                Respuesta AEAT recibida
-              </span>
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium text-slate-800">
+                Respuesta AEAT
+              </div>
+              <EstadoBadge estado={estadoFactura} />
             </div>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div>
-                <span className="text-slate-500 uppercase tracking-wider text-[10px]">
-                  Estado factura
-                </span>
-                <div className="font-mono text-sm text-slate-900">
-                  {estadoFactura || "—"}
-                </div>
-              </div>
-              <div>
-                <span className="text-slate-500 uppercase tracking-wider text-[10px]">
-                  CSV AEAT
-                </span>
-                <div className="font-mono text-sm text-slate-900 truncate">
-                  {result?.respuesta?.datos_factura?.csv_aeat || "—"}
-                </div>
-              </div>
-              <div>
-                <span className="text-slate-500 uppercase tracking-wider text-[10px]">
-                  Nº registro
-                </span>
-                <div className="font-mono text-sm text-slate-900">
-                  {result?.respuesta?.datos_factura?.num_registro || "—"}
-                </div>
-              </div>
-              <div>
-                <span className="text-slate-500 uppercase tracking-wider text-[10px]">
-                  Timestamp
-                </span>
-                <div className="font-mono text-xs text-slate-900">
-                  {result?.respuesta?.datos_factura?.timestamp_presentacion ||
-                    "—"}
-                </div>
-              </div>
-            </div>
+
             {estadoDifiere && (
-              <div className="text-xs text-amber-800 bg-amber-100 border border-amber-300 px-3 py-2 mt-2">
-                ⚠ El estado devuelto por AEAT (<b>{estadoFactura}</b>)
-                difiere del almacenado (<b>{estadoPrevio}</b>). El estado
-                en BD se ha actualizado automáticamente.
+              <div className="text-xs text-amber-800 bg-amber-100 border border-amber-300 px-3 py-2">
+                <b>⚠ Estado actualizado.</b> AEAT devuelve{" "}
+                <b>{estadoFactura}</b>, en BD estaba <b>{estadoPrevio}</b>. Se
+                ha sincronizado automáticamente.
               </div>
             )}
-            <button
-              type="button"
-              className="text-xs text-slate-500 underline hover:text-slate-800"
-              onClick={() => setShowXml((s) => !s)}
-              data-testid="consulta-sii-toggle-xml"
-            >
-              {showXml ? "Ocultar" : "Ver"} XML SOAP
-            </button>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3 text-sm">
+              <FieldItem
+                label="Estado envío"
+                value={result?.respuesta?.estado_envio}
+              />
+              <FieldItem
+                label="Timestamp presentación"
+                value={result?.respuesta?.timestamp_presentacion}
+                mono
+              />
+              <FieldItem
+                label="Nº registro"
+                value={result?.respuesta?.num_registro_presentacion}
+                mono
+                copyable
+              />
+              <FieldItem
+                label="CSV AEAT"
+                value={result?.respuesta?.csv}
+                mono
+                copyable
+              />
+              {result?.respuesta?.codigo_error_registro && (
+                <div className="sm:col-span-2 bg-rose-50 border border-rose-200 px-3 py-2">
+                  <div className="text-[10px] uppercase tracking-wider text-rose-700">
+                    Error de registro
+                  </div>
+                  <div className="font-mono text-xs text-rose-800">
+                    {result.respuesta.codigo_error_registro}
+                  </div>
+                  {result.respuesta.descripcion_error_registro && (
+                    <div className="text-xs text-rose-700 mt-1">
+                      {result.respuesta.descripcion_error_registro}
+                    </div>
+                  )}
+                </div>
+              )}
+              <FieldItem
+                label="Endpoint AEAT"
+                value={result?.respuesta?.endpoint}
+                mono
+                small
+                colSpan
+              />
+            </div>
+
+            <div className="flex items-center gap-3 pt-2 border-t border-slate-200">
+              <button
+                type="button"
+                className="text-xs text-slate-600 underline hover:text-slate-900 flex items-center gap-1"
+                onClick={() => setShowXml((s) => !s)}
+                data-testid="consulta-sii-toggle-xml"
+              >
+                <FileSearch className="h-3.5 w-3.5" />
+                {showXml ? "Ocultar" : "Ver"} SOAP completo
+              </button>
+              <a
+                href="/historico"
+                className="text-xs text-slate-600 underline hover:text-slate-900"
+                data-testid="consulta-sii-goto-historico"
+              >
+                Ver en histórico →
+              </a>
+            </div>
+
             {showXml && (
               <div className="grid gap-2 text-[10px] font-mono max-h-64 overflow-auto">
                 <details open>
@@ -466,3 +491,36 @@ export default function ConsultaSIIDialog({
     </Dialog>
   );
 }
+
+function FieldItem({ label, value, mono, small, colSpan, copyable }) {
+  const copy = () => {
+    if (value) {
+      navigator.clipboard?.writeText(String(value));
+      toast.success("Copiado al portapapeles");
+    }
+  };
+  return (
+    <div className={colSpan ? "sm:col-span-2" : ""}>
+      <div className="text-[10px] uppercase tracking-wider text-slate-500">
+        {label}
+      </div>
+      <div
+        className={`flex items-start gap-1.5 ${
+          small ? "text-xs" : "text-sm"
+        } ${mono ? "font-mono break-all" : ""} text-slate-900`}
+      >
+        <span className="min-w-0 flex-1">{value || "—"}</span>
+        {copyable && value && (
+          <button
+            type="button"
+            onClick={copy}
+            className="text-slate-400 hover:text-slate-700 text-[10px] underline shrink-0"
+          >
+            copiar
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
