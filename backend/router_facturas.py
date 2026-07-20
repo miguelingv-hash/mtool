@@ -4020,6 +4020,64 @@ async def _comparativa_impl(
             pipeline.append({"$match": {"_estado": {"$ne": "coincide"}}})
         # (all: sin filtro adicional, incluimos las 3 categorías desde comercial)
 
+        # ------------------------------------------------------------------
+        # iter30 (2026-02): incluir solo_sii en el listado cuando el usuario
+        # NO ha filtrado por estado concreto. Antes, el pipeline sólo miraba
+        # `facturas_comercial` → los SII sin match comercial no aparecían,
+        # pese a contribuir a Δ Base y Δ Cuota. Bug reportado por el usuario:
+        # "por qué no se detectan diferencias si hay diferencia tanto en
+        # base imponible como en cuota" (114 facturas F1/F2 solo en SII).
+        #
+        # Solución: `$unionWith` a `facturas_sii` con sub-pipeline que:
+        #   1. Aplica `filtro_sii` (incluye nif, ejercicio, periodo, tipos).
+        #   2. Excluye los SII que sí tienen contraparte comercial (via
+        #      `$lookup` respetando `filtro_com`, coherente con iter29).
+        #   3. Proyecta a un shape compatible con el pipeline comercial:
+        #      `_estado="solo_sii"`, `_sii_importe_total` alias para el
+        #      sort compartido.
+        #
+        # NOTA: sólo activo cuando `estado is None` (usuario no filtró un
+        # estado específico). Si el usuario elige `estado=solo_sii`, ya se
+        # aplica el fast-path dedicado más arriba.
+        # ------------------------------------------------------------------
+        if estado is None:
+            _com_match_for_ss = {
+                k: v for k, v in (filtro_com or {}).items()
+                if k != "num_serie_factura"
+            }
+            solo_sii_sub = [
+                {"$match": filtro_sii},
+                {"$lookup": {
+                    "from": "facturas_comercial",
+                    "let": {"ns": "$num_serie_factura"},
+                    "pipeline": [
+                        {"$match": {
+                            **_com_match_for_ss,
+                            "$expr": {"$eq": ["$num_serie_factura", "$$ns"]},
+                        }},
+                        {"$limit": 1},
+                        {"$project": {"_id": 1}},
+                    ],
+                    "as": "_com_docs",
+                }},
+                {"$match": {"_com_docs": {"$size": 0}}},
+                {"$addFields": {
+                    "_estado": "solo_sii",
+                    # Alias para que compartan sort_field con las filas
+                    # provenientes del pipeline comercial.
+                    "_sii_importe_total": {
+                        "$ifNull": ["$importe_total", 0],
+                    },
+                }},
+                {"$project": {
+                    "_id": 0, "_com_docs": 0, "versiones": 0,
+                }},
+            ]
+            pipeline.append({"$unionWith": {
+                "coll": "facturas_sii",
+                "pipeline": solo_sii_sub,
+            }})
+
         # Filtro por tipos_factura ya aplicado en `filtro_com` (iter25).
 
         # Sort
@@ -4077,17 +4135,9 @@ async def _comparativa_impl(
             page_docs = []
             total = 0
 
-        # Para el modo "all", el total real incluye también solo_sii (que
-        # este pipeline no cuenta porque parte del universo comercial).
-        # Sumamos el count aparte y avisamos al usuario en el UI.
-        if estado is None and not only_diffs:
-            solo_sii_filter_ct = dict(filtro_sii)
-            # Excluimos los que existen en comercial → equivale a "no match".
-            # Como estamos en universo grande usamos count total SII menos
-            # matches SII estimados: aggregation con $lookup inverso.
-            # Por simplicidad y coste, no lo sumamos (mismo comportamiento
-            # que la vía legacy con `incluir_solo_sii=False`).
-            _ = solo_sii_filter_ct
+        # iter30: solo_sii ya se incluye en el pipeline vía `$unionWith`
+        # cuando `estado is None`. El total del `$facet` ahora refleja las
+        # 4 categorías (coincide / discrepancia / solo_comercial / solo_sii).
 
         # Aplica diff_facturas en Python sobre la página (max limit docs) para
         # calcular las diferencias campo a campo (necesarias para el
@@ -4099,7 +4149,14 @@ async def _comparativa_impl(
             d.pop("_coincide_header", None)
             estado_db = d.pop("_estado", None)
             ns = d.get("num_serie_factura")
-            row = _build_row_from_docs(sii, d, ns, config)
+            # iter30: docs procedentes del `$unionWith` de solo_sii son el
+            # propio doc SII (no un comercial). En ese caso, sii=d y
+            # comercial=None. Los otros estados siguen tal cual.
+            if estado_db == "solo_sii":
+                sii_doc = sii or d
+                row = _build_row_from_docs(sii_doc, None, ns, config)
+            else:
+                row = _build_row_from_docs(sii, d, ns, config)
             # Si Mongo dijo "coincide" pero Python encuentra tramos con
             # diferencias, el estado real es discrepancia. Sobrescribimos.
             # Esto puede pasar cuando cabecera coincide pero el detalle_iva
