@@ -100,6 +100,12 @@ class FacturaDatos(BaseModel):
     tipo_impositivo: Optional[float] = None
     cuota_repercutida: Optional[float] = None
     importe_total: Optional[float] = None
+    # iter31 (2026-02): rectificativas por Sustitución. AEAT devuelve base
+    # y cuota reales bajo <ImporteRectificacion>. En Sustitución, el
+    # <DesgloseIVA> viene a 0 y el importe económico real está aquí.
+    tipo_rectificativa: Optional[str] = None  # "S"|"I" (Sustitución/Diferencia)
+    base_rectificada: Optional[float] = None
+    cuota_rectificada: Optional[float] = None
 
 
 class FacturaVersion(BaseModel):
@@ -315,17 +321,54 @@ def _hay_desglose(d: dict | None) -> bool:
     return bool(det) and len(det) > 0
 
 
-def _canonical_amount(doc: dict) -> float:
-    """Importe canónico de un doc factura (iter28).
+def _es_rectificativa_sustitucion(doc: dict) -> bool:
+    """Devuelve True si el doc es una rectificativa por Sustitución.
+    Aplica cuando `tipo_factura ∈ R1..R5` y `tipo_rectificativa == 'S'`.
+    En ese caso el desglose (base/cuota top-level) viene a 0 y el importe
+    económico real está en `base_rectificada` / `cuota_rectificada`.
+    """
+    tipo = str(doc.get("tipo_factura") or "").strip().upper()
+    if not tipo.startswith("R"):
+        return False
+    tipo_rect = str(doc.get("tipo_rectificativa") or "").strip().upper()
+    return tipo_rect == "S"
 
-    - Si `importe_total` existe y != 0 → devuelve `importe_total` (prioritario).
+
+def _base_efectiva(doc: dict) -> Optional[float]:
+    """Base imponible efectiva. Para R por Sustitución devuelve la base
+    rectificada; para el resto, la base_imponible normal."""
+    if _es_rectificativa_sustitucion(doc):
+        return _parse_amount(doc.get("base_rectificada"))
+    return _parse_amount(doc.get("base_imponible"))
+
+
+def _cuota_efectiva(doc: dict) -> Optional[float]:
+    """Cuota efectiva. Ver `_base_efectiva`."""
+    if _es_rectificativa_sustitucion(doc):
+        return _parse_amount(doc.get("cuota_rectificada"))
+    return _parse_amount(doc.get("cuota_repercutida"))
+
+
+def _canonical_amount(doc: dict) -> float:
+    """Importe canónico de un doc factura (iter28 + iter31).
+
+    - Si es R por Sustitución (`tipo_rectificativa='S'`) →
+      `base_rectificada + cuota_rectificada` (el importe económico real
+      vive ahí; `importe_total` y desglose vienen a 0 en Sustitución).
+    - Sino, si `importe_total` existe y != 0 → devuelve `importe_total`.
     - Sino → devuelve `base + cuota`.
 
     Rationale: `importe_total` es la verdad económica de la factura,
     incluyendo partes exentas o no sujetas. `base + cuota` es un desglose
-    contable que puede diferir si hay líneas exentas / no sujetas
-    (ej. la factura 1NSN260600001319 con parte exenta de 1,99€).
+    contable que puede diferir si hay líneas exentas / no sujetas.
     """
+    if _es_rectificativa_sustitucion(doc):
+        br = _parse_amount(doc.get("base_rectificada")) or 0.0
+        cr = _parse_amount(doc.get("cuota_rectificada")) or 0.0
+        # Fallback: si ambos son 0 (dato ausente), cae al comportamiento
+        # normal para no romper canónicos de docs incompletos.
+        if abs(br) > 0.01 or abs(cr) > 0.01:
+            return br + cr
     importe_total = _parse_amount(doc.get("importe_total")) or 0.0
     if abs(importe_total) > 0.01:
         return importe_total
@@ -369,6 +412,26 @@ def diff_facturas(
     inv_map: dict = cfg.get("invertir_signo_por_origen") or {}
     invertir = bool(inv_map.get(b.get("origen_comercial")))
     excluir_tipo_cero = bool(cfg.get("excluir_comercial_tipo_iva_cero", True))
+
+    # iter31 (2026-02): rectificativas por Sustitución. AEAT devuelve
+    # `base_imponible=0`, `cuota_repercutida=0`, `importe_total=0` y guarda
+    # el importe real en `base_rectificada` / `cuota_rectificada`. Para
+    # comparar correctamente contra el comercial (que sí guarda el
+    # importe rectificado en base/cuota top-level), "promocionamos" los
+    # rectificados a top-level en el doc SII antes del diff. NO tocamos
+    # `b` (comercial) — el ajuste sólo aplica al lado SII.
+    if _es_rectificativa_sustitucion(a):
+        br = _parse_amount(a.get("base_rectificada"))
+        cr = _parse_amount(a.get("cuota_rectificada"))
+        if br is not None or cr is not None:
+            a = dict(a)  # copia superficial: no mutamos el doc del caller
+            a["base_imponible"] = br
+            a["cuota_repercutida"] = cr
+            # importe_total efectivo = base + cuota rectificados (el
+            # original es 0 en Sustitución).
+            a["importe_total"] = round(
+                (br or 0.0) + (cr or 0.0), 2,
+            )
 
     # Filtra las líneas comerciales con tipo_impositivo vacío o cero ANTES de
     # comparar (cuando el flag está activo). Estas líneas se consideran "no

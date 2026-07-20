@@ -156,35 +156,112 @@ async def backfill_snapshot_sii_en_comercial(
         {"$project": {
             "_id": 0,
             "num_serie_factura": 1,
+            # iter31 (2026-02): rectificativas por Sustitución. Cuando
+            # `tipo_factura startsWith 'R'` y `tipo_rectificativa='S'`,
+            # los importes reales viven en `base_rectificada` /
+            # `cuota_rectificada` (el top-level y detalle_iva vienen a 0).
+            # Snapshot efectivo: si es R Sustitución → rectificados; sino
+            # → suma detalle_iva (o top-level como fallback).
+            "_sii_es_rect_sust": {
+                "$and": [
+                    {"$eq": [
+                        {"$substr": [
+                            {"$ifNull": ["$tipo_factura", ""]}, 0, 1,
+                        ]},
+                        "R",
+                    ]},
+                    {"$eq": [
+                        {"$toUpper": {"$ifNull": ["$tipo_rectificativa", ""]}},
+                        "S",
+                    ]},
+                ],
+            },
+            "_sii_tipo_rectificativa": {
+                "$ifNull": ["$tipo_rectificativa", None],
+            },
             "_sii_base": {
                 "$cond": [
-                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
-                    {"$reduce": {
-                        "input": {"$ifNull": ["$detalle_iva", []]},
-                        "initialValue": 0.0,
-                        "in": {"$add": [
-                            "$$value",
-                            {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+                    # ¿Rectificativa por Sustitución? → base_rectificada
+                    {"$and": [
+                        {"$eq": [
+                            {"$substr": [
+                                {"$ifNull": ["$tipo_factura", ""]}, 0, 1,
+                            ]},
+                            "R",
                         ]},
-                    }},
-                    {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
+                        {"$eq": [
+                            {"$toUpper": {"$ifNull": ["$tipo_rectificativa", ""]}},
+                            "S",
+                        ]},
+                    ]},
+                    {"$toDouble": {"$ifNull": ["$base_rectificada", 0]}},
+                    # Sino: rama iter28 (detalle_iva / top-level)
+                    {"$cond": [
+                        {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                        {"$reduce": {
+                            "input": {"$ifNull": ["$detalle_iva", []]},
+                            "initialValue": 0.0,
+                            "in": {"$add": [
+                                "$$value",
+                                {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+                            ]},
+                        }},
+                        {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
+                    ]},
                 ],
             },
             "_sii_cuota": {
                 "$cond": [
-                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
-                    {"$reduce": {
-                        "input": {"$ifNull": ["$detalle_iva", []]},
-                        "initialValue": 0.0,
-                        "in": {"$add": [
-                            "$$value",
-                            {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+                    {"$and": [
+                        {"$eq": [
+                            {"$substr": [
+                                {"$ifNull": ["$tipo_factura", ""]}, 0, 1,
+                            ]},
+                            "R",
                         ]},
-                    }},
-                    {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
+                        {"$eq": [
+                            {"$toUpper": {"$ifNull": ["$tipo_rectificativa", ""]}},
+                            "S",
+                        ]},
+                    ]},
+                    {"$toDouble": {"$ifNull": ["$cuota_rectificada", 0]}},
+                    {"$cond": [
+                        {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                        {"$reduce": {
+                            "input": {"$ifNull": ["$detalle_iva", []]},
+                            "initialValue": 0.0,
+                            "in": {"$add": [
+                                "$$value",
+                                {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+                            ]},
+                        }},
+                        {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
+                    ]},
                 ],
             },
-            "_sii_importe_total": {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
+            "_sii_importe_total": {
+                "$cond": [
+                    # Rectificativa por Sustitución → base_rect + cuota_rect
+                    # (el importe_total oficial es 0 en Sustitución).
+                    {"$and": [
+                        {"$eq": [
+                            {"$substr": [
+                                {"$ifNull": ["$tipo_factura", ""]}, 0, 1,
+                            ]},
+                            "R",
+                        ]},
+                        {"$eq": [
+                            {"$toUpper": {"$ifNull": ["$tipo_rectificativa", ""]}},
+                            "S",
+                        ]},
+                    ]},
+                    {"$add": [
+                        {"$toDouble": {"$ifNull": ["$base_rectificada", 0]}},
+                        {"$toDouble": {"$ifNull": ["$cuota_rectificada", 0]}},
+                    ]},
+                    {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
+                ],
+            },
             "_sii_fecha_expedicion": {"$ifNull": ["$fecha_expedicion", None]},
             "_sii_estado": {"$ifNull": ["$estado", None]},
             "_has_sii": {"$literal": True},

@@ -842,10 +842,17 @@ _NEWMAN_COLUMN_MAP: dict[str, str] = {
     "CSVAEAT": "csv_aeat",
     "NumRegistroPresentacion": "num_registro_presentacion",
     "TimestampPresentacion": "timestamp_presentacion",
+    # iter31 (2026-02): rectificativas por Sustitución. AEAT devuelve el
+    # importe real bajo <ImporteRectificacion>. La colección Postman lo
+    # extrae en 3 columnas nuevas.
+    "TipoRectificativa": "tipo_rectificativa",
+    "BaseRectificada": "base_rectificada",
+    "CuotaRectificada": "cuota_rectificada",
 }
 
 _NEWMAN_NUMERIC = {
     "importe_total", "base_imponible", "tipo_impositivo", "cuota_repercutida",
+    "base_rectificada", "cuota_rectificada",
 }
 
 # Tipos de IVA legales en España (con un pequeño margen por si AEAT introduce
@@ -930,6 +937,97 @@ def _norm_periodo(p) -> str:
             return f"{n:02d}"
         return s
     return s
+
+
+# ---------------------------------------------------------------------------
+# Helpers de expresiones aggregation para rectificativas por Sustitución
+# (iter31 · Feb 2026)
+#
+# Cuando `tipo_factura startsWith 'R'` y `tipo_rectificativa == 'S'`, AEAT
+# devuelve la base/cuota reales bajo `base_rectificada` / `cuota_rectificada`.
+# El desglose top-level y `detalle_iva` vienen a 0 en Sustitución (por eso las
+# R aparecían como "solo_sii" o discrepancia falsa con importe 0). Los
+# siguientes helpers generan las expresiones `$cond` para reutilizar en todos
+# los pipelines que operan directamente sobre `facturas_sii`.
+# ---------------------------------------------------------------------------
+
+_ES_RECT_SUST_EXPR = {
+    "$and": [
+        {"$eq": [
+            {"$substr": [{"$ifNull": ["$tipo_factura", ""]}, 0, 1]},
+            "R",
+        ]},
+        {"$eq": [
+            {"$toUpper": {"$ifNull": ["$tipo_rectificativa", ""]}},
+            "S",
+        ]},
+    ],
+}
+
+
+def _sii_base_efectiva_expr() -> dict:
+    """Base imponible efectiva para consultas sobre `facturas_sii`.
+    R Sustitución → `base_rectificada`. Sino → suma detalle_iva
+    (o `base_imponible` top-level como fallback)."""
+    return {
+        "$cond": [
+            _ES_RECT_SUST_EXPR,
+            {"$toDouble": {"$ifNull": ["$base_rectificada", 0]}},
+            {"$cond": [
+                {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                {"$reduce": {
+                    "input": {"$ifNull": ["$detalle_iva", []]},
+                    "initialValue": 0.0,
+                    "in": {"$add": [
+                        "$$value",
+                        {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
+                    ]},
+                }},
+                {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
+            ]},
+        ],
+    }
+
+
+def _sii_cuota_efectiva_expr() -> dict:
+    """Cuota efectiva para consultas sobre `facturas_sii`.
+    R Sustitución → `cuota_rectificada`. Sino → suma detalle_iva
+    (o `cuota_repercutida` top-level como fallback)."""
+    return {
+        "$cond": [
+            _ES_RECT_SUST_EXPR,
+            {"$toDouble": {"$ifNull": ["$cuota_rectificada", 0]}},
+            {"$cond": [
+                {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
+                {"$reduce": {
+                    "input": {"$ifNull": ["$detalle_iva", []]},
+                    "initialValue": 0.0,
+                    "in": {"$add": [
+                        "$$value",
+                        {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
+                    ]},
+                }},
+                {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
+            ]},
+        ],
+    }
+
+
+def _sii_importe_total_efectivo_expr() -> dict:
+    """ImporteTotal efectivo. R Sustitución → base_rect + cuota_rect
+    (el original oficial es 0 en Sustitución). Sino → importe_total."""
+    return {
+        "$cond": [
+            _ES_RECT_SUST_EXPR,
+            {"$add": [
+                {"$toDouble": {"$ifNull": ["$base_rectificada", 0]}},
+                {"$toDouble": {"$ifNull": ["$cuota_rectificada", 0]}},
+            ]},
+            {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
+        ],
+    }
+
+
 
 
 def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str) -> tuple[list[dict], list[str], dict]:
@@ -4503,35 +4601,10 @@ async def _comparativa_totales_impl(
         {"$project": {
             "_id": 0,
             "fecha_expedicion": 1,
-            "_base_raw": {
-                "$cond": [
-                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
-                    {"$reduce": {
-                        "input": {"$ifNull": ["$detalle_iva", []]},
-                        "initialValue": 0.0,
-                        "in": {"$add": [
-                            "$$value",
-                            {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
-                        ]},
-                    }},
-                    {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
-                ],
-            },
-            "_cuota_raw": {
-                "$cond": [
-                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
-                    {"$reduce": {
-                        "input": {"$ifNull": ["$detalle_iva", []]},
-                        "initialValue": 0.0,
-                        "in": {"$add": [
-                            "$$value",
-                            {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
-                        ]},
-                    }},
-                    {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
-                ],
-            },
-            "_importe_total": {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
+            # iter31: helpers efectivos — soportan R por Sustitución.
+            "_base_raw": _sii_base_efectiva_expr(),
+            "_cuota_raw": _sii_cuota_efectiva_expr(),
+            "_importe_total": _sii_importe_total_efectivo_expr(),
         }},
         {"$addFields": {
             # iter27: si base+cuota ≈ 0 pero hay importe_total, éste va a base.
@@ -5519,35 +5592,10 @@ async def _comparativa_cuadro_mensual_impl(
             "_id": 0,
             "periodo": {"$ifNull": ["$periodo", "??"]},
             "tipo_factura": {"$ifNull": ["$tipo_factura", "??"]},
-            "_base_raw": {
-                "$cond": [
-                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
-                    {"$reduce": {
-                        "input": {"$ifNull": ["$detalle_iva", []]},
-                        "initialValue": 0.0,
-                        "in": {"$add": [
-                            "$$value",
-                            {"$toDouble": {"$ifNull": ["$$this.base_imponible", 0]}},
-                        ]},
-                    }},
-                    {"$toDouble": {"$ifNull": ["$base_imponible", 0]}},
-                ],
-            },
-            "_cuota_raw": {
-                "$cond": [
-                    {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
-                    {"$reduce": {
-                        "input": {"$ifNull": ["$detalle_iva", []]},
-                        "initialValue": 0.0,
-                        "in": {"$add": [
-                            "$$value",
-                            {"$toDouble": {"$ifNull": ["$$this.cuota_repercutida", 0]}},
-                        ]},
-                    }},
-                    {"$toDouble": {"$ifNull": ["$cuota_repercutida", 0]}},
-                ],
-            },
-            "_importe_total": {"$toDouble": {"$ifNull": ["$importe_total", 0]}},
+            # iter31: helpers efectivos — soportan R por Sustitución.
+            "_base_raw": _sii_base_efectiva_expr(),
+            "_cuota_raw": _sii_cuota_efectiva_expr(),
+            "_importe_total": _sii_importe_total_efectivo_expr(),
         }},
         {"$addFields": {
             "_base": {

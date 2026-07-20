@@ -836,3 +836,56 @@ certificado digital `.pfx/.p12`.
 ### Archivos modificados
 - `/app/frontend/src/pages/Comparativa.jsx`: botón por fila + en Sheet,
   `consultaSiiRow` state, helper `buildFacturaFromRow`.
+
+## iter31 (Feb 2026) — Rectificativas por Sustitución (TipoRectificativa=S)
+
+### Problema
+AEAT en R por Sustitución (TipoFactura∈R1..R5 + TipoRectificativa=S)
+devuelve el desglose (base/cuota/importe_total) a 0 y guarda el importe
+real bajo `<ImporteRectificacion><BaseRectificada/CuotaRectificada>`.
+Nunca lo parseábamos → las R salían con base=0 en BD y aparecían como
+discrepancia falsa contra el comercial que sí tiene el importe real.
+
+Ejemplo canónico: `2TSS260600000007` — base_rect=80.33, cuota_rect=16.87.
+
+### Cambios
+1. **Colección Postman** (`backend/scripts/AEAT_SII_Loop.postman_collection.json`)
+   - Añade 3 cabeceras CSV: `TipoRectificativa`, `BaseRectificada`, `CuotaRectificada`.
+   - Extrae bloque `<ImporteRectificacion>` con `tag()`.
+2. **Parser CSV Newman** (`router_facturas._NEWMAN_COLUMN_MAP` + `_NEWMAN_NUMERIC`)
+   - Mapea las 3 columnas nuevas a los campos canónicos.
+3. **Modelo** (`factura_model.FacturaDatos`)
+   - Nuevos campos opcionales: `tipo_rectificativa`, `base_rectificada`, `cuota_rectificada`.
+4. **Parser SOAP** (`sii_client._extraer_factura_canonica`)
+   - Extrae `TipoRectificativa` + `ImporteRectificacion.BaseRectificada/CuotaRectificada`
+     del objeto zeep en la consulta unitaria y masiva.
+5. **Lógica canónica Python** (`factura_model`)
+   - `_es_rectificativa_sustitucion(doc)`: True cuando TipoFactura startsWith R y TipoRect='S'.
+   - `_canonical_amount`: R Sustitución → base_rect+cuota_rect (con fallback).
+   - `diff_facturas`: en R Sustitución promociona rectificados a base_imponible /
+     cuota_repercutida / importe_total en el doc SII antes de comparar contra
+     el comercial.
+6. **Aggregation helpers** (`router_facturas`):
+   - `_sii_base_efectiva_expr()`, `_sii_cuota_efectiva_expr()`,
+     `_sii_importe_total_efectivo_expr()` para pipelines sobre `facturas_sii`.
+   - Aplicados en `_comparativa_totales_impl` y `_comparativa_cuadro_mensual_impl`.
+7. **Backfill snapshot** (`backfill_tipo_factura.py`)
+   - `_sii_base` / `_sii_cuota` / `_sii_importe_total` denormalizados al comercial
+     ya usan los rectificados en R Sustitución → toda la lógica downstream (fast-paths,
+     resumen-origenes) queda automáticamente correcta.
+   - Nuevo campo denormalizado `_sii_tipo_rectificativa`.
+
+### Tests
+- `/app/backend/tests/test_rectificativas_sustitucion_iter31.py`: **19/19 PASS**
+  - `_canonical_amount` (Sustitución vs Diferencia vs F1 normal)
+  - `_es_rectificativa_sustitucion` (parametrizado + case-insensitive)
+  - `_base_efectiva` / `_cuota_efectiva`
+  - `diff_facturas` reconcilia R Sustitución vs comercial con importe rectificado
+  - Parser CSV Newman lee las 3 columnas nuevas
+
+### Acciones pendientes por el usuario
+1. Re-ejecutar Newman contra los períodos ya cargados con la colección
+   actualizada (habilita rectificativas + arregla wrap bug previo).
+2. `POST /api/admin/backfill-tipo-factura` para re-sincronizar snapshot SII → Comercial
+   con los importes rectificados.
+

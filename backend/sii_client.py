@@ -208,6 +208,16 @@ def _extraer_factura_canonica(primer, entrada) -> dict:
     # Esto es exacto por definición de base imponible + cuota repercutida.
     if total is None and base is not None:
         total = float(base) + float(cuota or 0)
+
+    # iter31 (2026-02): rectificativas por Sustitución. AEAT devuelve el
+    # importe real bajo <ImporteRectificacion> con BaseRectificada y
+    # CuotaRectificada. En Sustitución, <DesgloseIVA> viene a 0 y el
+    # importe económico real vive aquí.
+    tipo_rect = getattr(df, "TipoRectificativa", None) if df is not None else None
+    imp_rect = getattr(df, "ImporteRectificacion", None) if df is not None else None
+    base_rect = getattr(imp_rect, "BaseRectificada", None) if imp_rect is not None else None
+    cuota_rect = getattr(imp_rect, "CuotaRectificada", None) if imp_rect is not None else None
+
     return {
         "num_serie_factura": entrada.num_serie_factura,
         "fecha_expedicion": entrada.fecha_expedicion,
@@ -236,6 +246,9 @@ def _extraer_factura_canonica(primer, entrada) -> dict:
         "cuota_repercutida": float(cuota) if cuota is not None else None,
         "importe_total": float(total) if total is not None else None,
         "detalle_iva": detalle_iva,
+        "tipo_rectificativa": str(tipo_rect) if tipo_rect else None,
+        "base_rectificada": float(base_rect) if base_rect is not None else None,
+        "cuota_rectificada": float(cuota_rect) if cuota_rect is not None else None,
     }
 
 
