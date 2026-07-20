@@ -1057,77 +1057,109 @@ def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str)
     primera_linea = text.split("\n", 1)[0] if text else ""
     delim = "|" if "|" in primera_linea else ","
 
-    reader = csv.DictReader(io.StringIO(text), delimiter=delim)
+    # iter31 (2026-02): parseo línea-a-línea para ser resiliente a filas
+    # corruptas puntuales (celdas gigantes, comillas mal balanceadas,
+    # caracteres NUL, wrap del terminal). Antes usábamos csv.DictReader
+    # sobre el text completo → el primer error abortaba el reader y se
+    # perdían las 100k+ filas restantes silenciosamente. Ahora cada
+    # línea se parsea aislada; un fallo puntual sólo pierde esa línea.
+    lines = text.splitlines()
+    if not lines:
+        return [], ["CSV vacío"], {"delimitador": delim}
+
+    try:
+        headers = next(csv.reader([lines[0]], delimiter=delim))
+    except csv.Error as e:
+        return [], [f"Cabecera CSV corrupta: {e}"], {"delimitador": delim}
+
     debug: dict = {
         "delimitador": delim,
-        "headers_detectadas": list(reader.fieldnames or []),
+        "headers_detectadas": list(headers),
         "total_filas_brutas": 0,
+        "total_lineas_ignoradas": 0,
         "primera_fila_mapeada": None,
         "primera_fila_bruta": None,
     }
 
-    if not reader.fieldnames:
-        return [], ["CSV vacío o sin cabecera"], debug
-
-    if "NumSerieFacturaEmisor" not in reader.fieldnames:
+    if "NumSerieFacturaEmisor" not in headers:
         return [], [
             "El CSV no contiene la columna 'NumSerieFacturaEmisor'. "
-            f"Cabeceras encontradas: {reader.fieldnames}"
+            f"Cabeceras encontradas: {headers}"
         ], debug
 
     filas: list[dict] = []
     errores: list[str] = []
     filas_brutas = 0
-    try:
-        for idx, row in enumerate(reader, start=2):  # idx=2 → primera fila de datos
-            filas_brutas = idx - 1
-            if debug["primera_fila_bruta"] is None:
-                # Guardamos un sample de la fila bruta para diagnóstico
-                debug["primera_fila_bruta"] = {k: row.get(k) for k in list(row.keys())[:10]}
+    lineas_ignoradas = 0
+    n_headers = len(headers)
 
-            doc: dict = {}
-            for csv_col, canon in _NEWMAN_COLUMN_MAP.items():
-                v = row.get(csv_col)
-                if v is None:
-                    continue
-                v = str(v).strip()
-                if not v:
-                    continue
-                doc[canon] = _parse_amount_es(v) if canon in _NEWMAN_NUMERIC else v
+    for idx, line in enumerate(lines[1:], start=2):
+        if not line.strip():
+            continue  # líneas vacías: no cuentan ni como error ni como fila
+        try:
+            row_vals = next(csv.reader([line], delimiter=delim))
+        except csv.Error as e:
+            lineas_ignoradas += 1
+            # Sólo guardamos los 10 primeros errores para no inflar la
+            # respuesta HTTP con 100k mensajes en CSVs gigantes.
+            if len(errores) < 10:
+                errores.append(f"Fila {idx}: línea corrupta ({e})")
+            continue
 
-            if not doc.get("num_serie_factura"):
-                errores.append(f"Fila {idx}: num_serie_factura vacío")
+        # Empareja headers ↔ valores. Si la longitud no coincide, mapea
+        # lo que pueda (los extras se descartan, los que falten quedan
+        # vacíos). Común en filas incompletas por wrap del terminal.
+        row = dict(zip(headers, row_vals))
+        if len(row_vals) != n_headers and len(errores) < 10:
+            errores.append(
+                f"Fila {idx}: nº columnas {len(row_vals)} != esperadas "
+                f"{n_headers} (num_serie={row.get('NumSerieFacturaEmisor')})"
+            )
+
+        filas_brutas += 1
+        if debug["primera_fila_bruta"] is None:
+            debug["primera_fila_bruta"] = {k: row.get(k) for k in list(row.keys())[:10]}
+
+        doc: dict = {}
+        for csv_col, canon in _NEWMAN_COLUMN_MAP.items():
+            v = row.get(csv_col)
+            if v is None:
                 continue
-            # Normaliza el periodo del CSV ya en el momento del parseo, para que
-            # comparaciones contra filtros del UI ('05') o contra la BD ('05')
-            # sean estables aunque AEAT/Newman emitan '5' sin zero-padding.
-            if doc.get("periodo"):
-                doc["periodo"] = _norm_periodo(doc["periodo"])
-            # Saneado: el export Newman tiene un bug por el cual a veces concatena
-            # TipoImpositivo + CuotaRepercutida en la misma celda (p.ej. "211.84"
-            # cuando debería ser tipo=21, cuota=1.84). Detectamos valores fuera del
-            # rango legal y tratamos de reconstruir.
-            warn = _sanear_tipo_y_cuota(doc)
-            if warn:
-                errores.append(f"Fila {idx} ({doc.get('num_serie_factura')}): {warn}")
-            doc["nif_titular"] = nif_titular
-            if nombre_titular:
-                doc["nombre_titular"] = nombre_titular
-            filas.append(doc)
-            if debug["primera_fila_mapeada"] is None:
-                debug["primera_fila_mapeada"] = dict(doc)
-    except csv.Error as e:
-        # Captura errores de parseo (celdas demasiado largas, quoting mal,
-        # newlines corruptos). Devolvemos error legible en vez de 500 y
-        # marcamos el nº de fila donde ocurrió para que el usuario pueda
-        # inspeccionar el CSV.
-        errores.append(
-            f"Fila {filas_brutas + 2}: CSV corrupto o campo demasiado grande "
-            f"({e}). Revisa esa fila del CSV: puede tener un salto de línea "
-            "dentro de una celda o el output truncado por 'wrap' del terminal."
-        )
+            v = str(v).strip()
+            if not v:
+                continue
+            doc[canon] = _parse_amount_es(v) if canon in _NEWMAN_NUMERIC else v
+
+        if not doc.get("num_serie_factura"):
+            if len(errores) < 10:
+                errores.append(f"Fila {idx}: num_serie_factura vacío")
+            continue
+        # Normaliza el periodo del CSV ya en el momento del parseo, para que
+        # comparaciones contra filtros del UI ('05') o contra la BD ('05')
+        # sean estables aunque AEAT/Newman emitan '5' sin zero-padding.
+        if doc.get("periodo"):
+            doc["periodo"] = _norm_periodo(doc["periodo"])
+        # Saneado: el export Newman tiene un bug por el cual a veces concatena
+        # TipoImpositivo + CuotaRepercutida en la misma celda (p.ej. "211.84"
+        # cuando debería ser tipo=21, cuota=1.84). Detectamos valores fuera del
+        # rango legal y tratamos de reconstruir.
+        warn = _sanear_tipo_y_cuota(doc)
+        if warn and len(errores) < 10:
+            errores.append(f"Fila {idx} ({doc.get('num_serie_factura')}): {warn}")
+        doc["nif_titular"] = nif_titular
+        if nombre_titular:
+            doc["nombre_titular"] = nombre_titular
+        filas.append(doc)
+        if debug["primera_fila_mapeada"] is None:
+            debug["primera_fila_mapeada"] = dict(doc)
 
     debug["total_filas_brutas"] = filas_brutas
+    debug["total_lineas_ignoradas"] = lineas_ignoradas
+    if lineas_ignoradas > 10:
+        errores.append(
+            f"… y {lineas_ignoradas - 10} filas más con errores similares "
+            "(truncadas para no inflar la respuesta)."
+        )
 
     return filas, errores, debug
 
