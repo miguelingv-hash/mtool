@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, formatApiErrorDetail } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -83,29 +83,93 @@ export default function AdminMantenimiento() {
   const [wiping, setWiping] = useState(false);
 
   // iter31: regenerar denormalización SII → Comercial. Ejecuta el
-  // backfill completo (tipo_factura + snapshot _sii_* + importe_total).
-  // Necesario tras cada carga masiva CSV para que los fast-paths de la
-  // Comparativa devuelvan datos correctos y sub-segundo.
+  // backfill completo (tipo_factura + snapshot _sii_* + importe_total)
+  // en background. El backend responde inmediatamente con status=running
+  // y el frontend hace polling al endpoint /status hasta que termine
+  // (evita el timeout Cloudflare 100s para procesos largos).
   const [backfillRunning, setBackfillRunning] = useState(false);
+  const [backfillPhase, setBackfillPhase] = useState(null);
   const [backfillReport, setBackfillReport] = useState(null);
   const [backfillLastRun, setBackfillLastRun] = useState(null);
+
+  const PHASE_LABEL = {
+    tipo_factura: "Fase 1/3 · tipo_factura",
+    snapshot: "Fase 2/3 · snapshot _sii_*",
+    importe_total: "Fase 3/3 · importe_total",
+  };
+
+  // Al montar, consulta si hay un job en curso o completado recientemente.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get(
+          "/admin/backfill-tipo-factura/status",
+        );
+        if (cancelled) return;
+        if (data.status === "running") {
+          setBackfillRunning(true);
+          setBackfillPhase(data.phase);
+        } else if (data.status === "done" && data.finished_at) {
+          setBackfillReport(data);
+          setBackfillLastRun(new Date(data.finished_at));
+        }
+      } catch (_e) {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const runBackfill = async () => {
     setBackfillRunning(true);
     setBackfillReport(null);
+    setBackfillPhase("tipo_factura");
     try {
-      const { data } = await api.post("/admin/backfill-tipo-factura");
-      setBackfillReport(data);
-      setBackfillLastRun(new Date());
-      toast.success("Denormalización regenerada correctamente");
+      await api.post("/admin/backfill-tipo-factura");
     } catch (e) {
-      toast.error(
-        formatApiErrorDetail(e?.response?.data?.detail) ||
-          "Error regenerando la denormalización",
-      );
-    } finally {
-      setBackfillRunning(false);
+      const status = e?.response?.status;
+      if (status !== 409) {
+        // 409 = ya hay un job en curso: seguimos con el polling normal.
+        toast.error(
+          formatApiErrorDetail(e?.response?.data?.detail) ||
+            "Error lanzando la regeneración",
+        );
+        setBackfillRunning(false);
+        return;
+      }
     }
+
+    // Poll status cada 3s hasta status !== "running".
+    const poll = async () => {
+      try {
+        const { data } = await api.get(
+          "/admin/backfill-tipo-factura/status",
+        );
+        setBackfillPhase(data.phase);
+        if (data.status === "running") {
+          setTimeout(poll, 3000);
+          return;
+        }
+        setBackfillRunning(false);
+        if (data.status === "done") {
+          setBackfillReport(data);
+          setBackfillLastRun(
+            data.finished_at ? new Date(data.finished_at) : new Date(),
+          );
+          toast.success("Denormalización regenerada correctamente");
+        } else if (data.status === "error") {
+          toast.error(
+            `Error en la regeneración: ${data.error || "desconocido"}`,
+          );
+        }
+      } catch (_e) {
+        setTimeout(poll, 5000); // reintenta si el status endpoint falla
+      }
+    };
+    setTimeout(poll, 2000);
   };
 
   const dryRun = async (scope) => {
@@ -208,7 +272,9 @@ export default function AdminMantenimiento() {
               {backfillRunning ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Regenerando… (1-2 min con 1M docs)
+                  {backfillPhase
+                    ? PHASE_LABEL[backfillPhase] || "Regenerando…"
+                    : "Regenerando…"}
                 </>
               ) : (
                 <>
@@ -221,6 +287,12 @@ export default function AdminMantenimiento() {
               <div className="flex items-center gap-1.5 text-xs text-emerald-800">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 Última ejecución: {backfillLastRun.toLocaleString("es-ES")}
+              </div>
+            )}
+            {backfillRunning && (
+              <div className="text-xs text-emerald-700">
+                Corre en segundo plano · 1-2 min con 1M docs. Puedes cerrar
+                esta pestaña; al volver verás el resultado.
               </div>
             )}
           </div>

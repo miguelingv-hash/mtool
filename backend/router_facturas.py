@@ -17,7 +17,7 @@ El CSV escribe en `db.facturas_comercial`. La comparativa hace join por
 from __future__ import annotations
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from typing import Optional
 from datetime import datetime, timezone
 import asyncio
@@ -5613,19 +5613,27 @@ async def comparativa_cuadro_mensual(
     )
 
 
-@router.post("/admin/backfill-tipo-factura")
-async def admin_backfill_tipo_factura(
-    nif_titular: Optional[str] = None,
-    _: dict = Depends(require_permission("sii.wipe")),
-):
-    """Lanza el backfill de `tipo_factura` desde SII a Comercial.
+# iter31 (2026-02): Job tracker en memoria para el backfill async.
+# Cloudflare corta requests > 100s → ejecutamos en background con polling.
+# Simple in-memory: sólo 1 job activo a la vez, resultado en memoria hasta el
+# siguiente run. Suficiente para operación admin ocasional.
+_BACKFILL_JOB: dict = {
+    "status": "idle",       # idle | running | done | error
+    "started_at": None,
+    "finished_at": None,
+    "phase": None,          # tipo_factura | snapshot | importe_total | None
+    "report": None,
+    "report_snapshot": None,
+    "report_importe_total": None,
+    "error": None,
+    "nif_titular": None,
+}
 
-    Ejecución síncrona (bloquea el request hasta terminar; con 1M docs
-    puede tardar 1-2 min). El endpoint devuelve el reporte con contadores.
 
-    Idempotente: se puede lanzar múltiples veces. Sólo `POST` para
-    evitar disparos accidentales desde el navegador.
-    """
+async def _run_backfill_async(nif_titular: Optional[str]) -> None:
+    """Ejecuta las 3 fases del backfill en segundo plano y actualiza
+    `_BACKFILL_JOB`. Cualquier excepción se captura y se marca en el
+    campo `error` para que el frontend pueda mostrarla."""
     from backfill_tipo_factura import (
         backfill_tipo_factura_comercial,
         backfill_snapshot_sii_en_comercial,
@@ -5633,24 +5641,92 @@ async def admin_backfill_tipo_factura(
         ensure_indexes_iter25,
         ensure_indexes_iter26,
     )
-    await ensure_indexes_iter25(_db, _logger)
-    await ensure_indexes_iter26(_db, _logger)
-    report_tipo = await backfill_tipo_factura_comercial(
-        _db, _logger, nif_titular=nif_titular,
-    )
-    report_snapshot = await backfill_snapshot_sii_en_comercial(
-        _db, _logger, nif_titular=nif_titular,
-    )
-    report_importe = await backfill_importe_total_comercial(
-        _db, _logger, nif_titular=nif_titular,
-    )
-    invalidate_comparativa_cache()
+    try:
+        await ensure_indexes_iter25(_db, _logger)
+        await ensure_indexes_iter26(_db, _logger)
+
+        _BACKFILL_JOB["phase"] = "tipo_factura"
+        _BACKFILL_JOB["report"] = await backfill_tipo_factura_comercial(
+            _db, _logger, nif_titular=nif_titular,
+        )
+        _BACKFILL_JOB["phase"] = "snapshot"
+        _BACKFILL_JOB["report_snapshot"] = await backfill_snapshot_sii_en_comercial(
+            _db, _logger, nif_titular=nif_titular,
+        )
+        _BACKFILL_JOB["phase"] = "importe_total"
+        _BACKFILL_JOB["report_importe_total"] = await backfill_importe_total_comercial(
+            _db, _logger, nif_titular=nif_titular,
+        )
+        invalidate_comparativa_cache()
+
+        _BACKFILL_JOB["status"] = "done"
+        _BACKFILL_JOB["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _BACKFILL_JOB["phase"] = None
+    except Exception as e:  # pragma: no cover
+        _logger.exception("[backfill] async job falló")
+        _BACKFILL_JOB["status"] = "error"
+        _BACKFILL_JOB["error"] = str(e)
+        _BACKFILL_JOB["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+@router.post("/admin/backfill-tipo-factura")
+async def admin_backfill_tipo_factura(
+    nif_titular: Optional[str] = None,
+    _: dict = Depends(require_permission("sii.wipe")),
+):
+    """Lanza el backfill de `tipo_factura` desde SII a Comercial.
+
+    iter31 (2026-02): ejecución **asíncrona en background**. Antes era
+    síncrono y con 1M docs tardaba 1-2 min → Cloudflare cortaba la
+    conexión con 502 "invalid or incomplete response". Ahora devolvemos
+    inmediatamente `{status: "running"}` y el frontend consulta el
+    endpoint `GET /admin/backfill-tipo-factura/status` para polling.
+
+    Idempotente: se puede lanzar múltiples veces. Si ya hay un job en
+    curso, devuelve 409 con el estado actual.
+    """
+    if _BACKFILL_JOB["status"] == "running":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Ya hay un backfill en curso",
+                "job": _BACKFILL_JOB,
+            },
+        )
+
+    _BACKFILL_JOB.update({
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "phase": "tipo_factura",
+        "report": None,
+        "report_snapshot": None,
+        "report_importe_total": None,
+        "error": None,
+        "nif_titular": nif_titular,
+    })
+    # Fire-and-forget: la task vive en el event loop del proceso backend.
+    asyncio.create_task(_run_backfill_async(nif_titular))
+
     return {
         "ok": True,
-        "report": report_tipo,
-        "report_snapshot": report_snapshot,
-        "report_importe_total": report_importe,
+        "status": "running",
+        "message": (
+            "Backfill lanzado en segundo plano. Consulta el endpoint "
+            "/admin/backfill-tipo-factura/status cada pocos segundos "
+            "para ver el progreso."
+        ),
+        "job": _BACKFILL_JOB,
     }
+
+
+@router.get("/admin/backfill-tipo-factura/status")
+async def admin_backfill_tipo_factura_status(
+    _: dict = Depends(require_permission("sii.wipe")),
+):
+    """Devuelve el estado actual del último backfill (o el en curso).
+    Utilizado por el frontend para polling después de lanzar el POST."""
+    return _BACKFILL_JOB
 
 
 async def _comparativa_cuadro_mensual_impl(
