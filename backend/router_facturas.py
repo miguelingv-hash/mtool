@@ -4027,10 +4027,39 @@ async def _comparativa_impl(
             con exclusión de líneas tipo_impositivo=0/null) en vez del
             campo raw, para alinear con la lógica de Python `diff_facturas`
             cuando `excluir_comercial_tipo_iva_cero=True`.
+
+            iter31 (2026-02): para R por Sustitución, desactivamos la
+            inversión de signo (SIGLO guarda estas R con signo positivo,
+            contrario a las F1/F2 invertidas). Sin este ajuste, la
+            aggregation marcaría "discrepancia" con Δ = 2×importe.
             """
             sii_snapshot = SNAPSHOT_MAP.get(sii_field, f"_sii_{sii_field}")
             com_field = COM_NETO_MAP.get(base_field_com, base_field_com)
+            # Resta directa (sin inversión) — usada por R Sustitución y
+            # por orígenes no invertidos.
+            direct_cmp = {"$lte": [
+                {"$abs": {"$subtract": [
+                    {"$ifNull": [f"${sii_snapshot}", 0]},
+                    {"$ifNull": [f"${com_field}", 0]},
+                ]}},
+                0.01,
+            ]}
             branches = []
+            # Primer branch: R por Sustitución → SIEMPRE resta directa,
+            # sin importar el origen ni el flag de inversión.
+            branches.append({
+                "case": {"$and": [
+                    {"$eq": [
+                        {"$substr": [{"$ifNull": ["$tipo_factura", ""]}, 0, 1]},
+                        "R",
+                    ]},
+                    {"$eq": [
+                        {"$toUpper": {"$ifNull": ["$_sii_tipo_rectificativa", ""]}},
+                        "S",
+                    ]},
+                ]},
+                "then": direct_cmp,
+            })
             for og in origenes_invertidos:
                 branches.append({
                     "case": {"$eq": ["$origen_comercial", og]},
@@ -4042,16 +4071,7 @@ async def _comparativa_impl(
                         0.01,
                     ]},
                 })
-            direct_cmp = {"$lte": [
-                {"$abs": {"$subtract": [
-                    {"$ifNull": [f"${sii_snapshot}", 0]},
-                    {"$ifNull": [f"${com_field}", 0]},
-                ]}},
-                0.01,
-            ]}
-            if branches:
-                return {"$switch": {"branches": branches, "default": direct_cmp}}
-            return direct_cmp
+            return {"$switch": {"branches": branches, "default": direct_cmp}}
 
         # iter27: expresión "coincide por importe canónico" (fallback).
         # Cuando SII o Comercial no tienen desglose base/cuota pero sí
@@ -4817,6 +4837,21 @@ async def _comparativa_totales_impl(
             "_id": 0,
             "origen": {"$ifNull": ["$origen_comercial", "DESCONOCIDO"]},
             "fecha_expedicion": 1,
+            # iter31: flag para separar R por Sustitución del resto.
+            # SIGLO guarda estas R con signo positivo (contrario a F1/F2)
+            # → no debemos aplicarles inversión de signo.
+            "_es_r_sust": {
+                "$and": [
+                    {"$eq": [
+                        {"$substr": [{"$ifNull": ["$tipo_factura", ""]}, 0, 1]},
+                        "R",
+                    ]},
+                    {"$eq": [
+                        {"$toUpper": {"$ifNull": ["$_sii_tipo_rectificativa", ""]}},
+                        "S",
+                    ]},
+                ],
+            },
             "_base_raw": {
                 "$cond": [
                     {"$gt": [{"$size": {"$ifNull": ["$detalle_iva", []]}}, 0]},
@@ -4849,7 +4884,7 @@ async def _comparativa_totales_impl(
             "_cuota": "$_cuota_raw",
         }},
         {"$group": {
-            "_id": "$origen",
+            "_id": {"origen": "$origen", "es_r_sust": "$_es_r_sust"},
             "base": {"$sum": "$_base"},
             "cuota": {"$sum": "$_cuota"},
             "n_facturas": {"$sum": 1},
@@ -4861,21 +4896,34 @@ async def _comparativa_totales_impl(
     ).to_list(length=None)
 
     por_origen: dict[str, dict] = {}
+    # iter31: agrupamos por (origen, es_r_sust) → sumamos aplicando
+    # inversión sólo al bucket "normal" y dejando el bucket R Sustitución
+    # intacto. SIGLO guarda las R por Sustitución con signo positivo
+    # (contrario a las F1/F2 invertidas), por lo que la inversión global
+    # las descuadraría por 2×importe. Fix quirúrgico.
     for r in com_res:
-        origen = r["_id"] or "DESCONOCIDO"
+        key = r["_id"] or {}
+        origen = key.get("origen") or "DESCONOCIDO"
+        es_r_sust = bool(key.get("es_r_sust"))
         base = float(r.get("base") or 0)
         cuota = float(r.get("cuota") or 0)
         invertido = bool(inv_map.get(origen))
-        if invertido:
+        if invertido and not es_r_sust:
             base = -base
             cuota = -cuota
-        por_origen[origen] = {
-            "base": base,
-            "cuota": cuota,
-            "n_facturas": int(r.get("n_facturas") or 0),
+        acc = por_origen.setdefault(origen, {
+            "base": 0.0,
+            "cuota": 0.0,
+            "n_facturas": 0,
             "invertido": invertido,
-            "ultima_fecha_expedicion": r.get("ultima_fecha_expedicion"),
-        }
+            "ultima_fecha_expedicion": None,
+        })
+        acc["base"] += base
+        acc["cuota"] += cuota
+        acc["n_facturas"] += int(r.get("n_facturas") or 0)
+        fech = r.get("ultima_fecha_expedicion")
+        if fech and (acc["ultima_fecha_expedicion"] is None or fech > acc["ultima_fecha_expedicion"]):
+            acc["ultima_fecha_expedicion"] = fech
 
     com_base = sum(o["base"] for o in por_origen.values())
     com_cuota = sum(o["cuota"] for o in por_origen.values())

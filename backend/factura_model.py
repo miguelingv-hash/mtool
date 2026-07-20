@@ -420,6 +420,15 @@ def diff_facturas(
     # importe rectificado en base/cuota top-level), "promocionamos" los
     # rectificados a top-level en el doc SII antes del diff. NO tocamos
     # `b` (comercial) — el ajuste sólo aplica al lado SII.
+    #
+    # Extra: SIGLO guarda las R por Sustitución con signo POSITIVO
+    # (contrario a las F1/F2 emitidas normales que van con signo negativo).
+    # Cuando el flag `invertir_signo_por_origen[SIGLO]=True` está activo,
+    # `diff_facturas` compararía `|SII + Com|` en vez de `|SII − Com|` →
+    # marcaría falsa discrepancia con Δ=2×importe. Fix: para R por
+    # Sustitución desactivamos la inversión localmente. También
+    # sintetizamos un `detalle_iva` SII con los rectificados para que la
+    # comparación por tramos IVA cuadre.
     if _es_rectificativa_sustitucion(a):
         br = _parse_amount(a.get("base_rectificada"))
         cr = _parse_amount(a.get("cuota_rectificada"))
@@ -432,6 +441,26 @@ def diff_facturas(
             a["importe_total"] = round(
                 (br or 0.0) + (cr or 0.0), 2,
             )
+            # Sintetiza detalle_iva a partir del rectificado, tomando el
+            # tipo_impositivo del primer tramo si existe (ya que en la R
+            # por Sustitución el desglose oficial viene con base=cuota=0
+            # pero mantiene el tipo). Si no hay tipo detectable, se usa
+            # cuota/base como ratio o simplemente None.
+            tipo_orig = None
+            det_orig = a.get("detalle_iva")
+            if isinstance(det_orig, list) and det_orig:
+                tipo_orig = det_orig[0].get("tipo_impositivo")
+            if tipo_orig is None and br and abs(br) > 0.01:
+                # cuota / base ≈ tipo_impositivo (%)
+                tipo_orig = round((cr or 0) / br * 100, 2) if br else None
+            a["detalle_iva"] = [{
+                "tipo_impositivo": tipo_orig,
+                "base_imponible": br,
+                "cuota_repercutida": cr,
+                "origen": "sii_rectificada",
+            }]
+        # Fix señalado arriba: neutralizamos la inversión para esta R.
+        invertir = False
 
     # Filtra las líneas comerciales con tipo_impositivo vacío o cero ANTES de
     # comparar (cuando el flag está activo). Estas líneas se consideran "no

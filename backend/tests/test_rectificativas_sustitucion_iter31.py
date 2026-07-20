@@ -184,6 +184,79 @@ def test_diff_r_sustitucion_detecta_diferencia_real():
     )
 
 
+def test_diff_r_sustitucion_ignora_inversion_signo_siglo():
+    """iter31 fix: SIGLO guarda R por Sustitución con signo POSITIVO
+    (contrario a F1/F2 que van invertidas). Aunque
+    invertir_signo_por_origen[SIGLO]=True, la comparación de R Sust debe
+    ignorar la inversión y usar resta directa.
+
+    Caso real reportado por usuario con `2TSS260600000007`.
+    """
+    sii = {
+        "num_serie_factura": "2TSS260600000007",
+        "tipo_factura": "R5",
+        "tipo_rectificativa": "S",
+        "base_imponible": 0.0,
+        "cuota_repercutida": 0.0,
+        "importe_total": 0.0,
+        "base_rectificada": 80.33,
+        "cuota_rectificada": 16.87,
+        "tipo_impositivo": 21.0,
+    }
+    com = {
+        "num_serie_factura": "2TSS260600000007",
+        "tipo_factura": "R5",
+        # Positivo (así lo guarda SIGLO para las R Sustitución)
+        "base_imponible": 80.33,
+        "cuota_repercutida": 16.87,
+        "importe_total": 97.20,
+        "tipo_impositivo": 21.0,
+        "origen_comercial": "SIGLO",
+    }
+    config = {
+        "invertir_signo_por_origen": {"SIGLO": True, "SAP": True},
+        "campos_comparados": ["base_imponible", "cuota_repercutida"],
+    }
+    diff = diff_facturas(sii, com, config)
+    diff_reales = {k: v for k, v in diff.items() if not k.startswith("_")}
+    assert not diff_reales, (
+        "R por Sustitución debería reconciliar aunque el origen tenga "
+        f"flag invertido=True. Diffs: {diff_reales}"
+    )
+
+
+def test_diff_f1_normal_signo_invertido_sigue_funcionando():
+    """Verificación de no-regresión: F1 con SIGLO invertido sigue
+    reconciliando con signo opuesto (comercial negativo → +80.33)."""
+    sii = {
+        "num_serie_factura": "F1-NORMAL",
+        "tipo_factura": "F1",
+        "base_imponible": 80.33,
+        "cuota_repercutida": 16.87,
+        "importe_total": 97.20,
+        "tipo_impositivo": 21.0,
+    }
+    com = {
+        "num_serie_factura": "F1-NORMAL",
+        "tipo_factura": "F1",
+        "base_imponible": -80.33,
+        "cuota_repercutida": -16.87,
+        "importe_total": -97.20,
+        "tipo_impositivo": 21.0,
+        "origen_comercial": "SIGLO",
+    }
+    config = {
+        "invertir_signo_por_origen": {"SIGLO": True, "SAP": True},
+        "campos_comparados": ["base_imponible", "cuota_repercutida"],
+    }
+    diff = diff_facturas(sii, com, config)
+    diff_reales = {k: v for k, v in diff.items() if not k.startswith("_")}
+    assert not diff_reales, (
+        "F1 con SIGLO invertido debería seguir reconciliando "
+        f"(regresión). Diffs: {diff_reales}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 5. Parser CSV Newman lee columnas rectificativas
 # ---------------------------------------------------------------------------
