@@ -3275,6 +3275,41 @@ def _aplicar_exclusion_tipo_iva_cero(com: dict, config: Optional[dict]) -> dict:
     }
 
 
+def _promocionar_rectificativa_sii(sii: Optional[dict]) -> Optional[dict]:
+    """Promociona `base_rectificada`/`cuota_rectificada` a los campos
+    top-level cuando el SII es una R por Sustitución. Devuelve una copia
+    superficial del doc; no muta el original.
+
+    iter31 (2026-02): Para R por Sustitución (`TipoRectificativa='S'`)
+    AEAT devuelve base/cuota/importe_total a 0 y guarda el importe real
+    en `<ImporteRectificacion>`. Esta función lo sube a top-level para
+    que:
+      - `diff_facturas` compare rectificados vs comercial correctamente.
+      - El Sheet de detalle en UI muestre los valores efectivos en las
+        filas `base_imponible` / `cuota_repercutida` / `importe_total`
+        del SII (ya no aparece "SII: 0" cuando debería ser 80.33).
+    """
+    if not sii:
+        return sii
+    from factura_model import _es_rectificativa_sustitucion  # noqa: WPS433
+    if not _es_rectificativa_sustitucion(sii):
+        return sii
+    br = sii.get("base_rectificada")
+    cr = sii.get("cuota_rectificada")
+    if br is None and cr is None:
+        return sii
+    out = dict(sii)
+    if br is not None:
+        out["base_imponible"] = br
+    if cr is not None:
+        out["cuota_repercutida"] = cr
+    br_f = float(br or 0)
+    cr_f = float(cr or 0)
+    if abs(br_f) > 0.01 or abs(cr_f) > 0.01:
+        out["importe_total"] = round(br_f + cr_f, 2)
+    return out
+
+
 def _build_row_from_docs(
     sii: Optional[dict],
     com: Optional[dict],
@@ -3282,6 +3317,8 @@ def _build_row_from_docs(
     config: Optional[dict] = None,
 ) -> dict:
     com = _aplicar_exclusion_tipo_iva_cero(com, config)
+    # iter31: normaliza el SII para R por Sustitución antes de exponerlo.
+    sii = _promocionar_rectificativa_sii(sii)
     if sii and com:
         d = diff_facturas(sii, com, config)
         # iter27: si el único contenido del diff es la marca de reconciliación
