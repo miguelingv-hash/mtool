@@ -30,7 +30,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { toast } from "sonner";
-import { AlertTriangle, Loader2, Trash2, Database, FileSpreadsheet, FileSearch } from "lucide-react";
+import { AlertTriangle, Loader2, Trash2, Database, FileSpreadsheet, FileSearch, RefreshCw, CheckCircle2 } from "lucide-react";
 
 /**
  * Página de mantenimiento administrativo del módulo SII.
@@ -81,6 +81,32 @@ export default function AdminMantenimiento() {
   const [confirmScope, setConfirmScope] = useState("todo");
   const [confirmText, setConfirmText] = useState("");
   const [wiping, setWiping] = useState(false);
+
+  // iter31: regenerar denormalización SII → Comercial. Ejecuta el
+  // backfill completo (tipo_factura + snapshot _sii_* + importe_total).
+  // Necesario tras cada carga masiva CSV para que los fast-paths de la
+  // Comparativa devuelvan datos correctos y sub-segundo.
+  const [backfillRunning, setBackfillRunning] = useState(false);
+  const [backfillReport, setBackfillReport] = useState(null);
+  const [backfillLastRun, setBackfillLastRun] = useState(null);
+
+  const runBackfill = async () => {
+    setBackfillRunning(true);
+    setBackfillReport(null);
+    try {
+      const { data } = await api.post("/admin/backfill-tipo-factura");
+      setBackfillReport(data);
+      setBackfillLastRun(new Date());
+      toast.success("Denormalización regenerada correctamente");
+    } catch (e) {
+      toast.error(
+        formatApiErrorDetail(e?.response?.data?.detail) ||
+          "Error regenerando la denormalización",
+      );
+    } finally {
+      setBackfillRunning(false);
+    }
+  };
 
   const dryRun = async (scope) => {
     setLoadingScope(scope);
@@ -149,6 +175,80 @@ export default function AdminMantenimiento() {
           Operaciones administrativas avanzadas. Úsalas con cuidado.
         </p>
       </header>
+
+      {/* iter31 · Denormalización SII → Comercial (operación no destructiva) */}
+      <Card
+        id="denormalizacion"
+        className="border-emerald-200 bg-emerald-50/30"
+        data-testid="backfill-denorm-card"
+      >
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-emerald-900 text-lg">
+            <RefreshCw className="h-5 w-5 text-emerald-700" />
+            Regenerar denormalización SII → Comercial
+          </CardTitle>
+          <CardDescription>
+            Recalcula los campos snapshot (`tipo_factura`, `_has_sii`,
+            `_sii_base`, `_sii_cuota`, `_sii_importe_total`,
+            `_sii_tipo_rectificativa`, `importe_total` derivado) que
+            usan los fast-paths de la Comparativa. <b>Ejecuta esto
+            después de cada carga masiva de CSVs</b> (SII o Comercial)
+            para que el listado, KPIs y agregaciones muestren datos
+            correctos. Operación idempotente y no destructiva.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-3">
+            <Button
+              onClick={runBackfill}
+              disabled={backfillRunning}
+              className="bg-emerald-600 hover:bg-emerald-700"
+              data-testid="backfill-denorm-run"
+            >
+              {backfillRunning ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Regenerando… (1-2 min con 1M docs)
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                  Regenerar ahora
+                </>
+              )}
+            </Button>
+            {backfillLastRun && !backfillRunning && (
+              <div className="flex items-center gap-1.5 text-xs text-emerald-800">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Última ejecución: {backfillLastRun.toLocaleString("es-ES")}
+              </div>
+            )}
+          </div>
+
+          {backfillReport && (
+            <div
+              className="border border-emerald-200 bg-white p-3 space-y-2 text-xs"
+              data-testid="backfill-denorm-report"
+            >
+              <div className="font-medium text-emerald-900">
+                Resultado
+              </div>
+              <BackfillReportBlock
+                label="Fase 1 · tipo_factura"
+                data={backfillReport.report}
+              />
+              <BackfillReportBlock
+                label="Fase 2 · snapshot _sii_*"
+                data={backfillReport.report_snapshot}
+              />
+              <BackfillReportBlock
+                label="Fase 3 · importe_total comercial"
+                data={backfillReport.report_importe_total}
+              />
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Alert
         variant="destructive"
@@ -357,3 +457,30 @@ export default function AdminMantenimiento() {
     </div>
   );
 }
+
+function BackfillReportBlock({ label, data }) {
+  if (!data) return null;
+  const entries = Object.entries(data).filter(
+    ([k]) => !k.startsWith("_") && k !== "ok",
+  );
+  return (
+    <div className="border-l-2 border-emerald-400 pl-2">
+      <div className="text-[11px] font-medium text-slate-700">{label}</div>
+      <div className="text-[10px] font-mono text-slate-600 grid grid-cols-2 gap-x-4">
+        {entries.map(([k, v]) => (
+          <div key={k}>
+            <span className="text-slate-500">{k}:</span>{" "}
+            <span className="text-slate-900">
+              {typeof v === "number"
+                ? v.toLocaleString("es-ES")
+                : typeof v === "object"
+                ? JSON.stringify(v)
+                : String(v)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+

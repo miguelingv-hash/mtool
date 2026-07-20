@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, Link } from "react-router-dom";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ShieldCheck, Upload, CalendarRange } from "lucide-react";
+import { ShieldCheck, Upload, CalendarRange, RefreshCw, Info } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 
 import ConciliacionNewman from "@/pages/ConciliacionNewman";
@@ -70,6 +70,29 @@ export default function CargaDatos() {
           ERP (SAP FI / SIGLO) y el flujo masivo de Conciliación Newman.
         </p>
       </div>
+
+      {hasPermission("sii.wipe") && (
+        <div
+          className="mb-6 border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-3"
+          data-testid="carga-datos-denorm-notice"
+        >
+          <Info className="h-4 w-4 text-amber-700 mt-0.5 shrink-0" />
+          <div className="flex-1 text-xs text-amber-900 leading-relaxed">
+            <b>Tras cada carga masiva</b>, ejecuta <b>&quot;Regenerar
+            denormalización&quot;</b> para que los fast-paths de la Comparativa
+            (listado, KPIs, resumen por origen) devuelvan los datos actualizados
+            en tiempo sub-segundo.
+          </div>
+          <Link
+            to="/admin/mantenimiento#denormalizacion"
+            className="text-xs bg-amber-900 text-amber-50 hover:bg-amber-800 px-3 py-1.5 flex items-center gap-1.5 whitespace-nowrap"
+            data-testid="carga-datos-goto-denorm"
+          >
+            <RefreshCw className="h-3 w-3" />
+            Regenerar ahora
+          </Link>
+        </div>
+      )}
 
       <Tabs value={tab} onValueChange={handleTabChange} className="w-full">
         <TabsList
