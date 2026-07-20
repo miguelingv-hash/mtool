@@ -1041,6 +1041,14 @@ def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str)
     Detecta automáticamente el delimitador (`|` o `,`). Cada fila válida
     se mapea a campos canónicos (mismo schema que facturas_sii).
     """
+    # iter31 (2026-02): el CSV extraído de Newman puede tener celdas muy
+    # largas (descripciones, XML CSV AEAT truncado, etc). Python csv por
+    # defecto limita a 131.072 chars por campo → `_csv.Error: field larger
+    # than field limit`. Subimos el límite a 10 MB por celda (suficiente
+    # para cualquier campo razonable y con hard cap para no permitir OOM
+    # por un CSV malformado a línea única).
+    csv.field_size_limit(10 * 1024 * 1024)
+
     try:
         text = contenido.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -1070,43 +1078,54 @@ def _parsear_csv_newman(contenido: bytes, nif_titular: str, nombre_titular: str)
     filas: list[dict] = []
     errores: list[str] = []
     filas_brutas = 0
-    for idx, row in enumerate(reader, start=2):  # idx=2 → primera fila de datos
-        filas_brutas = idx - 1
-        if debug["primera_fila_bruta"] is None:
-            # Guardamos un sample de la fila bruta para diagnóstico
-            debug["primera_fila_bruta"] = {k: row.get(k) for k in list(row.keys())[:10]}
+    try:
+        for idx, row in enumerate(reader, start=2):  # idx=2 → primera fila de datos
+            filas_brutas = idx - 1
+            if debug["primera_fila_bruta"] is None:
+                # Guardamos un sample de la fila bruta para diagnóstico
+                debug["primera_fila_bruta"] = {k: row.get(k) for k in list(row.keys())[:10]}
 
-        doc: dict = {}
-        for csv_col, canon in _NEWMAN_COLUMN_MAP.items():
-            v = row.get(csv_col)
-            if v is None:
-                continue
-            v = str(v).strip()
-            if not v:
-                continue
-            doc[canon] = _parse_amount_es(v) if canon in _NEWMAN_NUMERIC else v
+            doc: dict = {}
+            for csv_col, canon in _NEWMAN_COLUMN_MAP.items():
+                v = row.get(csv_col)
+                if v is None:
+                    continue
+                v = str(v).strip()
+                if not v:
+                    continue
+                doc[canon] = _parse_amount_es(v) if canon in _NEWMAN_NUMERIC else v
 
-        if not doc.get("num_serie_factura"):
-            errores.append(f"Fila {idx}: num_serie_factura vacío")
-            continue
-        # Normaliza el periodo del CSV ya en el momento del parseo, para que
-        # comparaciones contra filtros del UI ('05') o contra la BD ('05')
-        # sean estables aunque AEAT/Newman emitan '5' sin zero-padding.
-        if doc.get("periodo"):
-            doc["periodo"] = _norm_periodo(doc["periodo"])
-        # Saneado: el export Newman tiene un bug por el cual a veces concatena
-        # TipoImpositivo + CuotaRepercutida en la misma celda (p.ej. "211.84"
-        # cuando debería ser tipo=21, cuota=1.84). Detectamos valores fuera del
-        # rango legal y tratamos de reconstruir.
-        warn = _sanear_tipo_y_cuota(doc)
-        if warn:
-            errores.append(f"Fila {idx} ({doc.get('num_serie_factura')}): {warn}")
-        doc["nif_titular"] = nif_titular
-        if nombre_titular:
-            doc["nombre_titular"] = nombre_titular
-        filas.append(doc)
-        if debug["primera_fila_mapeada"] is None:
-            debug["primera_fila_mapeada"] = dict(doc)
+            if not doc.get("num_serie_factura"):
+                errores.append(f"Fila {idx}: num_serie_factura vacío")
+                continue
+            # Normaliza el periodo del CSV ya en el momento del parseo, para que
+            # comparaciones contra filtros del UI ('05') o contra la BD ('05')
+            # sean estables aunque AEAT/Newman emitan '5' sin zero-padding.
+            if doc.get("periodo"):
+                doc["periodo"] = _norm_periodo(doc["periodo"])
+            # Saneado: el export Newman tiene un bug por el cual a veces concatena
+            # TipoImpositivo + CuotaRepercutida en la misma celda (p.ej. "211.84"
+            # cuando debería ser tipo=21, cuota=1.84). Detectamos valores fuera del
+            # rango legal y tratamos de reconstruir.
+            warn = _sanear_tipo_y_cuota(doc)
+            if warn:
+                errores.append(f"Fila {idx} ({doc.get('num_serie_factura')}): {warn}")
+            doc["nif_titular"] = nif_titular
+            if nombre_titular:
+                doc["nombre_titular"] = nombre_titular
+            filas.append(doc)
+            if debug["primera_fila_mapeada"] is None:
+                debug["primera_fila_mapeada"] = dict(doc)
+    except csv.Error as e:
+        # Captura errores de parseo (celdas demasiado largas, quoting mal,
+        # newlines corruptos). Devolvemos error legible en vez de 500 y
+        # marcamos el nº de fila donde ocurrió para que el usuario pueda
+        # inspeccionar el CSV.
+        errores.append(
+            f"Fila {filas_brutas + 2}: CSV corrupto o campo demasiado grande "
+            f"({e}). Revisa esa fila del CSV: puede tener un salto de línea "
+            "dentro de una celda o el output truncado por 'wrap' del terminal."
+        )
 
     debug["total_filas_brutas"] = filas_brutas
 
