@@ -906,10 +906,16 @@ def _sanear_tipo_y_cuota(doc: dict) -> Optional[str]:
 
 
 def _parse_amount_es(raw) -> Optional[float]:
-    """Acepta '1.234,56', '1234,56', '1234.56'. Vacío → None."""
+    """Acepta '1.234,56', '1234,56', '1234.56'. Vacío → None.
+
+    iter31: defensa en profundidad — algunos exports Newman envuelven
+    la fila entera en comillas simples (`console.log(fila)`) → el
+    último campo llegaba como `8.44'` y `float()` fallaba silenciosamente
+    devolviendo None. Ahora limpiamos comillas simples/dobles/backticks
+    residuales y espacios antes de parsear."""
     if raw is None:
         return None
-    s = str(raw).strip()
+    s = str(raw).strip().strip("'\"`").strip()
     if not s:
         return None
     if s.count(",") == 1 and s.count(".") >= 1:

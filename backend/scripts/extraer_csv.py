@@ -90,6 +90,18 @@ def reensamblar_marcadores(lineas):
         nonlocal actual_tipo, actual_buffer
         if actual_tipo is not None:
             texto = "".join(actual_buffer).strip()
+            # Newman a veces imprime la fila con `console.log(fila)` cuando
+            # `fila` es un string, y envuelve la salida en comillas simples
+            # o dobles (`'CSVROW:...|8.44'`). Al llegar aquí el prefijo ya
+            # está removido (por MARKER_ROW), pero pueden quedar comillas
+            # sueltas al principio o al final que se pegan al primer/último
+            # campo del CSV → romper el parseo numérico (p.ej.
+            # `cuota_rectificada = "8.44'"` → None). Las eliminamos.
+            texto = texto.strip("'\"`")
+            # También limpiamos rastros ANSI que se hayan colado dentro
+            # de las líneas de continuación (los bordes ya se quitan
+            # en normalizar_lineas, pero los códigos escapados restantes
+            # pueden quedar dentro).
             if texto:
                 bloques.append((actual_tipo, texto))
         actual_tipo = None
