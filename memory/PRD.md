@@ -776,3 +776,37 @@ Coincidencias totales tras todos los fixes:
 - Ruta protegida en `App.js` (`comparativa.view`)
 - Nav item `nav-manual-monitor-sii` en Layout.jsx
 
+
+## iter29 (Feb 2026) — Fix inconsistencia solo_sii vs config
+
+### Bug reportado
+El KPI banner mostraba "3928 con contraparte de 3929" (sugiriendo 1
+factura orfana) para el filtro F2 + BASER, pero el listado con
+`estado=solo_sii` decía "Ninguna factura presente sólo en SII".
+
+### Causa raíz
+El fast-path `estado=solo_sii` hacía `$lookup` con `foreignField=num_serie_factura`
+sin aplicar `filtro_com`. Cuando la config tiene `excluir_comercial_base_cero=True`,
+las comerciales con `base_imponible=0` se excluyen del universo comercial en el
+resumen (por lo que ese num_serie aparece como "sin contraparte"), pero el
+`$lookup` las veía → decía "SII tiene contraparte" → 0 orfanas.
+
+Caso concreto detectado: `1TSS260600000552` (SIGLO, F2, BASER, base=cuota=0€).
+
+### Fix
+`/app/backend/router_facturas.py` líneas 3679-3745 (aprox):
+- `$lookup` ahora usa `pipeline` con `let: {ns}` y `$match` que aplica todos
+  los criterios de `filtro_com` (excluir_comercial_base_cero, tipo_factura,
+  nif, ejercicio, periodo) + `$expr: {$eq: [num_serie_factura, $$ns]}`.
+- `$limit: 1` corta temprano (solo se necesita saber si HAY match).
+- `$match: {_com_docs: {$size: 0}}` filtra los SII orfanos.
+
+### Tests de regresión
+`/app/backend/tests/test_solo_sii_config_iter29.py`:
+- `test_solo_sii_respeta_excluir_base_cero`: valida que un SII cuyo comercial
+  fue excluido por config aparece como solo_sii.
+- `test_bundle_consistente_matches_num_serie_vs_solo_sii`: cota fuerte
+  `total_solo_sii == sii_n - matches_num_serie`.
+
+Ambos PASS (2/2).
+

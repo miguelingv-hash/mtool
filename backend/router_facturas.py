@@ -3676,42 +3676,24 @@ async def _comparativa_impl(
     # `$match` para quedarnos con los que NO tienen contraparte
     # comercial. Todo paginado y ordenado en BD. Simétrico al fast-path
     # de solo_comercial.
+    #
+    # iter29 (2026-02): el `$lookup` aplica `filtro_com` completo
+    # (excepto `num_serie_factura`, que se enforce via `$expr`) — así la
+    # definición de "solo en SII" queda coherente con el resumen y los
+    # KPIs del banner. Antes un match comercial excluido por config
+    # (p.ej. `base_imponible=0` con `excluir_comercial_base_cero=True`, o
+    # `tipo_factura != F2` cuando el usuario filtra F2) contaba como
+    # "contraparte válida" en el fast-path pero se excluía del universo
+    # comercial en el resumen → el banner sugería "1 sólo en SII" pero
+    # el listado mostraba 0. Ver test `test_solo_sii_config_iter29.py`.
     if estado == "solo_sii":
-        nif_norm = (
-            str(nif_titular).strip().upper() if nif_titular else None
-        )
-        _plist = (
-            [p.strip() for p in str(periodo).split(",") if p.strip()]
-            if periodo else []
-        )
-        # Condiciones que un doc comercial match debe cumplir para
-        # "descartar" a este SII (validación post-lookup del ámbito).
-        com_extra_conds: list[dict] = []
-        if nif_norm:
-            com_extra_conds.append({"$eq": ["$$c.nif_titular", nif_norm]})
-        if ejercicio:
-            com_extra_conds.append({"$eq": ["$$c.ejercicio", str(ejercicio)]})
-        if len(_plist) == 1:
-            com_extra_conds.append({"$eq": ["$$c.periodo", _plist[0]]})
-        elif len(_plist) > 1:
-            com_extra_conds.append({"$in": ["$$c.periodo", _plist]})
-
-        # ¿Existe algún doc comercial que cumpla las conds del ámbito?
-        # Usamos `$map` + `$anyElementTrue` sobre `_com_docs`. Los
-        # extra_conds están dentro del map ($$c referencia cada elem).
-        if com_extra_conds:
-            has_valid_com = {"$and": [
-                {"$gt": [{"$size": "$_com_docs"}, 0]},
-                {"$anyElementTrue": {
-                    "$map": {
-                        "input": "$_com_docs",
-                        "as": "c",
-                        "in": {"$and": com_extra_conds},
-                    },
-                }},
-            ]}
-        else:
-            has_valid_com = {"$gt": [{"$size": "$_com_docs"}, 0]}
+        # Filtros comerciales a aplicar dentro del $lookup — todos los
+        # criterios de `filtro_com` excepto `num_serie_factura` (que se
+        # enforce via `$expr` con el localField).
+        _com_match_stage = {
+            k: v for k, v in (filtro_com or {}).items()
+            if k != "num_serie_factura"
+        }
 
         SS_SORT_FIELD = {
             "num_serie_factura": "num_serie_factura",
@@ -3722,16 +3704,25 @@ async def _comparativa_impl(
         ss_sort = SS_SORT_FIELD.get(sort_by or "", "num_serie_factura")
         ss_dir = -1 if sort_dir == "desc" else 1
 
+        # $lookup con pipeline: aplica todos los filtros comerciales al
+        # sub-pipeline + iguala num_serie via $expr. `$limit: 1` corta
+        # temprano: solo necesitamos saber si HAY match, no listarlos.
         ss_pipeline: list[dict] = [
             {"$match": filtro_sii},
             {"$lookup": {
                 "from": "facturas_comercial",
-                "localField": "num_serie_factura",
-                "foreignField": "num_serie_factura",
+                "let": {"ns": "$num_serie_factura"},
+                "pipeline": [
+                    {"$match": {
+                        **_com_match_stage,
+                        "$expr": {"$eq": ["$num_serie_factura", "$$ns"]},
+                    }},
+                    {"$limit": 1},
+                    {"$project": {"_id": 1}},
+                ],
                 "as": "_com_docs",
             }},
-            {"$addFields": {"_has_valid_com": has_valid_com}},
-            {"$match": {"_has_valid_com": False}},
+            {"$match": {"_com_docs": {"$size": 0}}},
             {"$facet": {
                 "items": [
                     {"$sort": {ss_sort: ss_dir, "num_serie_factura": 1}},
@@ -3740,7 +3731,6 @@ async def _comparativa_impl(
                     {"$project": {
                         "_id": 0,
                         "_com_docs": 0,
-                        "_has_valid_com": 0,
                         "versiones": 0,
                     }},
                 ],
