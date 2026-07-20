@@ -654,6 +654,15 @@ export default function Comparativa() {
     if (effectivePeriodo) params.periodo = effectivePeriodo;
     if (filtroNumSerieDebounced.trim()) params.num_serie = filtroNumSerieDebounced.trim();
     if (filtroNif !== "__all__") params.nif_titular = filtroNif;
+    // iter31: propagar el filtro de tipos_factura del listado al export
+    // para que el CSV descargado tenga las mismas filas que el usuario
+    // ve en pantalla.
+    if (
+      tiposFacturaSel.length > 0 &&
+      tiposFacturaSel.length < ALL_TIPOS_FACTURA.length
+    ) {
+      params.tipos_factura = tiposFacturaSel.join(",");
+    }
 
     setExporting(true);
     const toastId = toast.loading("Preparando exportación CSV…", {

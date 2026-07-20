@@ -6150,6 +6150,7 @@ async def comparativa_export(
     num_serie: Optional[str] = None,
     estado: Optional[str] = None,
     nif_titular: Optional[str] = None,
+    tipos_factura: Optional[str] = None,
 ):
     """Exporta la comparativa filtrada a CSV (UTF-8 BOM) abrible en Excel.
 
@@ -6161,12 +6162,18 @@ async def comparativa_export(
 
     Esto evita que exports grandes (cientos de miles de filas) saturen
     memoria del backend o el límite de 100s de Cloudflare.
+
+    iter31 (2026-02): se añade el parámetro `tipos_factura` para que el
+    export respete el mismo filtro por tipo (F1, F2, R1, ...) que el
+    listado. Antes exportaba todo el universo → CSV con más filas que
+    las visibles en pantalla.
     """
     config = await _load_comparativa_config()
     filtro_sii, filtro_com = await _build_filtros(
         ejercicio, periodo, num_serie,
         excluir_base_cero=config["excluir_comercial_base_cero"],
         nif_titular=nif_titular,
+        tipos_factura=tipos_factura,
     )
 
     # Cabeceras CSV
