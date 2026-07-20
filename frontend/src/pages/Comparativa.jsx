@@ -1787,15 +1787,22 @@ export default function Comparativa() {
  * Extrae los campos que necesita el endpoint /sii/consulta-unitaria-cert
  * a partir de una fila de la comparativa. Prefiere datos de SII y hace
  * fallback a los del comercial.
+ *
+ * Nota: en LRFactEmitidas AEAT el `nif_emisor` SIEMPRE coincide con el
+ * `nif_titular` (la sociedad emite sus propias facturas). Cuando la fila
+ * proviene sólo del comercial (SIGLO/SAP no guardan `nif_emisor`
+ * explícito) usamos el `nif_titular` como fallback.
  */
 function buildFacturaFromRow(row) {
   if (!row) return null;
   const sii = row.sii || {};
   const com = row.comercial || {};
+  const nifTitular = sii.nif_titular || com.nif_titular;
   return {
     num_serie_factura: row.num_serie_factura,
-    nif_titular: sii.nif_titular || com.nif_titular,
-    nif_emisor: sii.nif_emisor || com.nif_emisor,
+    nif_titular: nifTitular,
+    // Fallback: para facturas emitidas, emisor = titular.
+    nif_emisor: sii.nif_emisor || com.nif_emisor || nifTitular,
     ejercicio: String(sii.ejercicio || com.ejercicio || ""),
     periodo: String(sii.periodo || com.periodo || ""),
     fecha_expedicion: sii.fecha_expedicion || com.fecha_expedicion,
